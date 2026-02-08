@@ -3,7 +3,7 @@
 //! パーサーが構築する木構造を定義する。
 //! 各ノードはCの文法要素に対応し、ソースの構造を忠実に表現する。
 //!
-//! # 現在サポートする文法（Chapter 7）
+//! # 現在サポートする文法（Chapter 8）
 //! ```text
 //! <program>        ::= <function>
 //! <function>       ::= "int" <identifier> "(" "void" ")" "{" <block_item>* "}"
@@ -14,6 +14,12 @@
 //!                    | ";"
 //!                    | "if" "(" <exp> ")" <statement> ("else" <statement>)?
 //!                    | "{" <block_item>* "}"
+//!                    | "while" "(" <exp> ")" <statement>
+//!                    | "do" <statement> "while" "(" <exp> ")" ";"
+//!                    | "for" "(" <for_init> <exp>? ";" <exp>? ")" <statement>
+//!                    | "break" ";"
+//!                    | "continue" ";"
+//! <for_init>       ::= <declaration> | <exp>? ";"
 //! <exp>            ::= <assignment> ("," <assignment>)*       ← Ch7: カンマ演算子
 //! <assignment>     ::= <identifier> <assign_op> <assignment>  ← Ch7: 複合代入
 //!                    | <conditional>
@@ -71,6 +77,7 @@ pub struct Declaration {
 ///
 /// Chapter 5 で式文と空文が追加された。
 /// Chapter 6 で if文と複合文が追加された。
+/// Chapter 8 で while, do-while, for, break, continue が追加された。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     /// `return <expr>;` — 式の値を返して関数を終了する
@@ -87,6 +94,36 @@ pub enum Statement {
     },
     /// `{ <block_item>* }` — 複合文（Chapter 6）。スコープを導入する。
     Compound(Vec<BlockItem>),
+    /// `while (<cond>) <body>` — whileループ（Chapter 8）
+    While {
+        condition: Expr,
+        body: Box<Statement>,
+    },
+    /// `do <body> while (<cond>);` — do-whileループ（Chapter 8）
+    DoWhile {
+        body: Box<Statement>,
+        condition: Expr,
+    },
+    /// `for (<init> <cond>? ; <post>?) <body>` — forループ（Chapter 8）
+    For {
+        init: ForInit,
+        condition: Option<Expr>,
+        post: Option<Expr>,
+        body: Box<Statement>,
+    },
+    /// `break;` — ループ脱出（Chapter 8）
+    Break,
+    /// `continue;` — ループ継続（Chapter 8）
+    Continue,
+}
+
+/// forループの初期化部（Chapter 8）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForInit {
+    /// 宣言（例: `int i = 0;`）
+    Declaration(Declaration),
+    /// 式（例: `i = 0;`）または空（`;`）
+    Expression(Option<Expr>),
 }
 
 /// 式（Expression）。

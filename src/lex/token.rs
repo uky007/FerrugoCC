@@ -34,6 +34,16 @@ pub enum TokenKind {
     KwIf,
     /// `else` キーワード — 条件分岐の偽側（Chapter 6）
     KwElse,
+    /// `while` キーワード — whileループ（Chapter 8）
+    KwWhile,
+    /// `do` キーワード — do-whileループ（Chapter 8）
+    KwDo,
+    /// `for` キーワード — forループ（Chapter 8）
+    KwFor,
+    /// `break` キーワード — ループ脱出（Chapter 8）
+    KwBreak,
+    /// `continue` キーワード — ループ継続（Chapter 8）
+    KwContinue,
 
     // ── 演算子 ──（Chapter 2 で追加）
     /// `-` — 単項マイナス / 二項減算

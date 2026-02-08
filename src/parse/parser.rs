@@ -9,7 +9,7 @@
 //! - `peek()` で先読み、`advance()` で消費、`expect()` で特定トークンを要求
 //! - 各 `parse_*` メソッドが文法規則に対応
 //!
-//! # 対応する文法（Chapter 7）
+//! # 対応する文法（Chapter 8）
 //! ```text
 //! <program>        ::= <function>
 //! <function>       ::= "int" <identifier> "(" "void" ")" "{" <block_item>* "}"
@@ -20,6 +20,12 @@
 //!                    | ";"
 //!                    | "if" "(" <exp> ")" <statement> ("else" <statement>)?
 //!                    | "{" <block_item>* "}"
+//!                    | "while" "(" <exp> ")" <statement>
+//!                    | "do" <statement> "while" "(" <exp> ")" ";"
+//!                    | "for" "(" <for_init> <exp>? ";" <exp>? ")" <statement>
+//!                    | "break" ";"
+//!                    | "continue" ";"
+//! <for_init>       ::= <declaration> | <exp>? ";"
 //! <exp>            ::= <assignment> ("," <assignment>)*
 //! <assignment>     ::= <identifier> <assign_op> <assignment> | <conditional>
 //! <assign_op>      ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="
@@ -38,7 +44,7 @@
 
 use crate::error::{CompileError, Result};
 use crate::lex::{Token, TokenKind};
-use super::ast::{Program, Function, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp};
+use super::ast::{Program, Function, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit};
 
 /// トークン列を構文解析して AST に変換する。
 ///
@@ -212,6 +218,74 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(&TokenKind::CloseBrace)?;
                 Ok(Statement::Compound(items))
+            }
+            // Chapter 8: while
+            TokenKind::KwWhile => {
+                self.advance()?;
+                self.expect(&TokenKind::OpenParen)?;
+                let condition = self.parse_expr()?;
+                self.expect(&TokenKind::CloseParen)?;
+                let body = Box::new(self.parse_statement()?);
+                Ok(Statement::While { condition, body })
+            }
+            // Chapter 8: do-while
+            TokenKind::KwDo => {
+                self.advance()?;
+                let body = Box::new(self.parse_statement()?);
+                self.expect(&TokenKind::KwWhile)?;
+                self.expect(&TokenKind::OpenParen)?;
+                let condition = self.parse_expr()?;
+                self.expect(&TokenKind::CloseParen)?;
+                self.expect(&TokenKind::Semicolon)?;
+                Ok(Statement::DoWhile { body, condition })
+            }
+            // Chapter 8: for
+            TokenKind::KwFor => {
+                self.advance()?;
+                self.expect(&TokenKind::OpenParen)?;
+
+                // for-init: 宣言 or 式文 or 空文
+                let init = if self.peek()?.kind == TokenKind::KwInt {
+                    ForInit::Declaration(self.parse_declaration()?)
+                } else if self.peek()?.kind == TokenKind::Semicolon {
+                    self.advance()?;
+                    ForInit::Expression(None)
+                } else {
+                    let expr = self.parse_expr()?;
+                    self.expect(&TokenKind::Semicolon)?;
+                    ForInit::Expression(Some(expr))
+                };
+
+                // condition（省略可能）
+                let condition = if self.peek()?.kind != TokenKind::Semicolon {
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                self.expect(&TokenKind::Semicolon)?;
+
+                // post（省略可能）
+                let post = if self.peek()?.kind != TokenKind::CloseParen {
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                self.expect(&TokenKind::CloseParen)?;
+
+                let body = Box::new(self.parse_statement()?);
+                Ok(Statement::For { init, condition, post, body })
+            }
+            // Chapter 8: break
+            TokenKind::KwBreak => {
+                self.advance()?;
+                self.expect(&TokenKind::Semicolon)?;
+                Ok(Statement::Break)
+            }
+            // Chapter 8: continue
+            TokenKind::KwContinue => {
+                self.advance()?;
+                self.expect(&TokenKind::Semicolon)?;
+                Ok(Statement::Continue)
             }
             _ => {
                 let expr = self.parse_expr()?;
@@ -1199,6 +1273,101 @@ mod tests {
                     Box::new(Expr::Assign("b".to_string(), Box::new(Expr::Constant(5))))
                 )
             ))
+        );
+    }
+
+    // ── Chapter 8 テスト ──
+
+    /// while文: `while (1) return 0;`
+    #[test]
+    fn parse_while_statement() {
+        let tokens = lex::lex("int main(void) { while (1) return 0; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(
+            program.function.body[0],
+            BlockItem::Statement(Statement::While {
+                condition: Expr::Constant(1),
+                body: Box::new(Statement::Return(Expr::Constant(0))),
+            })
+        );
+    }
+
+    /// do-while文: `do { a = 1; } while (0);`
+    #[test]
+    fn parse_do_while_statement() {
+        let tokens = lex::lex("int main(void) { int a; do { a = 1; } while (0); }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(
+            program.function.body[1],
+            BlockItem::Statement(Statement::DoWhile {
+                body: Box::new(Statement::Compound(vec![
+                    BlockItem::Statement(Statement::Expression(
+                        Expr::Assign("a".to_string(), Box::new(Expr::Constant(1)))
+                    )),
+                ])),
+                condition: Expr::Constant(0),
+            })
+        );
+    }
+
+    /// for文（宣言付き）: `for (int i = 0; i < 5; i++) a++;`
+    #[test]
+    fn parse_for_with_declaration() {
+        let tokens = lex::lex("int main(void) { int a; for (int i = 0; i < 5; i++) a++; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        if let BlockItem::Statement(Statement::For { init, condition, post, body: _ }) = &program.function.body[1] {
+            assert_eq!(*init, ForInit::Declaration(Declaration {
+                name: "i".to_string(),
+                init: Some(Expr::Constant(0)),
+            }));
+            assert!(condition.is_some());
+            assert!(post.is_some());
+        } else {
+            panic!("expected For statement");
+        }
+    }
+
+    /// for文（全省略）: `for (;;) break;`
+    #[test]
+    fn parse_for_empty() {
+        let tokens = lex::lex("int main(void) { for (;;) break; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(
+            program.function.body[0],
+            BlockItem::Statement(Statement::For {
+                init: ForInit::Expression(None),
+                condition: None,
+                post: None,
+                body: Box::new(Statement::Break),
+            })
+        );
+    }
+
+    /// break文
+    #[test]
+    fn parse_break_statement() {
+        let tokens = lex::lex("int main(void) { while (1) break; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(
+            program.function.body[0],
+            BlockItem::Statement(Statement::While {
+                condition: Expr::Constant(1),
+                body: Box::new(Statement::Break),
+            })
+        );
+    }
+
+    /// continue文
+    #[test]
+    fn parse_continue_statement() {
+        let tokens = lex::lex("int main(void) { while (1) continue; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(
+            program.function.body[0],
+            BlockItem::Statement(Statement::While {
+                condition: Expr::Constant(1),
+                body: Box::new(Statement::Continue),
+            })
         );
     }
 }

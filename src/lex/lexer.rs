@@ -234,8 +234,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "int"    => TokenKind::KwInt,
                 "void"   => TokenKind::KwVoid,
                 "return" => TokenKind::KwReturn,
-                "if"     => TokenKind::KwIf,
-                "else"   => TokenKind::KwElse,
+                "if"       => TokenKind::KwIf,
+                "else"     => TokenKind::KwElse,
+                "while"    => TokenKind::KwWhile,
+                "do"       => TokenKind::KwDo,
+                "for"      => TokenKind::KwFor,
+                "break"    => TokenKind::KwBreak,
+                "continue" => TokenKind::KwContinue,
                 _        => TokenKind::Identifier(text.to_string()),
             };
             tokens.push(Token {
@@ -531,6 +536,23 @@ mod tests {
                 &TokenKind::IntLiteral(2),
                 &TokenKind::Comma,
                 &TokenKind::IntLiteral(3),
+            ]
+        );
+    }
+
+    /// Chapter 8: ループ・制御フローキーワードのトークン化
+    #[test]
+    fn lex_loop_keywords() {
+        let tokens = lex("while do for break continue").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &TokenKind::KwWhile,
+                &TokenKind::KwDo,
+                &TokenKind::KwFor,
+                &TokenKind::KwBreak,
+                &TokenKind::KwContinue,
             ]
         );
     }

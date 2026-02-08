@@ -30,10 +30,16 @@
 
 use std::collections::{HashMap, HashSet};
 use crate::error::{CompileError, Result};
-use crate::parse::ast::{Program, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp};
+use crate::parse::ast::{Program, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit};
 use super::asm_ast::{
     AsmProgram, AsmFunction, Instruction, Operand, Reg, AsmUnaryOp, AsmBinaryOp, CondCode,
 };
+
+/// ループ内の break/continue ジャンプ先ラベル（Chapter 8）。
+struct LoopLabels {
+    break_label: String,
+    continue_label: String,
+}
 
 /// C の AST をアセンブリ AST に変換する。
 pub fn generate(program: &Program) -> Result<AsmProgram> {
@@ -53,7 +59,7 @@ fn generate_function(func: &crate::parse::ast::Function, label_counter: &mut usi
 
     let mut scope_decls: HashSet<String> = HashSet::new();
     for item in &func.body {
-        let instrs = generate_block_item(item, &mut var_map, &mut next_offset, label_counter, Some(&mut scope_decls))?;
+        let instrs = generate_block_item(item, &mut var_map, &mut next_offset, label_counter, Some(&mut scope_decls), None)?;
         instructions.extend(instrs);
     }
 
@@ -77,9 +83,10 @@ fn generate_block_item(
     next_offset: &mut i32,
     label_counter: &mut usize,
     scope_decls: Option<&mut HashSet<String>>,
+    loop_labels: Option<&LoopLabels>,
 ) -> Result<Vec<Instruction>> {
     match item {
-        BlockItem::Statement(stmt) => generate_statement(stmt, var_map, next_offset, label_counter),
+        BlockItem::Statement(stmt) => generate_statement(stmt, var_map, next_offset, label_counter, loop_labels),
         BlockItem::Declaration(decl) => generate_declaration(decl, var_map, next_offset, label_counter, scope_decls),
     }
 }
@@ -125,6 +132,7 @@ fn generate_statement(
     var_map: &mut HashMap<String, i32>,
     next_offset: &mut i32,
     label_counter: &mut usize,
+    loop_labels: Option<&LoopLabels>,
 ) -> Result<Vec<Instruction>> {
     match stmt {
         Statement::Return(expr) => {
@@ -153,15 +161,15 @@ fn generate_statement(
                 let end_label = format!(".Lif_end{n}");
 
                 instrs.push(Instruction::JmpCC(CondCode::E, else_label.clone()));
-                instrs.extend(generate_statement(then_branch, var_map, next_offset, label_counter)?);
+                instrs.extend(generate_statement(then_branch, var_map, next_offset, label_counter, loop_labels)?);
                 instrs.push(Instruction::Jmp(end_label.clone()));
                 instrs.push(Instruction::Label(else_label));
-                instrs.extend(generate_statement(else_stmt, var_map, next_offset, label_counter)?);
+                instrs.extend(generate_statement(else_stmt, var_map, next_offset, label_counter, loop_labels)?);
                 instrs.push(Instruction::Label(end_label));
             } else {
                 let end_label = format!(".Lif_end{n}");
                 instrs.push(Instruction::JmpCC(CondCode::E, end_label.clone()));
-                instrs.extend(generate_statement(then_branch, var_map, next_offset, label_counter)?);
+                instrs.extend(generate_statement(then_branch, var_map, next_offset, label_counter, loop_labels)?);
                 instrs.push(Instruction::Label(end_label));
             }
             Ok(instrs)
@@ -171,9 +179,130 @@ fn generate_statement(
             let mut scope_decls: HashSet<String> = HashSet::new();
             let mut instrs = Vec::new();
             for item in items {
-                instrs.extend(generate_block_item(item, &mut inner_map, next_offset, label_counter, Some(&mut scope_decls))?);
+                instrs.extend(generate_block_item(item, &mut inner_map, next_offset, label_counter, Some(&mut scope_decls), loop_labels)?);
             }
             Ok(instrs)
+        }
+        // Chapter 8: while ループ
+        Statement::While { condition, body } => {
+            let n = *label_counter;
+            *label_counter += 1;
+            let start_label = format!(".Lwhile_start{n}");
+            let end_label = format!(".Lwhile_end{n}");
+
+            let labels = LoopLabels {
+                break_label: end_label.clone(),
+                continue_label: start_label.clone(),
+            };
+
+            let mut instrs = vec![Instruction::Label(start_label.clone())];
+            instrs.extend(generate_expr(condition, var_map, label_counter)?);
+            instrs.push(Instruction::Cmp {
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::JmpCC(CondCode::E, end_label.clone()));
+            instrs.extend(generate_statement(body, var_map, next_offset, label_counter, Some(&labels))?);
+            instrs.push(Instruction::Jmp(start_label));
+            instrs.push(Instruction::Label(end_label));
+            Ok(instrs)
+        }
+        // Chapter 8: do-while ループ
+        Statement::DoWhile { body, condition } => {
+            let n = *label_counter;
+            *label_counter += 1;
+            let start_label = format!(".Ldo_start{n}");
+            let continue_label = format!(".Ldo_continue{n}");
+            let end_label = format!(".Ldo_end{n}");
+
+            let labels = LoopLabels {
+                break_label: end_label.clone(),
+                continue_label: continue_label.clone(),
+            };
+
+            let mut instrs = vec![Instruction::Label(start_label.clone())];
+            instrs.extend(generate_statement(body, var_map, next_offset, label_counter, Some(&labels))?);
+            instrs.push(Instruction::Label(continue_label));
+            instrs.extend(generate_expr(condition, var_map, label_counter)?);
+            instrs.push(Instruction::Cmp {
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::JmpCC(CondCode::NE, start_label));
+            instrs.push(Instruction::Label(end_label));
+            Ok(instrs)
+        }
+        // Chapter 8: for ループ
+        Statement::For { init, condition, post, body } => {
+            let n = *label_counter;
+            *label_counter += 1;
+            let start_label = format!(".Lfor_start{n}");
+            let continue_label = format!(".Lfor_continue{n}");
+            let end_label = format!(".Lfor_end{n}");
+
+            let labels = LoopLabels {
+                break_label: end_label.clone(),
+                continue_label: continue_label.clone(),
+            };
+
+            // for の init が宣言の場合、新しいスコープが必要
+            let mut inner_map = var_map.clone();
+            let map_ref: &mut HashMap<String, i32> = match init {
+                ForInit::Declaration(_) => &mut inner_map,
+                ForInit::Expression(_) => var_map,
+            };
+
+            let mut instrs = Vec::new();
+
+            // init
+            match init {
+                ForInit::Declaration(decl) => {
+                    instrs.extend(generate_declaration(decl, map_ref, next_offset, label_counter, None)?);
+                }
+                ForInit::Expression(Some(expr)) => {
+                    instrs.extend(generate_expr(expr, map_ref, label_counter)?);
+                }
+                ForInit::Expression(None) => {}
+            }
+
+            instrs.push(Instruction::Label(start_label.clone()));
+
+            // condition
+            if let Some(cond) = condition {
+                instrs.extend(generate_expr(cond, map_ref, label_counter)?);
+                instrs.push(Instruction::Cmp {
+                    src: Operand::Imm(0),
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::JmpCC(CondCode::E, end_label.clone()));
+            }
+
+            // body
+            instrs.extend(generate_statement(body, map_ref, next_offset, label_counter, Some(&labels))?);
+
+            // continue target + post
+            instrs.push(Instruction::Label(continue_label));
+            if let Some(post_expr) = post {
+                instrs.extend(generate_expr(post_expr, map_ref, label_counter)?);
+            }
+
+            instrs.push(Instruction::Jmp(start_label));
+            instrs.push(Instruction::Label(end_label));
+            Ok(instrs)
+        }
+        // Chapter 8: break
+        Statement::Break => {
+            let labels = loop_labels.ok_or_else(|| {
+                CompileError::CodegenError("break outside loop".to_string())
+            })?;
+            Ok(vec![Instruction::Jmp(labels.break_label.clone())])
+        }
+        // Chapter 8: continue
+        Statement::Continue => {
+            let labels = loop_labels.ok_or_else(|| {
+                CompileError::CodegenError("continue outside loop".to_string())
+            })?;
+            Ok(vec![Instruction::Jmp(labels.continue_label.clone())])
         }
     }
 }
@@ -1328,5 +1457,207 @@ mod tests {
         };
         // ネストスコープでのシャドーイングは許可される
         assert!(generate(&program).is_ok());
+    }
+
+    // ── Chapter 8 テスト ──
+
+    /// Chapter 8: while ループの基本コード生成
+    #[test]
+    fn generate_while_loop() {
+        let program = Program {
+            function: Function {
+                name: "main".to_string(),
+                body: vec![
+                    BlockItem::Declaration(Declaration {
+                        name: "a".to_string(),
+                        init: Some(Expr::Constant(0)),
+                    }),
+                    BlockItem::Statement(Statement::While {
+                        condition: Expr::Binary(
+                            BinaryOp::LessThan,
+                            Box::new(Expr::Var("a".to_string())),
+                            Box::new(Expr::Constant(5)),
+                        ),
+                        body: Box::new(Statement::Expression(
+                            Expr::Assign("a".to_string(), Box::new(Expr::Binary(
+                                BinaryOp::Add,
+                                Box::new(Expr::Var("a".to_string())),
+                                Box::new(Expr::Constant(1)),
+                            )))
+                        )),
+                    }),
+                    BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
+                ],
+            },
+        };
+        let asm = generate(&program).unwrap();
+        assert!(!asm.function.instructions.is_empty());
+        // ラベルが正しく生成されることを確認
+        assert!(asm.function.instructions.contains(&Instruction::Label(".Lwhile_start0".to_string())));
+        assert!(asm.function.instructions.contains(&Instruction::Label(".Lwhile_end0".to_string())));
+    }
+
+    /// Chapter 8: do-while ループの基本コード生成
+    #[test]
+    fn generate_do_while_loop() {
+        let program = Program {
+            function: Function {
+                name: "main".to_string(),
+                body: vec![
+                    BlockItem::Declaration(Declaration {
+                        name: "a".to_string(),
+                        init: Some(Expr::Constant(0)),
+                    }),
+                    BlockItem::Statement(Statement::DoWhile {
+                        body: Box::new(Statement::Expression(
+                            Expr::Assign("a".to_string(), Box::new(Expr::Binary(
+                                BinaryOp::Add,
+                                Box::new(Expr::Var("a".to_string())),
+                                Box::new(Expr::Constant(1)),
+                            )))
+                        )),
+                        condition: Expr::Binary(
+                            BinaryOp::LessThan,
+                            Box::new(Expr::Var("a".to_string())),
+                            Box::new(Expr::Constant(5)),
+                        ),
+                    }),
+                    BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
+                ],
+            },
+        };
+        let asm = generate(&program).unwrap();
+        assert!(!asm.function.instructions.is_empty());
+        assert!(asm.function.instructions.contains(&Instruction::Label(".Ldo_start0".to_string())));
+        assert!(asm.function.instructions.contains(&Instruction::Label(".Ldo_continue0".to_string())));
+        assert!(asm.function.instructions.contains(&Instruction::Label(".Ldo_end0".to_string())));
+    }
+
+    /// Chapter 8: for ループの基本コード生成
+    #[test]
+    fn generate_for_loop() {
+        let program = Program {
+            function: Function {
+                name: "main".to_string(),
+                body: vec![
+                    BlockItem::Declaration(Declaration {
+                        name: "a".to_string(),
+                        init: Some(Expr::Constant(0)),
+                    }),
+                    BlockItem::Statement(Statement::For {
+                        init: ForInit::Declaration(Declaration {
+                            name: "i".to_string(),
+                            init: Some(Expr::Constant(0)),
+                        }),
+                        condition: Some(Expr::Binary(
+                            BinaryOp::LessThan,
+                            Box::new(Expr::Var("i".to_string())),
+                            Box::new(Expr::Constant(5)),
+                        )),
+                        post: Some(Expr::Assign("i".to_string(), Box::new(Expr::Binary(
+                            BinaryOp::Add,
+                            Box::new(Expr::Var("i".to_string())),
+                            Box::new(Expr::Constant(1)),
+                        )))),
+                        body: Box::new(Statement::Expression(
+                            Expr::Assign("a".to_string(), Box::new(Expr::Binary(
+                                BinaryOp::Add,
+                                Box::new(Expr::Var("a".to_string())),
+                                Box::new(Expr::Constant(1)),
+                            )))
+                        )),
+                    }),
+                    BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
+                ],
+            },
+        };
+        let asm = generate(&program).unwrap();
+        assert!(!asm.function.instructions.is_empty());
+        assert!(asm.function.instructions.contains(&Instruction::Label(".Lfor_start0".to_string())));
+        assert!(asm.function.instructions.contains(&Instruction::Label(".Lfor_continue0".to_string())));
+        assert!(asm.function.instructions.contains(&Instruction::Label(".Lfor_end0".to_string())));
+    }
+
+    /// Chapter 8: break はループ内でのみ使用可能
+    #[test]
+    fn generate_break_outside_loop_error() {
+        let program = Program {
+            function: Function {
+                name: "main".to_string(),
+                body: vec![
+                    BlockItem::Statement(Statement::Break),
+                ],
+            },
+        };
+        let result = generate(&program);
+        assert!(result.is_err());
+    }
+
+    /// Chapter 8: continue はループ内でのみ使用可能
+    #[test]
+    fn generate_continue_outside_loop_error() {
+        let program = Program {
+            function: Function {
+                name: "main".to_string(),
+                body: vec![
+                    BlockItem::Statement(Statement::Continue),
+                ],
+            },
+        };
+        let result = generate(&program);
+        assert!(result.is_err());
+    }
+
+    /// Chapter 8: break inside while generates correct jump
+    #[test]
+    fn generate_break_in_while() {
+        let program = Program {
+            function: Function {
+                name: "main".to_string(),
+                body: vec![
+                    BlockItem::Statement(Statement::While {
+                        condition: Expr::Constant(1),
+                        body: Box::new(Statement::Break),
+                    }),
+                    BlockItem::Statement(Statement::Return(Expr::Constant(0))),
+                ],
+            },
+        };
+        let asm = generate(&program).unwrap();
+        // break should generate a Jmp to the while_end label
+        assert!(asm.function.instructions.contains(&Instruction::Jmp(".Lwhile_end0".to_string())));
+    }
+
+    /// Chapter 8: continue inside while generates correct jump
+    #[test]
+    fn generate_continue_in_while() {
+        let program = Program {
+            function: Function {
+                name: "main".to_string(),
+                body: vec![
+                    BlockItem::Declaration(Declaration {
+                        name: "a".to_string(),
+                        init: Some(Expr::Constant(0)),
+                    }),
+                    BlockItem::Statement(Statement::While {
+                        condition: Expr::Binary(
+                            BinaryOp::LessThan,
+                            Box::new(Expr::Var("a".to_string())),
+                            Box::new(Expr::Constant(5)),
+                        ),
+                        body: Box::new(Statement::Compound(vec![
+                            BlockItem::Statement(Statement::Expression(
+                                Expr::PostfixIncrement("a".to_string())
+                            )),
+                            BlockItem::Statement(Statement::Continue),
+                        ])),
+                    }),
+                    BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
+                ],
+            },
+        };
+        let asm = generate(&program).unwrap();
+        // continue in while should jump to while_start
+        assert!(asm.function.instructions.contains(&Instruction::Jmp(".Lwhile_start0".to_string())));
     }
 }
