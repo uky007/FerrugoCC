@@ -1,0 +1,136 @@
+//! トークンの定義
+//!
+//! 字句解析（Lexer）が出力するトークンの型を定義する。
+//! ソースコードの各要素（キーワード、識別子、リテラル、記号）は
+//! `TokenKind` 列挙型のバリアントとして表現される。
+//!
+//! # 構造
+//! - `TokenKind` — トークンの種類（値を持つものもある）
+//! - `Span` — ソースコード中の位置情報（エラー報告用）
+//! - `Token` — `TokenKind` と `Span` の組
+
+/// トークンの種類。
+///
+/// Cソースコードの各字句要素に対応する。
+/// リテラルや識別子はデータを保持し、キーワードや記号は単純なバリアント。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenKind {
+    // ── リテラル ──
+    /// 整数リテラル（例: `42`, `0`）。値そのものを保持する。
+    IntLiteral(i64),
+
+    // ── 識別子 ──
+    /// 識別子（例: `main`, `foo`）。名前の文字列を保持する。
+    Identifier(String),
+
+    // ── キーワード ──
+    /// `int` キーワード — 関数の戻り値の型
+    KwInt,
+    /// `void` キーワード — 引数なしを示す
+    KwVoid,
+    /// `return` キーワード — 関数からの復帰
+    KwReturn,
+    /// `if` キーワード — 条件分岐（Chapter 6）
+    KwIf,
+    /// `else` キーワード — 条件分岐の偽側（Chapter 6）
+    KwElse,
+
+    // ── 演算子 ──（Chapter 2 で追加）
+    /// `-` — 単項マイナス / 二項減算
+    Minus,
+    /// `~` — ビット反転（ビット単位の補数）
+    Tilde,
+    /// `!` — 論理否定
+    Bang,
+
+    // ── 演算子 ──（Chapter 3 で追加）
+    /// `+` — 二項加算
+    Plus,
+    /// `*` — 二項乗算
+    Star,
+    /// `/` — 二項除算
+    Slash,
+    /// `%` — 二項剰余
+    Percent,
+
+    // ── 演算子 ──（Chapter 4 で追加）
+    /// `<` — 小なり
+    Less,
+    /// `<=` — 小なりイコール
+    LessEqual,
+    /// `>` — 大なり
+    Greater,
+    /// `>=` — 大なりイコール
+    GreaterEqual,
+    /// `==` — 等価
+    EqualEqual,
+    /// `!=` — 非等価
+    NotEqual,
+    /// `&&` — 論理AND
+    AndAnd,
+    /// `||` — 論理OR
+    OrOr,
+
+    // ── 演算子 ──（Chapter 5 で追加）
+    /// `=` — 代入
+    Assign,
+
+    // ── 演算子 ──（Chapter 6 で追加）
+    /// `?` — 三項演算子の条件部
+    Question,
+    /// `:` — 三項演算子の区切り
+    Colon,
+
+    // ── 演算子 ──（Chapter 7 で追加）
+    /// `+=` — 複合加算代入
+    PlusAssign,
+    /// `-=` — 複合減算代入
+    MinusAssign,
+    /// `*=` — 複合乗算代入
+    StarAssign,
+    /// `/=` — 複合除算代入
+    SlashAssign,
+    /// `%=` — 複合剰余代入
+    PercentAssign,
+    /// `++` — インクリメント
+    PlusPlus,
+    /// `--` — デクリメント
+    MinusMinus,
+    /// `,` — カンマ演算子
+    Comma,
+
+    // ── 区切り記号 ──
+    /// `(`
+    OpenParen,
+    /// `)`
+    CloseParen,
+    /// `{`
+    OpenBrace,
+    /// `}`
+    CloseBrace,
+    /// `;`
+    Semicolon,
+}
+
+/// ソースコード中の位置情報。
+///
+/// エラーメッセージで「何行目の何列目」と報告するために使う。
+/// `offset` はソース先頭からのバイト位置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    /// ソース先頭からのバイトオフセット
+    pub offset: usize,
+    /// トークンのバイト長
+    pub len: usize,
+    /// 行番号（1始まり）
+    pub line: usize,
+    /// 列番号（1始まり）
+    pub column: usize,
+}
+
+/// 字句解析の出力単位。トークンの種類と位置情報を持つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
+}
