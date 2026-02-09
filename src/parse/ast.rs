@@ -3,13 +3,16 @@
 //! パーサーが構築する木構造を定義する。
 //! 各ノードはCの文法要素に対応し、ソースの構造を忠実に表現する。
 //!
-//! # 現在サポートする文法（Chapter 9）
+//! # 現在サポートする文法（Chapter 10）
 //! ```text
-//! <program>        ::= <function_decl>*                        ← Ch9: 複数関数
-//! <function_decl>  ::= "int" <identifier> "(" <params> ")" ( "{" <block_item>* "}" | ";" )
+//! <program>        ::= <top_level_decl>*                      ← Ch10: 関数+変数
+//! <top_level_decl> ::= <function_decl> | <variable_decl>
+//! <function_decl>  ::= <storage_class>? "int" <id> "(" <params> ")" ( "{" <block>* "}" | ";" )
+//! <variable_decl>  ::= <storage_class>? "int" <id> ("=" <expr>)? ";"
+//! <storage_class>  ::= "static" | "extern"
 //! <params>         ::= "void" | "int" <identifier> ("," "int" <identifier>)*
 //! <block_item>     ::= <statement> | <declaration>
-//! <declaration>    ::= "int" <identifier> ("=" <assignment>)? ";"
+//! <declaration>    ::= <storage_class>? "int" <identifier> ("=" <assignment>)? ";"
 //! <statement>      ::= "return" <exp> ";"
 //!                    | <exp> ";"
 //!                    | ";"
@@ -41,21 +44,41 @@
 //! <args>           ::= <assignment> ("," <assignment>)*        ← カンマ演算子と区別
 //! ```
 
-/// プログラム全体。複数の関数宣言/定義を持つ（Chapter 9）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Program {
-    pub functions: Vec<FunctionDecl>,
+/// ストレージクラス指定子（Chapter 10）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageClass {
+    /// `static` — 静的ストレージ / 内部リンケージ
+    Static,
+    /// `extern` — 外部リンケージ
+    Extern,
 }
 
-/// 関数宣言/定義（Chapter 9）。
+/// トップレベル宣言（Chapter 10）。関数宣言/定義または変数宣言。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopLevelDecl {
+    /// 関数宣言/定義
+    Function(FunctionDecl),
+    /// 変数宣言
+    Variable(Declaration),
+}
+
+/// プログラム全体。トップレベル宣言の列を持つ（Chapter 10）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program {
+    pub declarations: Vec<TopLevelDecl>,
+}
+
+/// 関数宣言/定義（Chapter 9, 10）。
 ///
 /// - `params`: パラメータ名のリスト（戻り値の型は常に `int`）
 /// - `body`: `Some(...)` なら関数定義、`None` なら前方宣言（プロトタイプ）
+/// - `storage_class`: オプショナルのストレージクラス指定子（Chapter 10）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDecl {
     pub name: String,
     pub params: Vec<String>,
     pub body: Option<Vec<BlockItem>>,
+    pub storage_class: Option<StorageClass>,
 }
 
 /// ブロック要素（Chapter 5 で追加）。
@@ -69,13 +92,15 @@ pub enum BlockItem {
     Declaration(Declaration),
 }
 
-/// 変数宣言（Chapter 5 で追加）。
+/// 変数宣言（Chapter 5, 10 で拡張）。
 ///
 /// `int <name>;` または `int <name> = <expr>;`
+/// Chapter 10: オプショナルのストレージクラス指定子を追加。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declaration {
     pub name: String,
     pub init: Option<Expr>,
+    pub storage_class: Option<StorageClass>,
 }
 
 /// 文（Statement）。

@@ -44,6 +44,10 @@ pub enum TokenKind {
     KwBreak,
     /// `continue` キーワード — ループ継続（Chapter 8）
     KwContinue,
+    /// `static` キーワード — 静的ストレージ/内部リンケージ（Chapter 10）
+    KwStatic,
+    /// `extern` キーワード — 外部リンケージ（Chapter 10）
+    KwExtern,
 
     // ── 演算子 ──（Chapter 2 で追加）
     /// `-` — 単項マイナス / 二項減算

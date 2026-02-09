@@ -18,14 +18,17 @@ use std::fmt::Write;
 
 use crate::error::{CompileError, Result};
 use crate::codegen::asm_ast::{
-    AsmProgram, Instruction, Operand, Reg, AsmUnaryOp, AsmBinaryOp, CondCode,
+    AsmProgram, AsmStaticVar, Instruction, Operand, Reg, AsmUnaryOp, AsmBinaryOp, CondCode,
 };
 
-/// アセンブリ AST をテキストに変換する。
+/// アセンブリ AST をテキストに変換する（Chapter 10: 静的変数対応）。
 pub fn emit(program: &AsmProgram) -> Result<String> {
     let mut out = String::new();
     for func in &program.functions {
         emit_function(&mut out, func)?;
+    }
+    for var in &program.static_vars {
+        emit_static_var(&mut out, var)?;
     }
     // スタック非実行セクション（セキュリティ慣習）
     writeln!(out, "    .section .note.GNU-stack,\"\",@progbits")
@@ -33,14 +36,16 @@ pub fn emit(program: &AsmProgram) -> Result<String> {
     Ok(out)
 }
 
-/// 関数のアセンブリ出力。
+/// 関数のアセンブリ出力（Chapter 10: 条件付き .globl）。
 ///
-/// `.globl` ディレクティブでシンボルを外部公開し、
-/// ラベルを出力してから、プロローグ→命令列を書き出す。
+/// `global` が true のとき `.globl` ディレクティブでシンボルを外部公開する。
+/// `static` 関数は `global: false` なので `.globl` を出力しない。
 fn emit_function(out: &mut String, func: &crate::codegen::asm_ast::AsmFunction) -> Result<()> {
-    // .globl で関数シンボルをリンカに公開（main を見つけられるようにする）
-    writeln!(out, "    .globl {}", func.name)
-        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    // .globl で関数シンボルをリンカに公開（static 関数は除く）
+    if func.global {
+        writeln!(out, "    .globl {}", func.name)
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    }
     // 関数ラベル
     writeln!(out, "{}:", func.name)
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
@@ -55,6 +60,37 @@ fn emit_function(out: &mut String, func: &crate::codegen::asm_ast::AsmFunction) 
         emit_instruction(out, instr)?;
     }
 
+    Ok(())
+}
+
+/// 静的変数のアセンブリ出力（Chapter 10）。
+///
+/// 初期値が 0 の場合は `.bss` セクション、非0 の場合は `.data` セクションに配置する。
+/// `global` が true のとき `.globl` ディレクティブを出力する。
+fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
+    if var.global {
+        writeln!(out, "    .globl {}", var.name)
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    }
+    if var.init != 0 {
+        writeln!(out, "    .data")
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "    .align 4")
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "{}:", var.name)
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "    .long {}", var.init)
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    } else {
+        writeln!(out, "    .bss")
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "    .align 4")
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "{}:", var.name)
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "    .zero 4")
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -167,6 +203,7 @@ fn format_operand(operand: &Operand) -> String {
         Operand::Imm(value) => format!("${value}"),
         Operand::Register(reg) => format_register(reg).to_string(),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
+        Operand::Data(name) => format!("{name}(%rip)"),
     }
 }
 
@@ -179,6 +216,7 @@ fn format_operand_byte(operand: &Operand) -> String {
         Operand::Imm(value) => format!("${value}"),
         Operand::Register(reg) => format_register_byte(reg).to_string(),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
+        Operand::Data(name) => format!("{name}(%rip)"),
     }
 }
 
@@ -190,6 +228,7 @@ fn format_operand_quad(operand: &Operand) -> String {
         Operand::Imm(value) => format!("${value}"),
         Operand::Register(reg) => format_register_quad(reg).to_string(),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
+        Operand::Data(name) => format!("{name}(%rip)"),
     }
 }
 
@@ -249,21 +288,28 @@ mod tests {
     use super::*;
     use crate::codegen::asm_ast::*;
 
+    /// ヘルパー: テスト用の main 関数を含む AsmProgram を構築する
+    fn test_program(instructions: Vec<Instruction>) -> AsmProgram {
+        AsmProgram {
+            functions: vec![AsmFunction {
+                name: "main".to_string(),
+                instructions,
+                global: true,
+            }],
+            static_vars: vec![],
+        }
+    }
+
     /// Chapter 1: return 2 の出力確認（プロローグ/エピローグ付き）
     #[test]
     fn emit_return_constant() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::Mov {
-                        src: Operand::Imm(2),
-                        dst: Operand::Register(Reg::AX),
-                    },
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::Mov {
+                src: Operand::Imm(2),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         let expected = "    .globl main\nmain:\n    pushq %rbp\n    movq %rsp, %rbp\n    movl $2, %eax\n    movq %rbp, %rsp\n    popq %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
         assert_eq!(asm, expected);
@@ -272,22 +318,17 @@ mod tests {
     /// Chapter 2: return -5 のアセンブリ出力
     #[test]
     fn emit_negation() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::Mov {
-                        src: Operand::Imm(5),
-                        dst: Operand::Register(Reg::AX),
-                    },
-                    Instruction::Unary {
-                        op: AsmUnaryOp::Neg,
-                        operand: Operand::Register(Reg::AX),
-                    },
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::Mov {
+                src: Operand::Imm(5),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Unary {
+                op: AsmUnaryOp::Neg,
+                operand: Operand::Register(Reg::AX),
+            },
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("negl %eax"));
     }
@@ -295,22 +336,17 @@ mod tests {
     /// Chapter 2: return ~0 のアセンブリ出力
     #[test]
     fn emit_complement() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::Mov {
-                        src: Operand::Imm(0),
-                        dst: Operand::Register(Reg::AX),
-                    },
-                    Instruction::Unary {
-                        op: AsmUnaryOp::Not,
-                        operand: Operand::Register(Reg::AX),
-                    },
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::Mov {
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Unary {
+                op: AsmUnaryOp::Not,
+                operand: Operand::Register(Reg::AX),
+            },
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("notl %eax"));
     }
@@ -318,30 +354,25 @@ mod tests {
     /// Chapter 2: return !1 のアセンブリ出力（cmpl + movl + sete パターン）
     #[test]
     fn emit_logical_not() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::Mov {
-                        src: Operand::Imm(1),
-                        dst: Operand::Register(Reg::AX),
-                    },
-                    Instruction::Cmp {
-                        src: Operand::Imm(0),
-                        dst: Operand::Register(Reg::AX),
-                    },
-                    Instruction::Mov {
-                        src: Operand::Imm(0),
-                        dst: Operand::Register(Reg::AX),
-                    },
-                    Instruction::SetCC {
-                        condition: CondCode::E,
-                        operand: Operand::Register(Reg::AX),
-                    },
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::Mov {
+                src: Operand::Imm(1),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Cmp {
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Mov {
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::SetCC {
+                condition: CondCode::E,
+                operand: Operand::Register(Reg::AX),
+            },
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("cmpl $0, %eax"));
         assert!(asm.contains("sete %al"));  // 8ビットレジスタ名になる
@@ -352,23 +383,18 @@ mod tests {
     /// Chapter 3: return 1 + 2 のアセンブリ出力
     #[test]
     fn emit_addition() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
-                    Instruction::Push(Operand::Register(Reg::AX)),
-                    Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
-                    Instruction::Pop(Operand::Register(Reg::CX)),
-                    Instruction::Binary {
-                        op: AsmBinaryOp::Add,
-                        src: Operand::Register(Reg::CX),
-                        dst: Operand::Register(Reg::AX),
-                    },
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
+            Instruction::Push(Operand::Register(Reg::AX)),
+            Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
+            Instruction::Pop(Operand::Register(Reg::CX)),
+            Instruction::Binary {
+                op: AsmBinaryOp::Add,
+                src: Operand::Register(Reg::CX),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("push %rax"));
         assert!(asm.contains("pop %rcx"));
@@ -378,21 +404,16 @@ mod tests {
     /// Chapter 3: return 7 / 2 のアセンブリ出力
     #[test]
     fn emit_division() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::Mov { src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
-                    Instruction::Push(Operand::Register(Reg::AX)),
-                    Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
-                    Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
-                    Instruction::Pop(Operand::Register(Reg::AX)),
-                    Instruction::Cdq,
-                    Instruction::Idiv(Operand::Register(Reg::CX)),
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::Mov { src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
+            Instruction::Push(Operand::Register(Reg::AX)),
+            Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
+            Instruction::Pop(Operand::Register(Reg::AX)),
+            Instruction::Cdq,
+            Instruction::Idiv(Operand::Register(Reg::CX)),
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("movl %eax, %ecx"));
         assert!(asm.contains("cdq"));
@@ -404,21 +425,16 @@ mod tests {
     /// Chapter 4: return 1 < 2 のアセンブリ出力（cmpl + setl パターン）
     #[test]
     fn emit_less_than() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
-                    Instruction::Push(Operand::Register(Reg::AX)),
-                    Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
-                    Instruction::Pop(Operand::Register(Reg::CX)),
-                    Instruction::Cmp { src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
-                    Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
-                    Instruction::SetCC { condition: CondCode::L, operand: Operand::Register(Reg::AX) },
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
+            Instruction::Push(Operand::Register(Reg::AX)),
+            Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
+            Instruction::Pop(Operand::Register(Reg::CX)),
+            Instruction::Cmp { src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
+            Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::SetCC { condition: CondCode::L, operand: Operand::Register(Reg::AX) },
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("cmpl %eax, %ecx"));
         assert!(asm.contains("setl %al"));
@@ -427,25 +443,20 @@ mod tests {
     /// Chapter 4: 論理ANDの短絡評価（ジャンプ + ラベル）
     #[test]
     fn emit_logical_and() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
-                    Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
-                    Instruction::JmpCC(CondCode::E, ".Land_false0".to_string()),
-                    Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
-                    Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
-                    Instruction::JmpCC(CondCode::E, ".Land_false0".to_string()),
-                    Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
-                    Instruction::Jmp(".Land_end0".to_string()),
-                    Instruction::Label(".Land_false0".to_string()),
-                    Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
-                    Instruction::Label(".Land_end0".to_string()),
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
+            Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::JmpCC(CondCode::E, ".Land_false0".to_string()),
+            Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
+            Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::JmpCC(CondCode::E, ".Land_false0".to_string()),
+            Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
+            Instruction::Jmp(".Land_end0".to_string()),
+            Instruction::Label(".Land_false0".to_string()),
+            Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::Label(".Land_end0".to_string()),
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("je .Land_false0"));
         assert!(asm.contains("jmp .Land_end0"));
@@ -456,25 +467,20 @@ mod tests {
     /// Chapter 4: 論理ORの短絡評価
     #[test]
     fn emit_logical_or() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
-                    Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
-                    Instruction::JmpCC(CondCode::NE, ".Lor_true0".to_string()),
-                    Instruction::Mov { src: Operand::Imm(3), dst: Operand::Register(Reg::AX) },
-                    Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
-                    Instruction::JmpCC(CondCode::NE, ".Lor_true0".to_string()),
-                    Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
-                    Instruction::Jmp(".Lor_end0".to_string()),
-                    Instruction::Label(".Lor_true0".to_string()),
-                    Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
-                    Instruction::Label(".Lor_end0".to_string()),
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::JmpCC(CondCode::NE, ".Lor_true0".to_string()),
+            Instruction::Mov { src: Operand::Imm(3), dst: Operand::Register(Reg::AX) },
+            Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::JmpCC(CondCode::NE, ".Lor_true0".to_string()),
+            Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::Jmp(".Lor_end0".to_string()),
+            Instruction::Label(".Lor_true0".to_string()),
+            Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
+            Instruction::Label(".Lor_end0".to_string()),
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("jne .Lor_true0"));
         assert!(asm.contains("jmp .Lor_end0"));
@@ -485,22 +491,17 @@ mod tests {
     /// Chapter 3: return 7 % 2 のアセンブリ出力（剰余: movl %edx, %eax が追加）
     #[test]
     fn emit_remainder() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::Mov { src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
-                    Instruction::Push(Operand::Register(Reg::AX)),
-                    Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
-                    Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
-                    Instruction::Pop(Operand::Register(Reg::AX)),
-                    Instruction::Cdq,
-                    Instruction::Idiv(Operand::Register(Reg::CX)),
-                    Instruction::Mov { src: Operand::Register(Reg::DX), dst: Operand::Register(Reg::AX) },
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::Mov { src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
+            Instruction::Push(Operand::Register(Reg::AX)),
+            Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
+            Instruction::Pop(Operand::Register(Reg::AX)),
+            Instruction::Cdq,
+            Instruction::Idiv(Operand::Register(Reg::CX)),
+            Instruction::Mov { src: Operand::Register(Reg::DX), dst: Operand::Register(Reg::AX) },
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("idivl %ecx"));
         assert!(asm.contains("movl %edx, %eax"));
@@ -511,18 +512,13 @@ mod tests {
     /// Chapter 5: AllocateStack と Stack オペランドの出力
     #[test]
     fn emit_allocate_stack_and_stack_operand() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::AllocateStack(4),
-                    Instruction::Mov { src: Operand::Imm(5), dst: Operand::Register(Reg::AX) },
-                    Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
-                    Instruction::Mov { src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::AllocateStack(4),
+            Instruction::Mov { src: Operand::Imm(5), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
+            Instruction::Mov { src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("subq $4, %rsp"));
         assert!(asm.contains("movl %eax, -4(%rbp)"));
@@ -538,20 +534,103 @@ mod tests {
     /// Chapter 5: int a = 5; return a; の完全な出力
     #[test]
     fn emit_var_declaration_full() {
-        let program = AsmProgram {
-            functions: vec![AsmFunction {
-                name: "main".to_string(),
-                instructions: vec![
-                    Instruction::AllocateStack(4),
-                    Instruction::Mov { src: Operand::Imm(5), dst: Operand::Register(Reg::AX) },
-                    Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
-                    Instruction::Mov { src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
-                    Instruction::Ret,
-                ],
-            }],
-        };
+        let program = test_program(vec![
+            Instruction::AllocateStack(4),
+            Instruction::Mov { src: Operand::Imm(5), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
+            Instruction::Mov { src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
+            Instruction::Ret,
+        ]);
         let asm = emit(&program).unwrap();
         let expected = "    .globl main\nmain:\n    pushq %rbp\n    movq %rsp, %rbp\n    subq $4, %rsp\n    movl $5, %eax\n    movl %eax, -4(%rbp)\n    movl -4(%rbp), %eax\n    movq %rbp, %rsp\n    popq %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
         assert_eq!(asm, expected);
+    }
+
+    // ── Chapter 10 テスト ──
+
+    /// Chapter 10: static 関数は .globl を出力しない
+    #[test]
+    fn emit_static_function_no_globl() {
+        let program = AsmProgram {
+            functions: vec![AsmFunction {
+                name: "helper".to_string(),
+                instructions: vec![
+                    Instruction::Mov { src: Operand::Imm(42), dst: Operand::Register(Reg::AX) },
+                    Instruction::Ret,
+                ],
+                global: false,
+            }],
+            static_vars: vec![],
+        };
+        let asm = emit(&program).unwrap();
+        assert!(!asm.contains(".globl helper"));
+        assert!(asm.contains("helper:"));
+        assert!(asm.contains("movl $42, %eax"));
+    }
+
+    /// Chapter 10: 初期化済み静的変数は .data セクションに配置
+    #[test]
+    fn emit_initialized_static_var() {
+        let program = AsmProgram {
+            functions: vec![],
+            static_vars: vec![AsmStaticVar {
+                name: "x".to_string(),
+                global: true,
+                init: 5,
+            }],
+        };
+        let asm = emit(&program).unwrap();
+        assert!(asm.contains("    .globl x"));
+        assert!(asm.contains("    .data"));
+        assert!(asm.contains("    .align 4"));
+        assert!(asm.contains("x:"));
+        assert!(asm.contains("    .long 5"));
+    }
+
+    /// Chapter 10: 未初期化静的変数は .bss セクションに配置
+    #[test]
+    fn emit_zero_initialized_static_var() {
+        let program = AsmProgram {
+            functions: vec![],
+            static_vars: vec![AsmStaticVar {
+                name: "y".to_string(),
+                global: true,
+                init: 0,
+            }],
+        };
+        let asm = emit(&program).unwrap();
+        assert!(asm.contains("    .globl y"));
+        assert!(asm.contains("    .bss"));
+        assert!(asm.contains("    .align 4"));
+        assert!(asm.contains("y:"));
+        assert!(asm.contains("    .zero 4"));
+    }
+
+    /// Chapter 10: 内部リンケージ（static）変数は .globl なし
+    #[test]
+    fn emit_static_internal_linkage_var() {
+        let program = AsmProgram {
+            functions: vec![],
+            static_vars: vec![AsmStaticVar {
+                name: "c.0".to_string(),
+                global: false,
+                init: 0,
+            }],
+        };
+        let asm = emit(&program).unwrap();
+        assert!(!asm.contains(".globl c.0"));
+        assert!(asm.contains("c.0:"));
+        assert!(asm.contains("    .zero 4"));
+    }
+
+    /// Chapter 10: Data オペランドが RIP相対アドレスで出力される
+    #[test]
+    fn emit_data_operand() {
+        let program = test_program(vec![
+            Instruction::Mov { src: Operand::Data("x".to_string()), dst: Operand::Register(Reg::AX) },
+            Instruction::Ret,
+        ]);
+        let asm = emit(&program).unwrap();
+        assert!(asm.contains("movl x(%rip), %eax"));
     }
 }

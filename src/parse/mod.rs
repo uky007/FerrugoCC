@@ -6,12 +6,12 @@
 //! ```text
 //! [KwInt, Identifier("main"), OpenParen, KwVoid, CloseParen,
 //!  OpenBrace, KwReturn, IntLiteral(2), Semicolon, CloseBrace]
-//!   → Program { function: Function { name: "main",
-//!       body: [Statement(Return(Constant(2)))] } }
+//!   → Program { declarations: [TopLevelDecl::Function(FunctionDecl { name: "main",
+//!       body: [Statement(Return(Constant(2)))] })] }
 //! ```
 
 pub mod ast;
 pub mod parser;
 
-pub use ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp};
+pub use ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, StorageClass, TopLevelDecl};
 pub use parser::parse;

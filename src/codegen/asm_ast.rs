@@ -17,10 +17,11 @@
 //! - `%ecx` — 二項演算の一時レジスタ。除算の除数格納にも使用。
 //! - `%edx` — `cdq`/`idivl` で使用。符号拡張と剰余格納。
 
-/// アセンブリプログラム全体（Chapter 9: 複数関数対応）
+/// アセンブリプログラム全体（Chapter 10: 静的変数対応）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsmProgram {
     pub functions: Vec<AsmFunction>,
+    pub static_vars: Vec<AsmStaticVar>,
 }
 
 /// アセンブリレベルの関数。名前と命令列を持つ。
@@ -28,6 +29,15 @@ pub struct AsmProgram {
 pub struct AsmFunction {
     pub name: String,
     pub instructions: Vec<Instruction>,
+    pub global: bool,
+}
+
+/// 静的変数（Chapter 10）。グローバル変数および static ローカル変数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsmStaticVar {
+    pub name: String,
+    pub global: bool,
+    pub init: i64,
 }
 
 /// 個々のアセンブリ命令。
@@ -172,6 +182,10 @@ pub enum Operand {
     ///
     /// オフセットは `%rbp` からの相対位置（負の値）。
     Stack(i32),
+    /// グローバル/静的変数（Chapter 10）。例: `x(%rip)`
+    ///
+    /// RIP相対アドレッシングでデータセクションの変数にアクセスする。
+    Data(String),
 }
 
 /// レジスタ名

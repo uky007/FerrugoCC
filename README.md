@@ -40,6 +40,50 @@ cargo test
 | 7 | 複合代入・インクリメント/デクリメント・カンマ演算子 | 完了 |
 | 8 | ループ文 (`while`, `do-while`, `for`) と `break`/`continue` | 完了 |
 | 9 | 関数（宣言・定義・呼び出し・パラメータ） | 完了 |
+| 10 | ファイルスコープ変数・ストレージクラス (`static`, `extern`) | 完了 |
+
+### Chapter 10 の詳細
+
+Chapter 10 では以下の機能を追加した:
+
+- **グローバル変数**: ファイルスコープの変数宣言に対応（`.data`/`.bss` セクションに配置）
+  ```c
+  int x = 5;
+  int main(void) { return x; } // 5
+  ```
+- **未初期化グローバル変数**: デフォルトで 0 に初期化される
+  ```c
+  int x;
+  int main(void) { return x; } // 0
+  ```
+- **グローバル変数の共有**: 複数の関数からアクセス可能
+  ```c
+  int g = 100;
+  int add_to_g(int n) { return g + n; }
+  int main(void) { return add_to_g(23); } // 123
+  ```
+- **`static` ローカル変数**: 関数呼び出し間で値を保持する
+  ```c
+  int counter(void) { static int c = 0; c = c + 1; return c; }
+  int main(void) { counter(); counter(); return counter(); } // 3
+  ```
+- **`static` 関数**: 内部リンケージ（`.globl` を出力しない）
+  ```c
+  static int helper(void) { return 42; }
+  int main(void) { return helper(); } // 42
+  ```
+- **`extern` 宣言**: 外部リンケージの変数参照
+  ```c
+  int x = 10;
+  int get(void) { extern int x; return x; }
+  int main(void) { return get(); } // 10
+  ```
+- **ローカルによるグローバルのシャドーイング**:
+  ```c
+  int x = 1;
+  int main(void) { int x = 2; return x; } // 2
+  ```
+- **バリデーション**: `extern` 変数に初期化子があるとエラー、ファイルスコープの非定数初期化子はエラー、重複定義エラーを検出
 
 ### Chapter 9 の詳細
 

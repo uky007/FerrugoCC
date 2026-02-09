@@ -241,6 +241,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "for"      => TokenKind::KwFor,
                 "break"    => TokenKind::KwBreak,
                 "continue" => TokenKind::KwContinue,
+                "static"   => TokenKind::KwStatic,
+                "extern"   => TokenKind::KwExtern,
                 _        => TokenKind::Identifier(text.to_string()),
             };
             tokens.push(Token {
@@ -553,6 +555,20 @@ mod tests {
                 &TokenKind::KwFor,
                 &TokenKind::KwBreak,
                 &TokenKind::KwContinue,
+            ]
+        );
+    }
+
+    /// Chapter 10: static/extern キーワードのトークン化
+    #[test]
+    fn lex_storage_class_keywords() {
+        let tokens = lex("static extern").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &TokenKind::KwStatic,
+                &TokenKind::KwExtern,
             ]
         );
     }

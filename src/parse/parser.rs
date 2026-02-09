@@ -9,12 +9,15 @@
 //! - `peek()` で先読み、`advance()` で消費、`expect()` で特定トークンを要求
 //! - 各 `parse_*` メソッドが文法規則に対応
 //!
-//! # 対応する文法（Chapter 8）
+//! # 対応する文法（Chapter 10）
 //! ```text
-//! <program>        ::= <function>
-//! <function>       ::= "int" <identifier> "(" "void" ")" "{" <block_item>* "}"
+//! <program>        ::= <top_level_decl>*
+//! <top_level_decl> ::= <function_decl> | <variable_decl>
+//! <function_decl>  ::= <storage_class>? "int" <id> "(" <params> ")" ( "{" <block>* "}" | ";" )
+//! <variable_decl>  ::= <storage_class>? "int" <id> ("=" <expr>)? ";"
+//! <storage_class>  ::= "static" | "extern"
 //! <block_item>     ::= <statement> | <declaration>
-//! <declaration>    ::= "int" <identifier> ("=" <assignment>)? ";"
+//! <declaration>    ::= <storage_class>? "int" <identifier> ("=" <assignment>)? ";"
 //! <statement>      ::= "return" <exp> ";"
 //!                    | <exp> ";"
 //!                    | ";"
@@ -39,12 +42,13 @@
 //! <unary>          ::= <unary_op> <unary> | <postfix>
 //! <unary_op>       ::= "-" | "~" | "!" | "++" | "--"
 //! <postfix>        ::= <primary> ("++" | "--")*
-//! <primary>        ::= <int> | <identifier> | "(" <exp> ")"
+//! <primary>        ::= <int> | <identifier> ("(" <args>? ")")? | "(" <exp> ")"
+//! <args>           ::= <assignment> ("," <assignment>)*
 //! ```
 
 use crate::error::{CompileError, Result};
 use crate::lex::{Token, TokenKind};
-use super::ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit};
+use super::ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit, StorageClass, TopLevelDecl};
 
 /// トークン列を構文解析して AST に変換する。
 ///
@@ -103,17 +107,39 @@ impl<'a> Parser<'a> {
         Ok(token)
     }
 
-    /// `<program> ::= <function_decl>*`
-    fn parse_program(&mut self) -> Result<Program> {
-        let mut functions = Vec::new();
-        while self.pos < self.tokens.len() {
-            functions.push(self.parse_function_decl()?);
+    /// オプショナルのストレージクラス指定子をパースする（Chapter 10）。
+    fn parse_storage_class(&mut self) -> Result<Option<StorageClass>> {
+        if self.pos >= self.tokens.len() {
+            return Ok(None);
         }
-        Ok(Program { functions })
+        match &self.peek()?.kind {
+            TokenKind::KwStatic => {
+                self.advance()?;
+                Ok(Some(StorageClass::Static))
+            }
+            TokenKind::KwExtern => {
+                self.advance()?;
+                Ok(Some(StorageClass::Extern))
+            }
+            _ => Ok(None),
+        }
     }
 
-    /// `<function_decl> ::= "int" <identifier> "(" <params> ")" ( "{" <block_item>* "}" | ";" )`
-    fn parse_function_decl(&mut self) -> Result<FunctionDecl> {
+    /// `<program> ::= <top_level_decl>*`
+    fn parse_program(&mut self) -> Result<Program> {
+        let mut declarations = Vec::new();
+        while self.pos < self.tokens.len() {
+            declarations.push(self.parse_top_level_decl()?);
+        }
+        Ok(Program { declarations })
+    }
+
+    /// `<top_level_decl> ::= <function_decl> | <variable_decl>`
+    ///
+    /// トップレベルでの関数 vs 変数の区別:
+    /// `[static|extern]? int <id>` の後に `(` → 関数、`=` or `;` → 変数。
+    fn parse_top_level_decl(&mut self) -> Result<TopLevelDecl> {
+        let storage_class = self.parse_storage_class()?;
         self.expect(&TokenKind::KwInt)?;
 
         let name_token = self.advance()?;
@@ -121,33 +147,21 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier(name) => name.clone(),
             other => {
                 return Err(CompileError::ParseError(format!(
-                    "expected function name, got {:?}", other
+                    "expected identifier, got {:?}", other
                 )));
             }
         };
 
-        self.expect(&TokenKind::OpenParen)?;
+        // `(` → 関数、`=`/`;` → 変数
+        if self.peek()?.kind == TokenKind::OpenParen {
+            // 関数宣言/定義
+            self.expect(&TokenKind::OpenParen)?;
 
-        // パラメータパース: "void" → 空リスト、"int" <id> ("," "int" <id>)* → 名前リスト
-        let params = if self.peek()?.kind == TokenKind::KwVoid {
-            self.advance()?; // consume 'void'
-            Vec::new()
-        } else {
-            let mut params = Vec::new();
-            // 最初のパラメータ
-            self.expect(&TokenKind::KwInt)?;
-            let param_token = self.advance()?;
-            match &param_token.kind {
-                TokenKind::Identifier(name) => params.push(name.clone()),
-                other => {
-                    return Err(CompileError::ParseError(format!(
-                        "expected parameter name, got {:?}", other
-                    )));
-                }
-            }
-            // 追加パラメータ
-            while self.peek()?.kind == TokenKind::Comma {
-                self.advance()?; // consume ','
+            let params = if self.peek()?.kind == TokenKind::KwVoid {
+                self.advance()?;
+                Vec::new()
+            } else {
+                let mut params = Vec::new();
                 self.expect(&TokenKind::KwInt)?;
                 let param_token = self.advance()?;
                 match &param_token.kind {
@@ -158,42 +172,68 @@ impl<'a> Parser<'a> {
                         )));
                     }
                 }
-            }
-            params
-        };
+                while self.peek()?.kind == TokenKind::Comma {
+                    self.advance()?;
+                    self.expect(&TokenKind::KwInt)?;
+                    let param_token = self.advance()?;
+                    match &param_token.kind {
+                        TokenKind::Identifier(name) => params.push(name.clone()),
+                        other => {
+                            return Err(CompileError::ParseError(format!(
+                                "expected parameter name, got {:?}", other
+                            )));
+                        }
+                    }
+                }
+                params
+            };
 
-        self.expect(&TokenKind::CloseParen)?;
+            self.expect(&TokenKind::CloseParen)?;
 
-        // ボディ: '{' なら定義、';' なら宣言のみ
-        let body = if self.peek()?.kind == TokenKind::OpenBrace {
-            self.expect(&TokenKind::OpenBrace)?;
-            let mut items = Vec::new();
-            while self.peek()?.kind != TokenKind::CloseBrace {
-                items.push(self.parse_block_item()?);
-            }
-            self.expect(&TokenKind::CloseBrace)?;
-            Some(items)
+            let body = if self.peek()?.kind == TokenKind::OpenBrace {
+                self.expect(&TokenKind::OpenBrace)?;
+                let mut items = Vec::new();
+                while self.peek()?.kind != TokenKind::CloseBrace {
+                    items.push(self.parse_block_item()?);
+                }
+                self.expect(&TokenKind::CloseBrace)?;
+                Some(items)
+            } else {
+                self.expect(&TokenKind::Semicolon)?;
+                None
+            };
+
+            Ok(TopLevelDecl::Function(FunctionDecl { name, params, body, storage_class }))
         } else {
+            // 変数宣言
+            let init = if self.peek()?.kind == TokenKind::Assign {
+                self.advance()?;
+                Some(self.parse_assignment()?)
+            } else {
+                None
+            };
             self.expect(&TokenKind::Semicolon)?;
-            None
-        };
-
-        Ok(FunctionDecl { name, params, body })
+            Ok(TopLevelDecl::Variable(Declaration { name, init, storage_class }))
+        }
     }
 
     /// `<block_item> ::= <statement> | <declaration>`
     ///
-    /// `KwInt` で始まれば宣言、それ以外は文。
+    /// `KwInt`, `KwStatic`, `KwExtern` で始まれば宣言、それ以外は文。
     fn parse_block_item(&mut self) -> Result<BlockItem> {
-        if self.peek()?.kind == TokenKind::KwInt {
-            Ok(BlockItem::Declaration(self.parse_declaration()?))
-        } else {
-            Ok(BlockItem::Statement(self.parse_statement()?))
+        match &self.peek()?.kind {
+            TokenKind::KwInt | TokenKind::KwStatic | TokenKind::KwExtern => {
+                Ok(BlockItem::Declaration(self.parse_declaration()?))
+            }
+            _ => {
+                Ok(BlockItem::Statement(self.parse_statement()?))
+            }
         }
     }
 
-    /// `<declaration> ::= "int" <identifier> ("=" <exp>)? ";"`
+    /// `<declaration> ::= <storage_class>? "int" <identifier> ("=" <assignment>)? ";"`
     fn parse_declaration(&mut self) -> Result<Declaration> {
+        let storage_class = self.parse_storage_class()?;
         self.expect(&TokenKind::KwInt)?;
 
         let name_token = self.advance()?;
@@ -214,7 +254,7 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(&TokenKind::Semicolon)?;
-        Ok(Declaration { name, init })
+        Ok(Declaration { name, init, storage_class })
     }
 
     /// `<statement> ::= "return" <exp> ";" | <exp> ";" | ";"
@@ -288,15 +328,19 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::OpenParen)?;
 
                 // for-init: 宣言 or 式文 or 空文
-                let init = if self.peek()?.kind == TokenKind::KwInt {
-                    ForInit::Declaration(self.parse_declaration()?)
-                } else if self.peek()?.kind == TokenKind::Semicolon {
-                    self.advance()?;
-                    ForInit::Expression(None)
-                } else {
-                    let expr = self.parse_expr()?;
-                    self.expect(&TokenKind::Semicolon)?;
-                    ForInit::Expression(Some(expr))
+                let init = match &self.peek()?.kind {
+                    TokenKind::KwInt | TokenKind::KwStatic | TokenKind::KwExtern => {
+                        ForInit::Declaration(self.parse_declaration()?)
+                    }
+                    TokenKind::Semicolon => {
+                        self.advance()?;
+                        ForInit::Expression(None)
+                    }
+                    _ => {
+                        let expr = self.parse_expr()?;
+                        self.expect(&TokenKind::Semicolon)?;
+                        ForInit::Expression(Some(expr))
+                    }
                 };
 
                 // condition（省略可能）
@@ -695,9 +739,13 @@ mod tests {
     fn parse_return_2() {
         let tokens = lex::lex("int main(void) { return 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        assert_eq!(program.functions[0].name, "main");
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!("expected function"),
+        };
+        assert_eq!(func.name, "main");
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Constant(2)))]
         );
     }
@@ -706,8 +754,12 @@ mod tests {
     fn parse_return_0() {
         let tokens = lex::lex("int main(void) { return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!("expected function"),
+        };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Constant(0)))]
         );
     }
@@ -733,8 +785,9 @@ mod tests {
     fn parse_negation() {
         let tokens = lex::lex("int main(void) { return -5; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(5)))))]
         );
     }
@@ -744,8 +797,9 @@ mod tests {
     fn parse_complement() {
         let tokens = lex::lex("int main(void) { return ~0; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Complement, Box::new(Expr::Constant(0)))))]
         );
     }
@@ -755,8 +809,9 @@ mod tests {
     fn parse_logical_not() {
         let tokens = lex::lex("int main(void) { return !1; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Not, Box::new(Expr::Constant(1)))))]
         );
     }
@@ -766,8 +821,9 @@ mod tests {
     fn parse_pre_decrement_literal() {
         let tokens = lex::lex("int main(void) { return --5; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(
                 UnaryOp::PreDecrement,
                 Box::new(Expr::Constant(5))
@@ -780,8 +836,9 @@ mod tests {
     fn parse_nested_negation() {
         let tokens = lex::lex("int main(void) { return - -5; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(
                 UnaryOp::Negate,
                 Box::new(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(5))))
@@ -794,8 +851,9 @@ mod tests {
     fn parse_complement_of_negation() {
         let tokens = lex::lex("int main(void) { return ~(-3); }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(
                 UnaryOp::Complement,
                 Box::new(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(3))))
@@ -810,8 +868,9 @@ mod tests {
     fn parse_addition() {
         let tokens = lex::lex("int main(void) { return 1 + 2; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Add,
                 Box::new(Expr::Constant(1)),
@@ -825,8 +884,9 @@ mod tests {
     fn parse_precedence() {
         let tokens = lex::lex("int main(void) { return 1 + 2 * 3; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Add,
                 Box::new(Expr::Constant(1)),
@@ -844,8 +904,9 @@ mod tests {
     fn parse_left_associativity() {
         let tokens = lex::lex("int main(void) { return 1 - 2 - 3; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Subtract,
                 Box::new(Expr::Binary(
@@ -863,8 +924,9 @@ mod tests {
     fn parse_parenthesized_binary() {
         let tokens = lex::lex("int main(void) { return (1 + 2) * 3; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Multiply,
                 Box::new(Expr::Binary(
@@ -882,8 +944,9 @@ mod tests {
     fn parse_division() {
         let tokens = lex::lex("int main(void) { return 7 / 2; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Divide,
                 Box::new(Expr::Constant(7)),
@@ -897,8 +960,9 @@ mod tests {
     fn parse_remainder() {
         let tokens = lex::lex("int main(void) { return 7 % 2; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Remainder,
                 Box::new(Expr::Constant(7)),
@@ -914,8 +978,9 @@ mod tests {
     fn parse_less_than() {
         let tokens = lex::lex("int main(void) { return 1 < 2; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::LessThan,
                 Box::new(Expr::Constant(1)),
@@ -929,8 +994,9 @@ mod tests {
     fn parse_equal() {
         let tokens = lex::lex("int main(void) { return 1 == 2; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Equal,
                 Box::new(Expr::Constant(1)),
@@ -944,8 +1010,9 @@ mod tests {
     fn parse_logical_and() {
         let tokens = lex::lex("int main(void) { return 1 && 2; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::LogicalAnd,
                 Box::new(Expr::Constant(1)),
@@ -959,8 +1026,9 @@ mod tests {
     fn parse_logical_or() {
         let tokens = lex::lex("int main(void) { return 1 || 2; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::LogicalOr,
                 Box::new(Expr::Constant(1)),
@@ -974,8 +1042,9 @@ mod tests {
     fn parse_relational_and_logical() {
         let tokens = lex::lex("int main(void) { return 1 < 2 && 3 > 1; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::LogicalAnd,
                 Box::new(Expr::Binary(
@@ -997,8 +1066,9 @@ mod tests {
     fn parse_additive_in_relational() {
         let tokens = lex::lex("int main(void) { return 2 + 3 > 4; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::GreaterThan,
                 Box::new(Expr::Binary(
@@ -1016,8 +1086,9 @@ mod tests {
     fn parse_or_and_precedence() {
         let tokens = lex::lex("int main(void) { return 1 || 2 && 3; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::LogicalOr,
                 Box::new(Expr::Constant(1)),
@@ -1035,8 +1106,9 @@ mod tests {
     fn parse_unary_in_binary() {
         let tokens = lex::lex("int main(void) { return -1 + 2; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Add,
                 Box::new(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(1)))),
@@ -1052,12 +1124,14 @@ mod tests {
     fn parse_declaration_with_init() {
         let tokens = lex::lex("int main(void) { int a = 5; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
                     init: Some(Expr::Constant(5)),
+                    storage_class: None,
                 }),
                 BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
             ]
@@ -1069,12 +1143,14 @@ mod tests {
     fn parse_declaration_without_init() {
         let tokens = lex::lex("int main(void) { int a; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
                     init: None,
+                    storage_class: None,
                 }),
                 BlockItem::Statement(Statement::Return(Expr::Constant(0))),
             ]
@@ -1086,12 +1162,14 @@ mod tests {
     fn parse_assignment() {
         let tokens = lex::lex("int main(void) { int a; a = 10; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
                     init: None,
+                    storage_class: None,
                 }),
                 BlockItem::Statement(Statement::Expression(
                     Expr::Assign("a".to_string(), Box::new(Expr::Constant(10)))
@@ -1106,16 +1184,19 @@ mod tests {
     fn parse_multiple_declarations() {
         let tokens = lex::lex("int main(void) { int a = 2; int b = 3; return a + b; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
                     init: Some(Expr::Constant(2)),
+                    storage_class: None,
                 }),
                 BlockItem::Declaration(Declaration {
                     name: "b".to_string(),
                     init: Some(Expr::Constant(3)),
+                    storage_class: None,
                 }),
                 BlockItem::Statement(Statement::Return(Expr::Binary(
                     BinaryOp::Add,
@@ -1131,8 +1212,9 @@ mod tests {
     fn parse_null_statement() {
         let tokens = lex::lex("int main(void) { ; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![
                 BlockItem::Statement(Statement::Null),
                 BlockItem::Statement(Statement::Return(Expr::Constant(0))),
@@ -1147,8 +1229,9 @@ mod tests {
     fn parse_if_statement() {
         let tokens = lex::lex("int main(void) { if (1) return 2; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
                 condition: Expr::Constant(1),
                 then_branch: Box::new(Statement::Return(Expr::Constant(2))),
@@ -1162,8 +1245,9 @@ mod tests {
     fn parse_if_else_statement() {
         let tokens = lex::lex("int main(void) { if (0) return 2; else return 3; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
                 condition: Expr::Constant(0),
                 then_branch: Box::new(Statement::Return(Expr::Constant(2))),
@@ -1177,8 +1261,9 @@ mod tests {
     fn parse_ternary() {
         let tokens = lex::lex("int main(void) { return 1 ? 5 : 10; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Conditional {
                 condition: Box::new(Expr::Constant(1)),
                 then_expr: Box::new(Expr::Constant(5)),
@@ -1192,13 +1277,15 @@ mod tests {
     fn parse_compound_statement() {
         let tokens = lex::lex("int main(void) { { int a = 2; } return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![
                 BlockItem::Statement(Statement::Compound(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(2)),
+                        storage_class: None,
                     }),
                 ])),
                 BlockItem::Statement(Statement::Return(Expr::Constant(0))),
@@ -1212,8 +1299,9 @@ mod tests {
     fn parse_dangling_else() {
         let tokens = lex::lex("int main(void) { if (0) if (0) return 1; else return 2; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            *program.functions[0].body.as_ref().unwrap(),
+            *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
                 condition: Expr::Constant(0),
                 then_branch: Box::new(Statement::If {
@@ -1233,8 +1321,9 @@ mod tests {
     fn parse_compound_assign() {
         let tokens = lex::lex("int main(void) { int a = 5; a += 3; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[1],
+            func.body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Expression(
                 Expr::CompoundAssign(BinaryOp::Add, "a".to_string(), Box::new(Expr::Constant(3)))
             ))
@@ -1246,8 +1335,9 @@ mod tests {
     fn parse_prefix_increment() {
         let tokens = lex::lex("int main(void) { int a = 5; return ++a; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[1],
+            func.body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Return(
                 Expr::Unary(UnaryOp::PreIncrement, Box::new(Expr::Var("a".to_string())))
             ))
@@ -1259,8 +1349,9 @@ mod tests {
     fn parse_postfix_increment() {
         let tokens = lex::lex("int main(void) { int a = 5; return a++; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[1],
+            func.body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Return(
                 Expr::PostfixIncrement("a".to_string())
             ))
@@ -1272,8 +1363,9 @@ mod tests {
     fn parse_postfix_decrement() {
         let tokens = lex::lex("int main(void) { int a = 5; return a--; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[1],
+            func.body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Return(
                 Expr::PostfixDecrement("a".to_string())
             ))
@@ -1285,8 +1377,9 @@ mod tests {
     fn parse_comma_operator() {
         let tokens = lex::lex("int main(void) { return (1, 2, 3); }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[0],
+            func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::Return(
                 Expr::Binary(
                     BinaryOp::Comma,
@@ -1307,8 +1400,9 @@ mod tests {
         // `int a = (1, 2);` — 括弧の中ではカンマが使える
         let tokens = lex::lex("int main(void) { int a = (1, 2); return a; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[0],
+            func.body.as_ref().unwrap()[0],
             BlockItem::Declaration(Declaration {
                 name: "a".to_string(),
                 init: Some(Expr::Binary(
@@ -1316,6 +1410,7 @@ mod tests {
                     Box::new(Expr::Constant(1)),
                     Box::new(Expr::Constant(2)),
                 )),
+                storage_class: None,
             })
         );
     }
@@ -1325,8 +1420,9 @@ mod tests {
     fn parse_chained_assignment() {
         let tokens = lex::lex("int main(void) { int a; int b; a = b = 5; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[2],
+            func.body.as_ref().unwrap()[2],
             BlockItem::Statement(Statement::Expression(
                 Expr::Assign(
                     "a".to_string(),
@@ -1343,8 +1439,9 @@ mod tests {
     fn parse_while_statement() {
         let tokens = lex::lex("int main(void) { while (1) return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[0],
+            func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::While {
                 condition: Expr::Constant(1),
                 body: Box::new(Statement::Return(Expr::Constant(0))),
@@ -1357,8 +1454,9 @@ mod tests {
     fn parse_do_while_statement() {
         let tokens = lex::lex("int main(void) { int a; do { a = 1; } while (0); }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[1],
+            func.body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::DoWhile {
                 body: Box::new(Statement::Compound(vec![
                     BlockItem::Statement(Statement::Expression(
@@ -1375,10 +1473,12 @@ mod tests {
     fn parse_for_with_declaration() {
         let tokens = lex::lex("int main(void) { int a; for (int i = 0; i < 5; i++) a++; }").unwrap();
         let program = parse(&tokens).unwrap();
-        if let BlockItem::Statement(Statement::For { init, condition, post, body: _ }) = &program.functions[0].body.as_ref().unwrap()[1] {
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        if let BlockItem::Statement(Statement::For { init, condition, post, body: _ }) = &func.body.as_ref().unwrap()[1] {
             assert_eq!(*init, ForInit::Declaration(Declaration {
                 name: "i".to_string(),
                 init: Some(Expr::Constant(0)),
+                storage_class: None,
             }));
             assert!(condition.is_some());
             assert!(post.is_some());
@@ -1392,8 +1492,9 @@ mod tests {
     fn parse_for_empty() {
         let tokens = lex::lex("int main(void) { for (;;) break; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[0],
+            func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::For {
                 init: ForInit::Expression(None),
                 condition: None,
@@ -1408,8 +1509,9 @@ mod tests {
     fn parse_break_statement() {
         let tokens = lex::lex("int main(void) { while (1) break; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[0],
+            func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::While {
                 condition: Expr::Constant(1),
                 body: Box::new(Statement::Break),
@@ -1422,8 +1524,9 @@ mod tests {
     fn parse_continue_statement() {
         let tokens = lex::lex("int main(void) { while (1) continue; }").unwrap();
         let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[0].body.as_ref().unwrap()[0],
+            func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::While {
                 condition: Expr::Constant(1),
                 body: Box::new(Statement::Continue),
@@ -1438,12 +1541,14 @@ mod tests {
     fn parse_function_call_no_args() {
         let tokens = lex::lex("int five(void) { return 5; } int main(void) { return five(); }").unwrap();
         let program = parse(&tokens).unwrap();
-        assert_eq!(program.functions.len(), 2);
-        assert_eq!(program.functions[0].name, "five");
-        assert_eq!(program.functions[0].params, Vec::<String>::new());
-        assert_eq!(program.functions[1].name, "main");
+        assert_eq!(program.declarations.len(), 2);
+        let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(f0.name, "five");
+        assert_eq!(f0.params, Vec::<String>::new());
+        assert_eq!(f1.name, "main");
         assert_eq!(
-            program.functions[1].body.as_ref().unwrap()[0],
+            f1.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::Return(
                 Expr::FunctionCall("five".to_string(), vec![])
             ))
@@ -1455,10 +1560,12 @@ mod tests {
     fn parse_function_call_with_args() {
         let tokens = lex::lex("int add(int a, int b) { return a + b; } int main(void) { return add(2, 3); }").unwrap();
         let program = parse(&tokens).unwrap();
-        assert_eq!(program.functions[0].name, "add");
-        assert_eq!(program.functions[0].params, vec!["a".to_string(), "b".to_string()]);
+        let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(f0.name, "add");
+        assert_eq!(f0.params, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(
-            program.functions[1].body.as_ref().unwrap()[0],
+            f1.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::Return(
                 Expr::FunctionCall("add".to_string(), vec![
                     Expr::Constant(2),
@@ -1473,10 +1580,11 @@ mod tests {
     fn parse_function_declaration() {
         let tokens = lex::lex("int add(int a, int b); int main(void) { return add(1, 2); }").unwrap();
         let program = parse(&tokens).unwrap();
-        assert_eq!(program.functions.len(), 2);
-        assert_eq!(program.functions[0].name, "add");
-        assert!(program.functions[0].body.is_none());
-        assert_eq!(program.functions[0].params, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(program.declarations.len(), 2);
+        let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(f0.name, "add");
+        assert!(f0.body.is_none());
+        assert_eq!(f0.params, vec!["a".to_string(), "b".to_string()]);
     }
 
     /// 複数関数: 宣言+定義
@@ -1484,10 +1592,13 @@ mod tests {
     fn parse_declaration_then_definition() {
         let tokens = lex::lex("int add(int a, int b); int main(void) { return add(10, 20); } int add(int a, int b) { return a + b; }").unwrap();
         let program = parse(&tokens).unwrap();
-        assert_eq!(program.functions.len(), 3);
-        assert!(program.functions[0].body.is_none());
-        assert!(program.functions[1].body.is_some());
-        assert!(program.functions[2].body.is_some());
+        assert_eq!(program.declarations.len(), 3);
+        let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let f2 = match &program.declarations[2] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert!(f0.body.is_none());
+        assert!(f1.body.is_some());
+        assert!(f2.body.is_some());
     }
 
     /// 引数中のカンマはカンマ演算子ではなく引数区切りとしてパースされる
@@ -1495,8 +1606,9 @@ mod tests {
     fn parse_function_call_comma_not_operator() {
         let tokens = lex::lex("int foo(int a, int b, int c) { return a; } int main(void) { return foo(1, 2, 3); }").unwrap();
         let program = parse(&tokens).unwrap();
+        let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
-            program.functions[1].body.as_ref().unwrap()[0],
+            f1.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::Return(
                 Expr::FunctionCall("foo".to_string(), vec![
                     Expr::Constant(1),
@@ -1504,6 +1616,81 @@ mod tests {
                     Expr::Constant(3),
                 ])
             ))
+        );
+    }
+
+    // ── Chapter 10 テスト ──
+
+    /// グローバル変数宣言
+    #[test]
+    fn parse_global_variable() {
+        let tokens = lex::lex("int x = 5; int main(void) { return x; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(program.declarations.len(), 2);
+        match &program.declarations[0] {
+            TopLevelDecl::Variable(decl) => {
+                assert_eq!(decl.name, "x");
+                assert_eq!(decl.init, Some(Expr::Constant(5)));
+                assert_eq!(decl.storage_class, None);
+            }
+            _ => panic!("expected variable declaration"),
+        }
+    }
+
+    /// static 関数
+    #[test]
+    fn parse_static_function() {
+        let tokens = lex::lex("static int helper(void) { return 42; } int main(void) { return helper(); }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(f0.name, "helper");
+        assert_eq!(f0.storage_class, Some(StorageClass::Static));
+    }
+
+    /// extern 変数宣言
+    #[test]
+    fn parse_extern_variable() {
+        let tokens = lex::lex("extern int x; int main(void) { return x; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        match &program.declarations[0] {
+            TopLevelDecl::Variable(decl) => {
+                assert_eq!(decl.name, "x");
+                assert_eq!(decl.init, None);
+                assert_eq!(decl.storage_class, Some(StorageClass::Extern));
+            }
+            _ => panic!("expected variable declaration"),
+        }
+    }
+
+    /// ブロック内 static 変数
+    #[test]
+    fn parse_block_static_variable() {
+        let tokens = lex::lex("int main(void) { static int c = 0; return c; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(
+            func.body.as_ref().unwrap()[0],
+            BlockItem::Declaration(Declaration {
+                name: "c".to_string(),
+                init: Some(Expr::Constant(0)),
+                storage_class: Some(StorageClass::Static),
+            })
+        );
+    }
+
+    /// ブロック内 extern 変数
+    #[test]
+    fn parse_block_extern_variable() {
+        let tokens = lex::lex("int main(void) { extern int x; return x; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(
+            func.body.as_ref().unwrap()[0],
+            BlockItem::Declaration(Declaration {
+                name: "x".to_string(),
+                init: None,
+                storage_class: Some(StorageClass::Extern),
+            })
         );
     }
 }
