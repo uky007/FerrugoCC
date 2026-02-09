@@ -38,6 +38,34 @@ cargo test
 | 5 | ローカル変数・代入 (`int a = 5; a = 10;`) | 完了 |
 | 6 | if文・三項演算子・複合文 (`if/else`, `?:`, `{}`) | 完了 |
 | 7 | 複合代入・インクリメント/デクリメント・カンマ演算子 | 完了 |
+| 8 | ループ文 (`while`, `do-while`, `for`) と `break`/`continue` | 完了 |
+
+### Chapter 8 の詳細
+
+Chapter 8 では以下の機能を追加した:
+
+- **while ループ**: `while (cond) stmt`
+  ```c
+  int a = 0; while (a < 5) a = a + 1; // a は 5
+  ```
+- **do-while ループ**: `do stmt while (cond);` (最低1回実行)
+  ```c
+  int a = 10; do { a++; } while (a < 5); // a は 11（条件が偽でも1回実行）
+  ```
+- **for ループ**: `for (init; cond; post) stmt` (初期化部に宣言も可)
+  ```c
+  int a = 0; for (int i = 0; i < 5; i++) a++; // a は 5
+  ```
+- **break**: ループから脱出
+  ```c
+  int a = 0; while (1) { a++; if (a == 3) break; } // a は 3
+  ```
+- **continue**: ループの次の反復へスキップ
+  ```c
+  int s = 0; for (int i = 0; i < 10; i++) { if (i % 2 == 0) continue; s += i; } // s は 25 (1+3+5+7+9)
+  ```
+
+ネストしたループでは `break`/`continue` は最も内側のループにのみ作用する。
 
 ### Chapter 7 の詳細
 
