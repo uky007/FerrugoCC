@@ -17,10 +17,10 @@
 //! - `%ecx` — 二項演算の一時レジスタ。除算の除数格納にも使用。
 //! - `%edx` — `cdq`/`idivl` で使用。符号拡張と剰余格納。
 
-/// アセンブリプログラム全体
+/// アセンブリプログラム全体（Chapter 9: 複数関数対応）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsmProgram {
-    pub function: AsmFunction,
+    pub functions: Vec<AsmFunction>,
 }
 
 /// アセンブリレベルの関数。名前と命令列を持つ。
@@ -105,6 +105,14 @@ pub enum Instruction {
     /// ローカル変数用のスタック領域を確保する。
     AllocateStack(usize),
 
+    /// `addq $N, %rsp` — スタック領域の解放（Chapter 9）
+    ///
+    /// 関数呼び出し後にスタック引数とパディングを解放する。
+    DeallocateStack(usize),
+
+    /// `call <function>` — 関数呼び出し（Chapter 9）
+    Call(String),
+
     /// `ret` — 関数からの復帰
     ///
     /// コールスタックからリターンアドレスを取り出してジャンプする。
@@ -169,12 +177,21 @@ pub enum Operand {
 /// レジスタ名
 ///
 /// AT&T 構文では命令に応じて `%eax`（32ビット）や `%al`（8ビット）として出力する。
+/// Chapter 9: 関数呼び出し用の引数レジスタを追加。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reg {
     /// EAX レジスタ — 戻り値・算術演算用
     AX,
-    /// ECX レジスタ — 二項演算の一時格納・除算の除数用（Chapter 3）
+    /// ECX レジスタ — 二項演算の一時格納・除算の除数用（Chapter 3）。第4引数。
     CX,
-    /// EDX レジスタ — `cdq`/`idivl` で使用（Chapter 3）
+    /// EDX レジスタ — `cdq`/`idivl` で使用（Chapter 3）。第3引数。
     DX,
+    /// EDI レジスタ — 第1引数（Chapter 9）
+    DI,
+    /// ESI レジスタ — 第2引数（Chapter 9）
+    SI,
+    /// R8D レジスタ — 第5引数（Chapter 9）
+    R8,
+    /// R9D レジスタ — 第6引数（Chapter 9）
+    R9,
 }

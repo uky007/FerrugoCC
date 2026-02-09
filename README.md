@@ -39,6 +39,41 @@ cargo test
 | 6 | if文・三項演算子・複合文 (`if/else`, `?:`, `{}`) | 完了 |
 | 7 | 複合代入・インクリメント/デクリメント・カンマ演算子 | 完了 |
 | 8 | ループ文 (`while`, `do-while`, `for`) と `break`/`continue` | 完了 |
+| 9 | 関数（宣言・定義・呼び出し・パラメータ） | 完了 |
+
+### Chapter 9 の詳細
+
+Chapter 9 では以下の機能を追加した:
+
+- **関数定義・呼び出し**: 複数関数のプログラムに対応
+  ```c
+  int add(int a, int b) { return a + b; }
+  int main(void) { return add(2, 3); } // 5
+  ```
+- **関数プロトタイプ（前方宣言）**: 定義前に宣言できる
+  ```c
+  int add(int a, int b);
+  int main(void) { return add(10, 20); }
+  int add(int a, int b) { return a + b; } // 30
+  ```
+- **再帰**: 関数の再帰呼び出しに対応
+  ```c
+  int fib(int n) { if (n <= 1) return n; return fib(n - 1) + fib(n - 2); }
+  int main(void) { return fib(10); } // 55
+  ```
+- **最大6引数のレジスタ渡し**: System V AMD64 ABI 準拠 (`%edi`, `%esi`, `%edx`, `%ecx`, `%r8d`, `%r9d`)
+  ```c
+  int sum6(int a, int b, int c, int d, int e, int f) { return a + b + c + d + e + f; }
+  int main(void) { return sum6(1, 2, 3, 4, 5, 6); } // 21
+  ```
+- **7引数以上のスタック渡し**: 16バイトアラインメント対応
+  ```c
+  int sum8(int a, int b, int c, int d, int e, int f, int g, int h) {
+      return a + b + c + d + e + f + g + h;
+  }
+  int main(void) { return sum8(1, 2, 3, 4, 5, 6, 7, 8); } // 36
+  ```
+- **バリデーション**: 重複定義エラー、パラメータ数不一致エラー、引数数不一致エラーを検出
 
 ### Chapter 8 の詳細
 

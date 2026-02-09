@@ -30,7 +30,7 @@
 
 use std::collections::{HashMap, HashSet};
 use crate::error::{CompileError, Result};
-use crate::parse::ast::{Program, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit};
+use crate::parse::ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit};
 use super::asm_ast::{
     AsmProgram, AsmFunction, Instruction, Operand, Reg, AsmUnaryOp, AsmBinaryOp, CondCode,
 };
@@ -41,33 +41,119 @@ struct LoopLabels {
     continue_label: String,
 }
 
+/// 関数シンボルテーブル用の情報（Chapter 9）。
+struct FunctionInfo {
+    param_count: usize,
+    defined: bool,
+}
+
+/// 引数レジスタの順序（System V AMD64 ABI）: %edi, %esi, %edx, %ecx, %r8d, %r9d
+const ARG_REGISTERS: [Reg; 6] = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
+
 /// C の AST をアセンブリ AST に変換する。
 pub fn generate(program: &Program) -> Result<AsmProgram> {
     let mut label_counter = 0;
-    let function = generate_function(&program.function, &mut label_counter)?;
-    Ok(AsmProgram { function })
+
+    // バリデーション: 関数シンボルテーブルを構築
+    let mut func_table: HashMap<String, FunctionInfo> = HashMap::new();
+    for func_decl in &program.functions {
+        let has_body = func_decl.body.is_some();
+        if let Some(existing) = func_table.get(&func_decl.name) {
+            // パラメータ数の一貫性チェック
+            if existing.param_count != func_decl.params.len() {
+                return Err(CompileError::CodegenError(format!(
+                    "conflicting parameter count for function '{}'", func_decl.name
+                )));
+            }
+            // 重複定義チェック
+            if has_body && existing.defined {
+                return Err(CompileError::CodegenError(format!(
+                    "function '{}' defined multiple times", func_decl.name
+                )));
+            }
+        }
+        let entry = func_table.entry(func_decl.name.clone()).or_insert(FunctionInfo {
+            param_count: func_decl.params.len(),
+            defined: false,
+        });
+        if has_body {
+            entry.defined = true;
+        }
+    }
+
+    // body がある関数のみコード生成
+    let mut functions = Vec::new();
+    for func_decl in &program.functions {
+        if func_decl.body.is_some() {
+            functions.push(generate_function(func_decl, &mut label_counter, &func_table)?);
+        }
+    }
+
+    Ok(AsmProgram { functions })
 }
 
 /// 関数の変換: 本体のブロック要素列から命令列を生成する。
 ///
 /// Chapter 5: 変数マップを使ってローカル変数のスタックオフセットを管理する。
-/// すべてのブロック要素を処理した後、変数がある場合は `AllocateStack` を先頭に挿入する。
-fn generate_function(func: &crate::parse::ast::Function, label_counter: &mut usize) -> Result<AsmFunction> {
+/// Chapter 9: パラメータをレジスタからスタックに保存し、暗黙の return 0 を追加する。
+fn generate_function(
+    func: &FunctionDecl,
+    label_counter: &mut usize,
+    func_table: &HashMap<String, FunctionInfo>,
+) -> Result<AsmFunction> {
     let mut var_map: HashMap<String, i32> = HashMap::new();
     let mut next_offset: i32 = -4;
     let mut instructions = Vec::new();
 
+    // パラメータをスタックに割り当て
+    for (i, param_name) in func.params.iter().enumerate() {
+        let offset = next_offset;
+        var_map.insert(param_name.clone(), offset);
+        next_offset -= 4;
+
+        if i < 6 {
+            // レジスタからスタックに保存
+            instructions.push(Instruction::Mov {
+                src: Operand::Register(ARG_REGISTERS[i]),
+                dst: Operand::Stack(offset),
+            });
+        } else {
+            // スタック引数: 16(%rbp) + (i - 6) * 8 からロード
+            let stack_arg_offset = 16 + ((i - 6) as i32) * 8;
+            instructions.push(Instruction::Mov {
+                src: Operand::Stack(stack_arg_offset),
+                dst: Operand::Register(Reg::AX),
+            });
+            instructions.push(Instruction::Mov {
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Stack(offset),
+            });
+        }
+    }
+
+    let body = func.body.as_ref().unwrap();
     let mut scope_decls: HashSet<String> = HashSet::new();
-    for item in &func.body {
-        let instrs = generate_block_item(item, &mut var_map, &mut next_offset, label_counter, Some(&mut scope_decls), None)?;
+    // パラメータ名をスコープ宣言に追加（重複宣言チェック用）
+    for param_name in &func.params {
+        scope_decls.insert(param_name.clone());
+    }
+    for item in body {
+        let instrs = generate_block_item(item, &mut var_map, &mut next_offset, label_counter, Some(&mut scope_decls), None, func_table)?;
         instructions.extend(instrs);
     }
 
-    // 変数がある場合、AllocateStack を先頭に挿入
-    // next_offset ベースで計算（ネストスコープの変数も含む）
-    let total_vars = ((-next_offset - 4) / 4) as usize;
-    if total_vars > 0 {
-        instructions.insert(0, Instruction::AllocateStack(total_vars * 4));
+    // 暗黙の return 0 を追加（未定義動作の回避）
+    instructions.push(Instruction::Mov {
+        src: Operand::Imm(0),
+        dst: Operand::Register(Reg::AX),
+    });
+    instructions.push(Instruction::Ret);
+
+    // AllocateStack を先頭に挿入（16バイトアラインメント）
+    let total_bytes = ((-next_offset - 4) / 4) as usize * 4;
+    if total_bytes > 0 {
+        let aligned = (total_bytes + 15) & !15;
+        instructions.insert(0, Instruction::AllocateStack(aligned));
     }
 
     Ok(AsmFunction {
@@ -84,10 +170,11 @@ fn generate_block_item(
     label_counter: &mut usize,
     scope_decls: Option<&mut HashSet<String>>,
     loop_labels: Option<&LoopLabels>,
+    func_table: &HashMap<String, FunctionInfo>,
 ) -> Result<Vec<Instruction>> {
     match item {
-        BlockItem::Statement(stmt) => generate_statement(stmt, var_map, next_offset, label_counter, loop_labels),
-        BlockItem::Declaration(decl) => generate_declaration(decl, var_map, next_offset, label_counter, scope_decls),
+        BlockItem::Statement(stmt) => generate_statement(stmt, var_map, next_offset, label_counter, loop_labels, func_table),
+        BlockItem::Declaration(decl) => generate_declaration(decl, var_map, next_offset, label_counter, scope_decls, func_table),
     }
 }
 
@@ -100,6 +187,7 @@ fn generate_declaration(
     next_offset: &mut i32,
     label_counter: &mut usize,
     scope_decls: Option<&mut HashSet<String>>,
+    func_table: &HashMap<String, FunctionInfo>,
 ) -> Result<Vec<Instruction>> {
     // 同一スコープ内の重複宣言チェック
     if let Some(decls) = scope_decls {
@@ -116,7 +204,7 @@ fn generate_declaration(
 
     let mut instrs = Vec::new();
     if let Some(init) = &decl.init {
-        instrs.extend(generate_expr(init, var_map, label_counter)?);
+        instrs.extend(generate_expr(init, var_map, label_counter, func_table)?);
         instrs.push(Instruction::Mov {
             src: Operand::Register(Reg::AX),
             dst: Operand::Stack(offset),
@@ -133,15 +221,16 @@ fn generate_statement(
     next_offset: &mut i32,
     label_counter: &mut usize,
     loop_labels: Option<&LoopLabels>,
+    func_table: &HashMap<String, FunctionInfo>,
 ) -> Result<Vec<Instruction>> {
     match stmt {
         Statement::Return(expr) => {
-            let mut instrs = generate_expr(expr, var_map, label_counter)?;
+            let mut instrs = generate_expr(expr, var_map, label_counter, func_table)?;
             instrs.push(Instruction::Ret);
             Ok(instrs)
         }
         Statement::Expression(expr) => {
-            generate_expr(expr, var_map, label_counter)
+            generate_expr(expr, var_map, label_counter, func_table)
         }
         Statement::Null => {
             Ok(Vec::new())
@@ -150,7 +239,7 @@ fn generate_statement(
             let n = *label_counter;
             *label_counter += 1;
 
-            let mut instrs = generate_expr(condition, var_map, label_counter)?;
+            let mut instrs = generate_expr(condition, var_map, label_counter, func_table)?;
             instrs.push(Instruction::Cmp {
                 src: Operand::Imm(0),
                 dst: Operand::Register(Reg::AX),
@@ -161,15 +250,15 @@ fn generate_statement(
                 let end_label = format!(".Lif_end{n}");
 
                 instrs.push(Instruction::JmpCC(CondCode::E, else_label.clone()));
-                instrs.extend(generate_statement(then_branch, var_map, next_offset, label_counter, loop_labels)?);
+                instrs.extend(generate_statement(then_branch, var_map, next_offset, label_counter, loop_labels, func_table)?);
                 instrs.push(Instruction::Jmp(end_label.clone()));
                 instrs.push(Instruction::Label(else_label));
-                instrs.extend(generate_statement(else_stmt, var_map, next_offset, label_counter, loop_labels)?);
+                instrs.extend(generate_statement(else_stmt, var_map, next_offset, label_counter, loop_labels, func_table)?);
                 instrs.push(Instruction::Label(end_label));
             } else {
                 let end_label = format!(".Lif_end{n}");
                 instrs.push(Instruction::JmpCC(CondCode::E, end_label.clone()));
-                instrs.extend(generate_statement(then_branch, var_map, next_offset, label_counter, loop_labels)?);
+                instrs.extend(generate_statement(then_branch, var_map, next_offset, label_counter, loop_labels, func_table)?);
                 instrs.push(Instruction::Label(end_label));
             }
             Ok(instrs)
@@ -179,7 +268,7 @@ fn generate_statement(
             let mut scope_decls: HashSet<String> = HashSet::new();
             let mut instrs = Vec::new();
             for item in items {
-                instrs.extend(generate_block_item(item, &mut inner_map, next_offset, label_counter, Some(&mut scope_decls), loop_labels)?);
+                instrs.extend(generate_block_item(item, &mut inner_map, next_offset, label_counter, Some(&mut scope_decls), loop_labels, func_table)?);
             }
             Ok(instrs)
         }
@@ -196,13 +285,13 @@ fn generate_statement(
             };
 
             let mut instrs = vec![Instruction::Label(start_label.clone())];
-            instrs.extend(generate_expr(condition, var_map, label_counter)?);
+            instrs.extend(generate_expr(condition, var_map, label_counter, func_table)?);
             instrs.push(Instruction::Cmp {
                 src: Operand::Imm(0),
                 dst: Operand::Register(Reg::AX),
             });
             instrs.push(Instruction::JmpCC(CondCode::E, end_label.clone()));
-            instrs.extend(generate_statement(body, var_map, next_offset, label_counter, Some(&labels))?);
+            instrs.extend(generate_statement(body, var_map, next_offset, label_counter, Some(&labels), func_table)?);
             instrs.push(Instruction::Jmp(start_label));
             instrs.push(Instruction::Label(end_label));
             Ok(instrs)
@@ -221,9 +310,9 @@ fn generate_statement(
             };
 
             let mut instrs = vec![Instruction::Label(start_label.clone())];
-            instrs.extend(generate_statement(body, var_map, next_offset, label_counter, Some(&labels))?);
+            instrs.extend(generate_statement(body, var_map, next_offset, label_counter, Some(&labels), func_table)?);
             instrs.push(Instruction::Label(continue_label));
-            instrs.extend(generate_expr(condition, var_map, label_counter)?);
+            instrs.extend(generate_expr(condition, var_map, label_counter, func_table)?);
             instrs.push(Instruction::Cmp {
                 src: Operand::Imm(0),
                 dst: Operand::Register(Reg::AX),
@@ -257,10 +346,10 @@ fn generate_statement(
             // init
             match init {
                 ForInit::Declaration(decl) => {
-                    instrs.extend(generate_declaration(decl, map_ref, next_offset, label_counter, None)?);
+                    instrs.extend(generate_declaration(decl, map_ref, next_offset, label_counter, None, func_table)?);
                 }
                 ForInit::Expression(Some(expr)) => {
-                    instrs.extend(generate_expr(expr, map_ref, label_counter)?);
+                    instrs.extend(generate_expr(expr, map_ref, label_counter, func_table)?);
                 }
                 ForInit::Expression(None) => {}
             }
@@ -269,7 +358,7 @@ fn generate_statement(
 
             // condition
             if let Some(cond) = condition {
-                instrs.extend(generate_expr(cond, map_ref, label_counter)?);
+                instrs.extend(generate_expr(cond, map_ref, label_counter, func_table)?);
                 instrs.push(Instruction::Cmp {
                     src: Operand::Imm(0),
                     dst: Operand::Register(Reg::AX),
@@ -278,12 +367,12 @@ fn generate_statement(
             }
 
             // body
-            instrs.extend(generate_statement(body, map_ref, next_offset, label_counter, Some(&labels))?);
+            instrs.extend(generate_statement(body, map_ref, next_offset, label_counter, Some(&labels), func_table)?);
 
             // continue target + post
             instrs.push(Instruction::Label(continue_label));
             if let Some(post_expr) = post {
-                instrs.extend(generate_expr(post_expr, map_ref, label_counter)?);
+                instrs.extend(generate_expr(post_expr, map_ref, label_counter, func_table)?);
             }
 
             instrs.push(Instruction::Jmp(start_label));
@@ -307,13 +396,14 @@ fn generate_statement(
     }
 }
 
-/// 式の変換（Chapter 5 で拡張）。
+/// 式の変換（Chapter 5, 9 で拡張）。
 ///
 /// すべての式は、評価後に結果が `%eax` に入るような命令列を生成する。
 fn generate_expr(
     expr: &Expr,
     var_map: &HashMap<String, i32>,
     label_counter: &mut usize,
+    func_table: &HashMap<String, FunctionInfo>,
 ) -> Result<Vec<Instruction>> {
     match expr {
         // 定数: 即値を %eax にロードする
@@ -340,7 +430,7 @@ fn generate_expr(
             let offset = var_map.get(name).ok_or_else(|| {
                 CompileError::CodegenError(format!("undeclared variable '{}'", name))
             })?;
-            let mut instrs = generate_expr(rhs, var_map, label_counter)?;
+            let mut instrs = generate_expr(rhs, var_map, label_counter, func_table)?;
             instrs.push(Instruction::Mov {
                 src: Operand::Register(Reg::AX),
                 dst: Operand::Stack(*offset),
@@ -388,7 +478,7 @@ fn generate_expr(
                     }
                 }
                 _ => {
-                    let mut instrs = generate_expr(inner, var_map, label_counter)?;
+                    let mut instrs = generate_expr(inner, var_map, label_counter, func_table)?;
                     match op {
                         UnaryOp::Negate => {
                             instrs.push(Instruction::Unary {
@@ -430,16 +520,16 @@ fn generate_expr(
             let else_label = format!(".Ltern_else{n}");
             let end_label = format!(".Ltern_end{n}");
 
-            let mut instrs = generate_expr(condition, var_map, label_counter)?;
+            let mut instrs = generate_expr(condition, var_map, label_counter, func_table)?;
             instrs.push(Instruction::Cmp {
                 src: Operand::Imm(0),
                 dst: Operand::Register(Reg::AX),
             });
             instrs.push(Instruction::JmpCC(CondCode::E, else_label.clone()));
-            instrs.extend(generate_expr(then_expr, var_map, label_counter)?);
+            instrs.extend(generate_expr(then_expr, var_map, label_counter, func_table)?);
             instrs.push(Instruction::Jmp(end_label.clone()));
             instrs.push(Instruction::Label(else_label));
-            instrs.extend(generate_expr(else_expr, var_map, label_counter)?);
+            instrs.extend(generate_expr(else_expr, var_map, label_counter, func_table)?);
             instrs.push(Instruction::Label(end_label));
             Ok(instrs)
         }
@@ -453,7 +543,6 @@ fn generate_expr(
 
             match op {
                 BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
-                    // 現在値をロード → push → rhs評価 → pop → 演算 → 格納
                     let mut instrs = vec![
                         Instruction::Mov {
                             src: Operand::Stack(offset),
@@ -461,7 +550,7 @@ fn generate_expr(
                         },
                         Instruction::Push(Operand::Register(Reg::AX)),
                     ];
-                    instrs.extend(generate_expr(rhs, var_map, label_counter)?);
+                    instrs.extend(generate_expr(rhs, var_map, label_counter, func_table)?);
                     instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
                     let asm_op = match op {
                         BinaryOp::Add => AsmBinaryOp::Add,
@@ -470,7 +559,6 @@ fn generate_expr(
                         _ => unreachable!(),
                     };
                     if matches!(op, BinaryOp::Subtract) {
-                        // CX(現在値) - AX(rhs) → CX に結果
                         instrs.push(Instruction::Binary {
                             op: asm_op,
                             src: Operand::Register(Reg::AX),
@@ -481,7 +569,6 @@ fn generate_expr(
                             dst: Operand::Register(Reg::AX),
                         });
                     } else {
-                        // AX(rhs) + CX(現在値) or AX * CX
                         instrs.push(Instruction::Binary {
                             op: asm_op,
                             src: Operand::Register(Reg::CX),
@@ -495,8 +582,7 @@ fn generate_expr(
                     Ok(instrs)
                 }
                 BinaryOp::Divide | BinaryOp::Remainder => {
-                    // rhs を評価 → CX に移動 → 現在値をAXにロード → cdq → idiv → 格納
-                    let mut instrs = generate_expr(rhs, var_map, label_counter)?;
+                    let mut instrs = generate_expr(rhs, var_map, label_counter, func_table)?;
                     instrs.push(Instruction::Mov {
                         src: Operand::Register(Reg::AX),
                         dst: Operand::Register(Reg::CX),
@@ -577,6 +663,53 @@ fn generate_expr(
             ])
         }
 
+        // 関数呼び出し（Chapter 9）
+        Expr::FunctionCall(name, args) => {
+            // 引数数チェック（既知の関数の場合）
+            if let Some(info) = func_table.get(name) {
+                if info.param_count != args.len() {
+                    return Err(CompileError::CodegenError(format!(
+                        "function '{}' expects {} arguments, got {}",
+                        name, info.param_count, args.len()
+                    )));
+                }
+            }
+
+            let arg_count = args.len();
+            let stack_args = if arg_count > 6 { arg_count - 6 } else { 0 };
+            let padding = if stack_args % 2 != 0 { 8 } else { 0 };
+
+            let mut instrs = Vec::new();
+
+            // 16バイトアラインメント用パディング
+            if padding > 0 {
+                instrs.push(Instruction::AllocateStack(padding));
+            }
+
+            // 全引数を右から左に評価し、各結果をスタックにプッシュ
+            for arg in args.iter().rev() {
+                instrs.extend(generate_expr(arg, var_map, label_counter, func_table)?);
+                instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
+            }
+
+            // 先頭 min(N, 6) 個をレジスタにポップ
+            let reg_args = std::cmp::min(arg_count, 6);
+            for i in 0..reg_args {
+                instrs.push(Instruction::Pop(Operand::Register(ARG_REGISTERS[i])));
+            }
+
+            // call
+            instrs.push(Instruction::Call(name.clone()));
+
+            // スタック引数の解放
+            let dealloc = stack_args * 8 + padding;
+            if dealloc > 0 {
+                instrs.push(Instruction::DeallocateStack(dealloc));
+            }
+
+            Ok(instrs)
+        }
+
         // 二項演算（Chapter 3-4, 7）
         Expr::Binary(op, left, right) => {
             match op {
@@ -587,14 +720,14 @@ fn generate_expr(
                     let false_label = format!(".Land_false{n}");
                     let end_label = format!(".Land_end{n}");
 
-                    let mut instrs = generate_expr(left, var_map, label_counter)?;
+                    let mut instrs = generate_expr(left, var_map, label_counter, func_table)?;
                     instrs.push(Instruction::Cmp {
                         src: Operand::Imm(0),
                         dst: Operand::Register(Reg::AX),
                     });
                     instrs.push(Instruction::JmpCC(CondCode::E, false_label.clone()));
 
-                    instrs.extend(generate_expr(right, var_map, label_counter)?);
+                    instrs.extend(generate_expr(right, var_map, label_counter, func_table)?);
                     instrs.push(Instruction::Cmp {
                         src: Operand::Imm(0),
                         dst: Operand::Register(Reg::AX),
@@ -624,14 +757,14 @@ fn generate_expr(
                     let true_label = format!(".Lor_true{n}");
                     let end_label = format!(".Lor_end{n}");
 
-                    let mut instrs = generate_expr(left, var_map, label_counter)?;
+                    let mut instrs = generate_expr(left, var_map, label_counter, func_table)?;
                     instrs.push(Instruction::Cmp {
                         src: Operand::Imm(0),
                         dst: Operand::Register(Reg::AX),
                     });
                     instrs.push(Instruction::JmpCC(CondCode::NE, true_label.clone()));
 
-                    instrs.extend(generate_expr(right, var_map, label_counter)?);
+                    instrs.extend(generate_expr(right, var_map, label_counter, func_table)?);
                     instrs.push(Instruction::Cmp {
                         src: Operand::Imm(0),
                         dst: Operand::Register(Reg::AX),
@@ -658,9 +791,9 @@ fn generate_expr(
                 BinaryOp::LessThan | BinaryOp::LessEqual
                 | BinaryOp::GreaterThan | BinaryOp::GreaterEqual
                 | BinaryOp::Equal | BinaryOp::NotEqual => {
-                    let mut instrs = generate_expr(left, var_map, label_counter)?;
+                    let mut instrs = generate_expr(left, var_map, label_counter, func_table)?;
                     instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
-                    instrs.extend(generate_expr(right, var_map, label_counter)?);
+                    instrs.extend(generate_expr(right, var_map, label_counter, func_table)?);
                     instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
                     instrs.push(Instruction::Cmp {
                         src: Operand::Register(Reg::AX),
@@ -688,9 +821,9 @@ fn generate_expr(
 
                 // ── 算術演算子（Chapter 3）──
                 BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
-                    let mut instrs = generate_expr(left, var_map, label_counter)?;
+                    let mut instrs = generate_expr(left, var_map, label_counter, func_table)?;
                     instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
-                    instrs.extend(generate_expr(right, var_map, label_counter)?);
+                    instrs.extend(generate_expr(right, var_map, label_counter, func_table)?);
 
                     instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
                     let asm_op = match op {
@@ -721,16 +854,16 @@ fn generate_expr(
 
                 // カンマ演算子（Chapter 7）: 左辺を評価して捨て、右辺の値を返す
                 BinaryOp::Comma => {
-                    let mut instrs = generate_expr(left, var_map, label_counter)?;
-                    instrs.extend(generate_expr(right, var_map, label_counter)?);
+                    let mut instrs = generate_expr(left, var_map, label_counter, func_table)?;
+                    instrs.extend(generate_expr(right, var_map, label_counter, func_table)?);
                     Ok(instrs)
                 }
 
                 // 除算・剰余: idivl を使う
                 BinaryOp::Divide | BinaryOp::Remainder => {
-                    let mut instrs = generate_expr(left, var_map, label_counter)?;
+                    let mut instrs = generate_expr(left, var_map, label_counter, func_table)?;
                     instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
-                    instrs.extend(generate_expr(right, var_map, label_counter)?);
+                    instrs.extend(generate_expr(right, var_map, label_counter, func_table)?);
 
                     instrs.push(Instruction::Mov {
                         src: Operand::Register(Reg::AX),
@@ -756,24 +889,31 @@ fn generate_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::ast::Function;
+    use crate::parse::ast::FunctionDecl;
 
     /// Chapter 1: `return 2` の場合
     #[test]
     fn generate_return_constant() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![BlockItem::Statement(Statement::Return(Expr::Constant(2)))],
-            },
+                params: vec![],
+                body: Some(vec![BlockItem::Statement(Statement::Return(Expr::Constant(2)))]),
+            }],
         };
         let asm = generate(&program).unwrap();
-        assert_eq!(asm.function.name, "main");
+        assert_eq!(asm.functions[0].name, "main");
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov {
                     src: Operand::Imm(2),
+                    dst: Operand::Register(Reg::AX),
+                },
+                Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov {
+                    src: Operand::Imm(0),
                     dst: Operand::Register(Reg::AX),
                 },
                 Instruction::Ret,
@@ -785,17 +925,18 @@ mod tests {
     #[test]
     fn generate_negation() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![BlockItem::Statement(Statement::Return(Expr::Unary(
+                params: vec![],
+                body: Some(vec![BlockItem::Statement(Statement::Return(Expr::Unary(
                     UnaryOp::Negate,
                     Box::new(Expr::Constant(5)),
-                )))],
-            },
+                )))]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov {
                     src: Operand::Imm(5),
@@ -806,6 +947,12 @@ mod tests {
                     operand: Operand::Register(Reg::AX),
                 },
                 Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov {
+                    src: Operand::Imm(0),
+                    dst: Operand::Register(Reg::AX),
+                },
+                Instruction::Ret,
             ]
         );
     }
@@ -814,17 +961,18 @@ mod tests {
     #[test]
     fn generate_complement() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![BlockItem::Statement(Statement::Return(Expr::Unary(
+                params: vec![],
+                body: Some(vec![BlockItem::Statement(Statement::Return(Expr::Unary(
                     UnaryOp::Complement,
                     Box::new(Expr::Constant(0)),
-                )))],
-            },
+                )))]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov {
                     src: Operand::Imm(0),
@@ -835,6 +983,12 @@ mod tests {
                     operand: Operand::Register(Reg::AX),
                 },
                 Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov {
+                    src: Operand::Imm(0),
+                    dst: Operand::Register(Reg::AX),
+                },
+                Instruction::Ret,
             ]
         );
     }
@@ -843,17 +997,18 @@ mod tests {
     #[test]
     fn generate_logical_not() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![BlockItem::Statement(Statement::Return(Expr::Unary(
+                params: vec![],
+                body: Some(vec![BlockItem::Statement(Statement::Return(Expr::Unary(
                     UnaryOp::Not,
                     Box::new(Expr::Constant(1)),
-                )))],
-            },
+                )))]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov {
                     src: Operand::Imm(1),
@@ -872,6 +1027,12 @@ mod tests {
                     operand: Operand::Register(Reg::AX),
                 },
                 Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov {
+                    src: Operand::Imm(0),
+                    dst: Operand::Register(Reg::AX),
+                },
+                Instruction::Ret,
             ]
         );
     }
@@ -882,18 +1043,19 @@ mod tests {
     #[test]
     fn generate_addition() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+                params: vec![],
+                body: Some(vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                     BinaryOp::Add,
                     Box::new(Expr::Constant(1)),
                     Box::new(Expr::Constant(2)),
-                )))],
-            },
+                )))]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
                 Instruction::Push(Operand::Register(Reg::AX)),
@@ -905,6 +1067,12 @@ mod tests {
                     dst: Operand::Register(Reg::AX),
                 },
                 Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov {
+                    src: Operand::Imm(0),
+                    dst: Operand::Register(Reg::AX),
+                },
+                Instruction::Ret,
             ]
         );
     }
@@ -913,18 +1081,19 @@ mod tests {
     #[test]
     fn generate_division() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+                params: vec![],
+                body: Some(vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                     BinaryOp::Divide,
                     Box::new(Expr::Constant(7)),
                     Box::new(Expr::Constant(2)),
-                )))],
-            },
+                )))]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov { src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
                 Instruction::Push(Operand::Register(Reg::AX)),
@@ -933,6 +1102,12 @@ mod tests {
                 Instruction::Pop(Operand::Register(Reg::AX)),
                 Instruction::Cdq,
                 Instruction::Idiv(Operand::Register(Reg::CX)),
+                Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov {
+                    src: Operand::Imm(0),
+                    dst: Operand::Register(Reg::AX),
+                },
                 Instruction::Ret,
             ]
         );
@@ -944,18 +1119,19 @@ mod tests {
     #[test]
     fn generate_less_than() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+                params: vec![],
+                body: Some(vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                     BinaryOp::LessThan,
                     Box::new(Expr::Constant(1)),
                     Box::new(Expr::Constant(2)),
-                )))],
-            },
+                )))]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
                 Instruction::Push(Operand::Register(Reg::AX)),
@@ -965,6 +1141,9 @@ mod tests {
                 Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
                 Instruction::SetCC { condition: CondCode::L, operand: Operand::Register(Reg::AX) },
                 Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
             ]
         );
     }
@@ -973,18 +1152,19 @@ mod tests {
     #[test]
     fn generate_logical_and() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+                params: vec![],
+                body: Some(vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                     BinaryOp::LogicalAnd,
                     Box::new(Expr::Constant(1)),
                     Box::new(Expr::Constant(2)),
-                )))],
-            },
+                )))]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
                 Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
@@ -998,6 +1178,9 @@ mod tests {
                 Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
                 Instruction::Label(".Land_end0".to_string()),
                 Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
             ]
         );
     }
@@ -1006,18 +1189,19 @@ mod tests {
     #[test]
     fn generate_logical_or() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+                params: vec![],
+                body: Some(vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                     BinaryOp::LogicalOr,
                     Box::new(Expr::Constant(0)),
                     Box::new(Expr::Constant(3)),
-                )))],
-            },
+                )))]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
                 Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
@@ -1031,6 +1215,9 @@ mod tests {
                 Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
                 Instruction::Label(".Lor_end0".to_string()),
                 Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
             ]
         );
     }
@@ -1039,18 +1226,19 @@ mod tests {
     #[test]
     fn generate_remainder() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+                params: vec![],
+                body: Some(vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                     BinaryOp::Remainder,
                     Box::new(Expr::Constant(7)),
                     Box::new(Expr::Constant(2)),
-                )))],
-            },
+                )))]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov { src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
                 Instruction::Push(Operand::Register(Reg::AX)),
@@ -1060,6 +1248,9 @@ mod tests {
                 Instruction::Cdq,
                 Instruction::Idiv(Operand::Register(Reg::CX)),
                 Instruction::Mov { src: Operand::Register(Reg::DX), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
                 Instruction::Ret,
             ]
         );
@@ -1071,25 +1262,29 @@ mod tests {
     #[test]
     fn generate_var_declaration_and_return() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(5)),
                     }),
                     BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
-                Instruction::AllocateStack(4),
+                Instruction::AllocateStack(16),
                 Instruction::Mov { src: Operand::Imm(5), dst: Operand::Register(Reg::AX) },
                 Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
                 Instruction::Mov { src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
                 Instruction::Ret,
             ]
         );
@@ -1099,9 +1294,10 @@ mod tests {
     #[test]
     fn generate_assignment() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: None,
@@ -1110,17 +1306,20 @@ mod tests {
                         Expr::Assign("a".to_string(), Box::new(Expr::Constant(10)))
                     )),
                     BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
-                Instruction::AllocateStack(4),
+                Instruction::AllocateStack(16),
                 Instruction::Mov { src: Operand::Imm(10), dst: Operand::Register(Reg::AX) },
                 Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
                 Instruction::Mov { src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
                 Instruction::Ret,
             ]
         );
@@ -1130,9 +1329,10 @@ mod tests {
     #[test]
     fn generate_two_vars_addition() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(2)),
@@ -1146,14 +1346,14 @@ mod tests {
                         Box::new(Expr::Var("a".to_string())),
                         Box::new(Expr::Var("b".to_string())),
                     ))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
-                Instruction::AllocateStack(8),
+                Instruction::AllocateStack(16),
                 Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
                 Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
                 Instruction::Mov { src: Operand::Imm(3), dst: Operand::Register(Reg::AX) },
@@ -1168,6 +1368,9 @@ mod tests {
                     dst: Operand::Register(Reg::AX),
                 },
                 Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
             ]
         );
     }
@@ -1176,9 +1379,10 @@ mod tests {
     #[test]
     fn generate_duplicate_declaration_error() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(1)),
@@ -1187,8 +1391,8 @@ mod tests {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(2)),
                     }),
-                ],
-            },
+                ]),
+            }],
         };
         let result = generate(&program);
         assert!(result.is_err());
@@ -1198,12 +1402,13 @@ mod tests {
     #[test]
     fn generate_undeclared_variable_error() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Statement(Statement::Return(Expr::Var("x".to_string()))),
-                ],
-            },
+                ]),
+            }],
         };
         let result = generate(&program);
         assert!(result.is_err());
@@ -1215,21 +1420,22 @@ mod tests {
     #[test]
     fn generate_if_true() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Statement(Statement::If {
                         condition: Expr::Constant(1),
                         then_branch: Box::new(Statement::Return(Expr::Constant(2))),
                         else_branch: None,
                     }),
                     BlockItem::Statement(Statement::Return(Expr::Constant(3))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
                 Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
@@ -1239,6 +1445,9 @@ mod tests {
                 Instruction::Label(".Lif_end0".to_string()),
                 Instruction::Mov { src: Operand::Imm(3), dst: Operand::Register(Reg::AX) },
                 Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
             ]
         );
     }
@@ -1247,20 +1456,21 @@ mod tests {
     #[test]
     fn generate_if_else() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Statement(Statement::If {
                         condition: Expr::Constant(0),
                         then_branch: Box::new(Statement::Return(Expr::Constant(2))),
                         else_branch: Some(Box::new(Statement::Return(Expr::Constant(3)))),
                     }),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
                 Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
@@ -1272,6 +1482,9 @@ mod tests {
                 Instruction::Mov { src: Operand::Imm(3), dst: Operand::Register(Reg::AX) },
                 Instruction::Ret,
                 Instruction::Label(".Lif_end0".to_string()),
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
             ]
         );
     }
@@ -1280,20 +1493,21 @@ mod tests {
     #[test]
     fn generate_ternary() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Statement(Statement::Return(Expr::Conditional {
                         condition: Box::new(Expr::Constant(1)),
                         then_expr: Box::new(Expr::Constant(5)),
                         else_expr: Box::new(Expr::Constant(10)),
                     })),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
                 Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
                 Instruction::Cmp { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
@@ -1304,6 +1518,9 @@ mod tests {
                 Instruction::Mov { src: Operand::Imm(10), dst: Operand::Register(Reg::AX) },
                 Instruction::Label(".Ltern_end0".to_string()),
                 Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
             ]
         );
     }
@@ -1312,9 +1529,10 @@ mod tests {
     #[test]
     fn generate_compound_scoping() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(1)),
@@ -1326,21 +1544,24 @@ mod tests {
                         }),
                     ])),
                     BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
         // 外側の a はオフセット -4、内側の a はオフセット -8
         // return a は外側の a (オフセット -4) を参照する
         assert_eq!(
-            asm.function.instructions,
+            asm.functions[0].instructions,
             vec![
-                Instruction::AllocateStack(8),
+                Instruction::AllocateStack(16),
                 Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
                 Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
                 Instruction::Mov { src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
                 Instruction::Mov { src: Operand::Register(Reg::AX), dst: Operand::Stack(-8) },
                 Instruction::Mov { src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
+                Instruction::Ret,
+                // 暗黙の return 0
+                Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
                 Instruction::Ret,
             ]
         );
@@ -1352,9 +1573,10 @@ mod tests {
     #[test]
     fn generate_compound_add_assign() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(5)),
@@ -1363,21 +1585,22 @@ mod tests {
                         Expr::CompoundAssign(BinaryOp::Add, "a".to_string(), Box::new(Expr::Constant(3)))
                     )),
                     BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
         // Just check it generates without error; E2E tests verify correctness
-        assert!(!asm.function.instructions.is_empty());
+        assert!(!asm.functions[0].instructions.is_empty());
     }
 
     /// Chapter 7: `int a = 5; return ++a;` → 前置インクリメント
     #[test]
     fn generate_pre_increment() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(5)),
@@ -1385,20 +1608,21 @@ mod tests {
                     BlockItem::Statement(Statement::Return(
                         Expr::Unary(UnaryOp::PreIncrement, Box::new(Expr::Var("a".to_string())))
                     )),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
-        assert!(!asm.function.instructions.is_empty());
+        assert!(!asm.functions[0].instructions.is_empty());
     }
 
     /// Chapter 7: `int a = 5; return a++;` → 後置インクリメント
     #[test]
     fn generate_postfix_increment() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(5)),
@@ -1406,20 +1630,21 @@ mod tests {
                     BlockItem::Statement(Statement::Return(
                         Expr::PostfixIncrement("a".to_string())
                     )),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
-        assert!(!asm.function.instructions.is_empty());
+        assert!(!asm.functions[0].instructions.is_empty());
     }
 
     /// Chapter 7: カンマ演算子
     #[test]
     fn generate_comma_operator() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Statement(Statement::Return(
                         Expr::Binary(
                             BinaryOp::Comma,
@@ -1427,20 +1652,21 @@ mod tests {
                             Box::new(Expr::Constant(2)),
                         )
                     )),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
-        assert!(!asm.function.instructions.is_empty());
+        assert!(!asm.functions[0].instructions.is_empty());
     }
 
     /// Chapter 6: 同じスコープの重複宣言はエラー、異なるスコープならOK
     #[test]
     fn generate_shadow_in_nested_scope_ok() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(1)),
@@ -1452,8 +1678,8 @@ mod tests {
                         }),
                     ])),
                     BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
-                ],
-            },
+                ]),
+            }],
         };
         // ネストスコープでのシャドーイングは許可される
         assert!(generate(&program).is_ok());
@@ -1465,9 +1691,10 @@ mod tests {
     #[test]
     fn generate_while_loop() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(0)),
@@ -1487,23 +1714,24 @@ mod tests {
                         )),
                     }),
                     BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
-        assert!(!asm.function.instructions.is_empty());
+        assert!(!asm.functions[0].instructions.is_empty());
         // ラベルが正しく生成されることを確認
-        assert!(asm.function.instructions.contains(&Instruction::Label(".Lwhile_start0".to_string())));
-        assert!(asm.function.instructions.contains(&Instruction::Label(".Lwhile_end0".to_string())));
+        assert!(asm.functions[0].instructions.contains(&Instruction::Label(".Lwhile_start0".to_string())));
+        assert!(asm.functions[0].instructions.contains(&Instruction::Label(".Lwhile_end0".to_string())));
     }
 
     /// Chapter 8: do-while ループの基本コード生成
     #[test]
     fn generate_do_while_loop() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(0)),
@@ -1523,23 +1751,24 @@ mod tests {
                         ),
                     }),
                     BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
-        assert!(!asm.function.instructions.is_empty());
-        assert!(asm.function.instructions.contains(&Instruction::Label(".Ldo_start0".to_string())));
-        assert!(asm.function.instructions.contains(&Instruction::Label(".Ldo_continue0".to_string())));
-        assert!(asm.function.instructions.contains(&Instruction::Label(".Ldo_end0".to_string())));
+        assert!(!asm.functions[0].instructions.is_empty());
+        assert!(asm.functions[0].instructions.contains(&Instruction::Label(".Ldo_start0".to_string())));
+        assert!(asm.functions[0].instructions.contains(&Instruction::Label(".Ldo_continue0".to_string())));
+        assert!(asm.functions[0].instructions.contains(&Instruction::Label(".Ldo_end0".to_string())));
     }
 
     /// Chapter 8: for ループの基本コード生成
     #[test]
     fn generate_for_loop() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(0)),
@@ -1568,26 +1797,27 @@ mod tests {
                         )),
                     }),
                     BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
-        assert!(!asm.function.instructions.is_empty());
-        assert!(asm.function.instructions.contains(&Instruction::Label(".Lfor_start0".to_string())));
-        assert!(asm.function.instructions.contains(&Instruction::Label(".Lfor_continue0".to_string())));
-        assert!(asm.function.instructions.contains(&Instruction::Label(".Lfor_end0".to_string())));
+        assert!(!asm.functions[0].instructions.is_empty());
+        assert!(asm.functions[0].instructions.contains(&Instruction::Label(".Lfor_start0".to_string())));
+        assert!(asm.functions[0].instructions.contains(&Instruction::Label(".Lfor_continue0".to_string())));
+        assert!(asm.functions[0].instructions.contains(&Instruction::Label(".Lfor_end0".to_string())));
     }
 
     /// Chapter 8: break はループ内でのみ使用可能
     #[test]
     fn generate_break_outside_loop_error() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Statement(Statement::Break),
-                ],
-            },
+                ]),
+            }],
         };
         let result = generate(&program);
         assert!(result.is_err());
@@ -1597,12 +1827,13 @@ mod tests {
     #[test]
     fn generate_continue_outside_loop_error() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Statement(Statement::Continue),
-                ],
-            },
+                ]),
+            }],
         };
         let result = generate(&program);
         assert!(result.is_err());
@@ -1612,29 +1843,31 @@ mod tests {
     #[test]
     fn generate_break_in_while() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Statement(Statement::While {
                         condition: Expr::Constant(1),
                         body: Box::new(Statement::Break),
                     }),
                     BlockItem::Statement(Statement::Return(Expr::Constant(0))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
         // break should generate a Jmp to the while_end label
-        assert!(asm.function.instructions.contains(&Instruction::Jmp(".Lwhile_end0".to_string())));
+        assert!(asm.functions[0].instructions.contains(&Instruction::Jmp(".Lwhile_end0".to_string())));
     }
 
     /// Chapter 8: continue inside while generates correct jump
     #[test]
     fn generate_continue_in_while() {
         let program = Program {
-            function: Function {
+            functions: vec![FunctionDecl {
                 name: "main".to_string(),
-                body: vec![
+                params: vec![],
+                body: Some(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
                         init: Some(Expr::Constant(0)),
@@ -1653,11 +1886,11 @@ mod tests {
                         ])),
                     }),
                     BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
-                ],
-            },
+                ]),
+            }],
         };
         let asm = generate(&program).unwrap();
         // continue in while should jump to while_start
-        assert!(asm.function.instructions.contains(&Instruction::Jmp(".Lwhile_start0".to_string())));
+        assert!(asm.functions[0].instructions.contains(&Instruction::Jmp(".Lwhile_start0".to_string())));
     }
 }

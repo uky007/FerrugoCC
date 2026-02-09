@@ -24,7 +24,9 @@ use crate::codegen::asm_ast::{
 /// アセンブリ AST をテキストに変換する。
 pub fn emit(program: &AsmProgram) -> Result<String> {
     let mut out = String::new();
-    emit_function(&mut out, program)?;
+    for func in &program.functions {
+        emit_function(&mut out, func)?;
+    }
     // スタック非実行セクション（セキュリティ慣習）
     writeln!(out, "    .section .note.GNU-stack,\"\",@progbits")
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
@@ -35,8 +37,7 @@ pub fn emit(program: &AsmProgram) -> Result<String> {
 ///
 /// `.globl` ディレクティブでシンボルを外部公開し、
 /// ラベルを出力してから、プロローグ→命令列を書き出す。
-fn emit_function(out: &mut String, program: &AsmProgram) -> Result<()> {
-    let func = &program.function;
+fn emit_function(out: &mut String, func: &crate::codegen::asm_ast::AsmFunction) -> Result<()> {
     // .globl で関数シンボルをリンカに公開（main を見つけられるようにする）
     writeln!(out, "    .globl {}", func.name)
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
@@ -137,6 +138,16 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
             writeln!(out, "    subq ${size}, %rsp")
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
+        // Chapter 9: スタック領域の解放
+        Instruction::DeallocateStack(size) => {
+            writeln!(out, "    addq ${size}, %rsp")
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        // Chapter 9: 関数呼び出し
+        Instruction::Call(name) => {
+            writeln!(out, "    call {name}")
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
         // Chapter 5: ret はエピローグを含む
         Instruction::Ret => {
             writeln!(out, "    movq %rbp, %rsp")
@@ -188,6 +199,10 @@ fn format_register_quad(reg: &Reg) -> &'static str {
         Reg::AX => "%rax",
         Reg::CX => "%rcx",
         Reg::DX => "%rdx",
+        Reg::DI => "%rdi",
+        Reg::SI => "%rsi",
+        Reg::R8 => "%r8",
+        Reg::R9 => "%r9",
     }
 }
 
@@ -197,6 +212,10 @@ fn format_register(reg: &Reg) -> &'static str {
         Reg::AX => "%eax",
         Reg::CX => "%ecx",
         Reg::DX => "%edx",
+        Reg::DI => "%edi",
+        Reg::SI => "%esi",
+        Reg::R8 => "%r8d",
+        Reg::R9 => "%r9d",
     }
 }
 
@@ -206,6 +225,10 @@ fn format_register_byte(reg: &Reg) -> &'static str {
         Reg::AX => "%al",
         Reg::CX => "%cl",
         Reg::DX => "%dl",
+        Reg::DI => "%dil",
+        Reg::SI => "%sil",
+        Reg::R8 => "%r8b",
+        Reg::R9 => "%r9b",
     }
 }
 
@@ -230,7 +253,7 @@ mod tests {
     #[test]
     fn emit_return_constant() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::Mov {
@@ -239,7 +262,7 @@ mod tests {
                     },
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         let expected = "    .globl main\nmain:\n    pushq %rbp\n    movq %rsp, %rbp\n    movl $2, %eax\n    movq %rbp, %rsp\n    popq %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
@@ -250,7 +273,7 @@ mod tests {
     #[test]
     fn emit_negation() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::Mov {
@@ -263,7 +286,7 @@ mod tests {
                     },
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         assert!(asm.contains("negl %eax"));
@@ -273,7 +296,7 @@ mod tests {
     #[test]
     fn emit_complement() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::Mov {
@@ -286,7 +309,7 @@ mod tests {
                     },
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         assert!(asm.contains("notl %eax"));
@@ -296,7 +319,7 @@ mod tests {
     #[test]
     fn emit_logical_not() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::Mov {
@@ -317,7 +340,7 @@ mod tests {
                     },
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         assert!(asm.contains("cmpl $0, %eax"));
@@ -330,7 +353,7 @@ mod tests {
     #[test]
     fn emit_addition() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
@@ -344,7 +367,7 @@ mod tests {
                     },
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         assert!(asm.contains("push %rax"));
@@ -356,7 +379,7 @@ mod tests {
     #[test]
     fn emit_division() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::Mov { src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
@@ -368,7 +391,7 @@ mod tests {
                     Instruction::Idiv(Operand::Register(Reg::CX)),
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         assert!(asm.contains("movl %eax, %ecx"));
@@ -382,7 +405,7 @@ mod tests {
     #[test]
     fn emit_less_than() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
@@ -394,7 +417,7 @@ mod tests {
                     Instruction::SetCC { condition: CondCode::L, operand: Operand::Register(Reg::AX) },
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         assert!(asm.contains("cmpl %eax, %ecx"));
@@ -405,7 +428,7 @@ mod tests {
     #[test]
     fn emit_logical_and() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::Mov { src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
@@ -421,7 +444,7 @@ mod tests {
                     Instruction::Label(".Land_end0".to_string()),
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         assert!(asm.contains("je .Land_false0"));
@@ -434,7 +457,7 @@ mod tests {
     #[test]
     fn emit_logical_or() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::Mov { src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
@@ -450,7 +473,7 @@ mod tests {
                     Instruction::Label(".Lor_end0".to_string()),
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         assert!(asm.contains("jne .Lor_true0"));
@@ -463,7 +486,7 @@ mod tests {
     #[test]
     fn emit_remainder() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::Mov { src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
@@ -476,7 +499,7 @@ mod tests {
                     Instruction::Mov { src: Operand::Register(Reg::DX), dst: Operand::Register(Reg::AX) },
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         assert!(asm.contains("idivl %ecx"));
@@ -489,7 +512,7 @@ mod tests {
     #[test]
     fn emit_allocate_stack_and_stack_operand() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::AllocateStack(4),
@@ -498,7 +521,7 @@ mod tests {
                     Instruction::Mov { src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         assert!(asm.contains("subq $4, %rsp"));
@@ -516,7 +539,7 @@ mod tests {
     #[test]
     fn emit_var_declaration_full() {
         let program = AsmProgram {
-            function: AsmFunction {
+            functions: vec![AsmFunction {
                 name: "main".to_string(),
                 instructions: vec![
                     Instruction::AllocateStack(4),
@@ -525,7 +548,7 @@ mod tests {
                     Instruction::Mov { src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
                     Instruction::Ret,
                 ],
-            },
+            }],
         };
         let asm = emit(&program).unwrap();
         let expected = "    .globl main\nmain:\n    pushq %rbp\n    movq %rsp, %rbp\n    subq $4, %rsp\n    movl $5, %eax\n    movl %eax, -4(%rbp)\n    movl -4(%rbp), %eax\n    movq %rbp, %rsp\n    popq %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";

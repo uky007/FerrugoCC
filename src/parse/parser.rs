@@ -44,7 +44,7 @@
 
 use crate::error::{CompileError, Result};
 use crate::lex::{Token, TokenKind};
-use super::ast::{Program, Function, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit};
+use super::ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit};
 
 /// トークン列を構文解析して AST に変換する。
 ///
@@ -103,14 +103,17 @@ impl<'a> Parser<'a> {
         Ok(token)
     }
 
-    /// `<program> ::= <function>`
+    /// `<program> ::= <function_decl>*`
     fn parse_program(&mut self) -> Result<Program> {
-        let function = self.parse_function()?;
-        Ok(Program { function })
+        let mut functions = Vec::new();
+        while self.pos < self.tokens.len() {
+            functions.push(self.parse_function_decl()?);
+        }
+        Ok(Program { functions })
     }
 
-    /// `<function> ::= "int" <identifier> "(" "void" ")" "{" <block_item>* "}"`
-    fn parse_function(&mut self) -> Result<Function> {
+    /// `<function_decl> ::= "int" <identifier> "(" <params> ")" ( "{" <block_item>* "}" | ";" )`
+    fn parse_function_decl(&mut self) -> Result<FunctionDecl> {
         self.expect(&TokenKind::KwInt)?;
 
         let name_token = self.advance()?;
@@ -124,18 +127,58 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(&TokenKind::OpenParen)?;
-        self.expect(&TokenKind::KwVoid)?;
+
+        // パラメータパース: "void" → 空リスト、"int" <id> ("," "int" <id>)* → 名前リスト
+        let params = if self.peek()?.kind == TokenKind::KwVoid {
+            self.advance()?; // consume 'void'
+            Vec::new()
+        } else {
+            let mut params = Vec::new();
+            // 最初のパラメータ
+            self.expect(&TokenKind::KwInt)?;
+            let param_token = self.advance()?;
+            match &param_token.kind {
+                TokenKind::Identifier(name) => params.push(name.clone()),
+                other => {
+                    return Err(CompileError::ParseError(format!(
+                        "expected parameter name, got {:?}", other
+                    )));
+                }
+            }
+            // 追加パラメータ
+            while self.peek()?.kind == TokenKind::Comma {
+                self.advance()?; // consume ','
+                self.expect(&TokenKind::KwInt)?;
+                let param_token = self.advance()?;
+                match &param_token.kind {
+                    TokenKind::Identifier(name) => params.push(name.clone()),
+                    other => {
+                        return Err(CompileError::ParseError(format!(
+                            "expected parameter name, got {:?}", other
+                        )));
+                    }
+                }
+            }
+            params
+        };
+
         self.expect(&TokenKind::CloseParen)?;
-        self.expect(&TokenKind::OpenBrace)?;
 
-        let mut body = Vec::new();
-        while self.peek()?.kind != TokenKind::CloseBrace {
-            body.push(self.parse_block_item()?);
-        }
+        // ボディ: '{' なら定義、';' なら宣言のみ
+        let body = if self.peek()?.kind == TokenKind::OpenBrace {
+            self.expect(&TokenKind::OpenBrace)?;
+            let mut items = Vec::new();
+            while self.peek()?.kind != TokenKind::CloseBrace {
+                items.push(self.parse_block_item()?);
+            }
+            self.expect(&TokenKind::CloseBrace)?;
+            Some(items)
+        } else {
+            self.expect(&TokenKind::Semicolon)?;
+            None
+        };
 
-        self.expect(&TokenKind::CloseBrace)?;
-
-        Ok(Function { name, body })
+        Ok(FunctionDecl { name, params, body })
     }
 
     /// `<block_item> ::= <statement> | <declaration>`
@@ -604,7 +647,24 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier(_) => {
                 let token = self.advance()?;
                 if let TokenKind::Identifier(name) = &token.kind {
-                    Ok(Expr::Var(name.clone()))
+                    let name = name.clone();
+                    // 関数呼び出し: <identifier> "(" <args>? ")"
+                    if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
+                        self.advance()?; // consume '('
+                        let mut args = Vec::new();
+                        if self.peek()?.kind != TokenKind::CloseParen {
+                            // 各引数は parse_assignment() でパース（カンマ演算子と区別）
+                            args.push(self.parse_assignment()?);
+                            while self.peek()?.kind == TokenKind::Comma {
+                                self.advance()?; // consume ','
+                                args.push(self.parse_assignment()?);
+                            }
+                        }
+                        self.expect(&TokenKind::CloseParen)?;
+                        Ok(Expr::FunctionCall(name, args))
+                    } else {
+                        Ok(Expr::Var(name))
+                    }
                 } else {
                     unreachable!()
                 }
@@ -635,9 +695,9 @@ mod tests {
     fn parse_return_2() {
         let tokens = lex::lex("int main(void) { return 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        assert_eq!(program.function.name, "main");
+        assert_eq!(program.functions[0].name, "main");
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Constant(2)))]
         );
     }
@@ -647,7 +707,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Constant(0)))]
         );
     }
@@ -674,7 +734,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return -5; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(5)))))]
         );
     }
@@ -685,7 +745,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return ~0; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Complement, Box::new(Expr::Constant(0)))))]
         );
     }
@@ -696,7 +756,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return !1; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Not, Box::new(Expr::Constant(1)))))]
         );
     }
@@ -707,7 +767,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return --5; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(
                 UnaryOp::PreDecrement,
                 Box::new(Expr::Constant(5))
@@ -721,7 +781,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return - -5; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(
                 UnaryOp::Negate,
                 Box::new(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(5))))
@@ -735,7 +795,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return ~(-3); }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Unary(
                 UnaryOp::Complement,
                 Box::new(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(3))))
@@ -751,7 +811,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 1 + 2; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Add,
                 Box::new(Expr::Constant(1)),
@@ -766,7 +826,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 1 + 2 * 3; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Add,
                 Box::new(Expr::Constant(1)),
@@ -785,7 +845,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 1 - 2 - 3; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Subtract,
                 Box::new(Expr::Binary(
@@ -804,7 +864,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return (1 + 2) * 3; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Multiply,
                 Box::new(Expr::Binary(
@@ -823,7 +883,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 7 / 2; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Divide,
                 Box::new(Expr::Constant(7)),
@@ -838,7 +898,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 7 % 2; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Remainder,
                 Box::new(Expr::Constant(7)),
@@ -855,7 +915,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 1 < 2; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::LessThan,
                 Box::new(Expr::Constant(1)),
@@ -870,7 +930,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 1 == 2; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Equal,
                 Box::new(Expr::Constant(1)),
@@ -885,7 +945,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 1 && 2; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::LogicalAnd,
                 Box::new(Expr::Constant(1)),
@@ -900,7 +960,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 1 || 2; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::LogicalOr,
                 Box::new(Expr::Constant(1)),
@@ -915,7 +975,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 1 < 2 && 3 > 1; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::LogicalAnd,
                 Box::new(Expr::Binary(
@@ -938,7 +998,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 2 + 3 > 4; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::GreaterThan,
                 Box::new(Expr::Binary(
@@ -957,7 +1017,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 1 || 2 && 3; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::LogicalOr,
                 Box::new(Expr::Constant(1)),
@@ -976,7 +1036,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return -1 + 2; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Binary(
                 BinaryOp::Add,
                 Box::new(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(1)))),
@@ -993,7 +1053,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a = 5; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
@@ -1010,7 +1070,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
@@ -1027,7 +1087,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a; a = 10; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
@@ -1047,7 +1107,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a = 2; int b = 3; return a + b; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
@@ -1072,7 +1132,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { ; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![
                 BlockItem::Statement(Statement::Null),
                 BlockItem::Statement(Statement::Return(Expr::Constant(0))),
@@ -1088,7 +1148,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { if (1) return 2; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
                 condition: Expr::Constant(1),
                 then_branch: Box::new(Statement::Return(Expr::Constant(2))),
@@ -1103,7 +1163,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { if (0) return 2; else return 3; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
                 condition: Expr::Constant(0),
                 then_branch: Box::new(Statement::Return(Expr::Constant(2))),
@@ -1118,7 +1178,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return 1 ? 5 : 10; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Expr::Conditional {
                 condition: Box::new(Expr::Constant(1)),
                 then_expr: Box::new(Expr::Constant(5)),
@@ -1133,7 +1193,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { { int a = 2; } return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![
                 BlockItem::Statement(Statement::Compound(vec![
                     BlockItem::Declaration(Declaration {
@@ -1153,7 +1213,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { if (0) if (0) return 1; else return 2; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body,
+            *program.functions[0].body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
                 condition: Expr::Constant(0),
                 then_branch: Box::new(Statement::If {
@@ -1174,7 +1234,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a = 5; a += 3; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[1],
+            program.functions[0].body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Expression(
                 Expr::CompoundAssign(BinaryOp::Add, "a".to_string(), Box::new(Expr::Constant(3)))
             ))
@@ -1187,7 +1247,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a = 5; return ++a; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[1],
+            program.functions[0].body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Return(
                 Expr::Unary(UnaryOp::PreIncrement, Box::new(Expr::Var("a".to_string())))
             ))
@@ -1200,7 +1260,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a = 5; return a++; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[1],
+            program.functions[0].body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Return(
                 Expr::PostfixIncrement("a".to_string())
             ))
@@ -1213,7 +1273,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a = 5; return a--; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[1],
+            program.functions[0].body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Return(
                 Expr::PostfixDecrement("a".to_string())
             ))
@@ -1226,7 +1286,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { return (1, 2, 3); }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[0],
+            program.functions[0].body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::Return(
                 Expr::Binary(
                     BinaryOp::Comma,
@@ -1248,7 +1308,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a = (1, 2); return a; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[0],
+            program.functions[0].body.as_ref().unwrap()[0],
             BlockItem::Declaration(Declaration {
                 name: "a".to_string(),
                 init: Some(Expr::Binary(
@@ -1266,7 +1326,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a; int b; a = b = 5; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[2],
+            program.functions[0].body.as_ref().unwrap()[2],
             BlockItem::Statement(Statement::Expression(
                 Expr::Assign(
                     "a".to_string(),
@@ -1284,7 +1344,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { while (1) return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[0],
+            program.functions[0].body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::While {
                 condition: Expr::Constant(1),
                 body: Box::new(Statement::Return(Expr::Constant(0))),
@@ -1298,7 +1358,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { int a; do { a = 1; } while (0); }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[1],
+            program.functions[0].body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::DoWhile {
                 body: Box::new(Statement::Compound(vec![
                     BlockItem::Statement(Statement::Expression(
@@ -1315,7 +1375,7 @@ mod tests {
     fn parse_for_with_declaration() {
         let tokens = lex::lex("int main(void) { int a; for (int i = 0; i < 5; i++) a++; }").unwrap();
         let program = parse(&tokens).unwrap();
-        if let BlockItem::Statement(Statement::For { init, condition, post, body: _ }) = &program.function.body[1] {
+        if let BlockItem::Statement(Statement::For { init, condition, post, body: _ }) = &program.functions[0].body.as_ref().unwrap()[1] {
             assert_eq!(*init, ForInit::Declaration(Declaration {
                 name: "i".to_string(),
                 init: Some(Expr::Constant(0)),
@@ -1333,7 +1393,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { for (;;) break; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[0],
+            program.functions[0].body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::For {
                 init: ForInit::Expression(None),
                 condition: None,
@@ -1349,7 +1409,7 @@ mod tests {
         let tokens = lex::lex("int main(void) { while (1) break; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[0],
+            program.functions[0].body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::While {
                 condition: Expr::Constant(1),
                 body: Box::new(Statement::Break),
@@ -1363,11 +1423,87 @@ mod tests {
         let tokens = lex::lex("int main(void) { while (1) continue; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(
-            program.function.body[0],
+            program.functions[0].body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::While {
                 condition: Expr::Constant(1),
                 body: Box::new(Statement::Continue),
             })
+        );
+    }
+
+    // ── Chapter 9 テスト ──
+
+    /// 関数呼び出し: `foo()`
+    #[test]
+    fn parse_function_call_no_args() {
+        let tokens = lex::lex("int five(void) { return 5; } int main(void) { return five(); }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(program.functions.len(), 2);
+        assert_eq!(program.functions[0].name, "five");
+        assert_eq!(program.functions[0].params, Vec::<String>::new());
+        assert_eq!(program.functions[1].name, "main");
+        assert_eq!(
+            program.functions[1].body.as_ref().unwrap()[0],
+            BlockItem::Statement(Statement::Return(
+                Expr::FunctionCall("five".to_string(), vec![])
+            ))
+        );
+    }
+
+    /// 関数呼び出し: `add(2, 3)`
+    #[test]
+    fn parse_function_call_with_args() {
+        let tokens = lex::lex("int add(int a, int b) { return a + b; } int main(void) { return add(2, 3); }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(program.functions[0].name, "add");
+        assert_eq!(program.functions[0].params, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            program.functions[1].body.as_ref().unwrap()[0],
+            BlockItem::Statement(Statement::Return(
+                Expr::FunctionCall("add".to_string(), vec![
+                    Expr::Constant(2),
+                    Expr::Constant(3),
+                ])
+            ))
+        );
+    }
+
+    /// 関数宣言（プロトタイプ）
+    #[test]
+    fn parse_function_declaration() {
+        let tokens = lex::lex("int add(int a, int b); int main(void) { return add(1, 2); }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(program.functions.len(), 2);
+        assert_eq!(program.functions[0].name, "add");
+        assert!(program.functions[0].body.is_none());
+        assert_eq!(program.functions[0].params, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// 複数関数: 宣言+定義
+    #[test]
+    fn parse_declaration_then_definition() {
+        let tokens = lex::lex("int add(int a, int b); int main(void) { return add(10, 20); } int add(int a, int b) { return a + b; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(program.functions.len(), 3);
+        assert!(program.functions[0].body.is_none());
+        assert!(program.functions[1].body.is_some());
+        assert!(program.functions[2].body.is_some());
+    }
+
+    /// 引数中のカンマはカンマ演算子ではなく引数区切りとしてパースされる
+    #[test]
+    fn parse_function_call_comma_not_operator() {
+        let tokens = lex::lex("int foo(int a, int b, int c) { return a; } int main(void) { return foo(1, 2, 3); }").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(
+            program.functions[1].body.as_ref().unwrap()[0],
+            BlockItem::Statement(Statement::Return(
+                Expr::FunctionCall("foo".to_string(), vec![
+                    Expr::Constant(1),
+                    Expr::Constant(2),
+                    Expr::Constant(3),
+                ])
+            ))
         );
     }
 }

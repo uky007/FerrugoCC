@@ -3,10 +3,11 @@
 //! パーサーが構築する木構造を定義する。
 //! 各ノードはCの文法要素に対応し、ソースの構造を忠実に表現する。
 //!
-//! # 現在サポートする文法（Chapter 8）
+//! # 現在サポートする文法（Chapter 9）
 //! ```text
-//! <program>        ::= <function>
-//! <function>       ::= "int" <identifier> "(" "void" ")" "{" <block_item>* "}"
+//! <program>        ::= <function_decl>*                        ← Ch9: 複数関数
+//! <function_decl>  ::= "int" <identifier> "(" <params> ")" ( "{" <block_item>* "}" | ";" )
+//! <params>         ::= "void" | "int" <identifier> ("," "int" <identifier>)*
 //! <block_item>     ::= <statement> | <declaration>
 //! <declaration>    ::= "int" <identifier> ("=" <assignment>)? ";"
 //! <statement>      ::= "return" <exp> ";"
@@ -34,23 +35,27 @@
 //! <unary>          ::= <unary_op> <unary> | <postfix>         ← Ch7: postfix呼び出し
 //! <unary_op>       ::= "-" | "~" | "!" | "++" | "--"          ← Ch7: 前置++/--
 //! <postfix>        ::= <primary> ("++" | "--")*                ← Ch7: 後置++/--
-//! <primary>        ::= <int> | <identifier> | "(" <exp> ")"
+//! <primary>        ::= <int>
+//!                    | <identifier> ("(" <args>? ")")?         ← Ch9: 関数呼び出し
+//!                    | "(" <exp> ")"
+//! <args>           ::= <assignment> ("," <assignment>)*        ← カンマ演算子と区別
 //! ```
 
-/// プログラム全体。現時点では関数1つだけを持つ。
+/// プログラム全体。複数の関数宣言/定義を持つ（Chapter 9）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
-    pub function: Function,
+    pub functions: Vec<FunctionDecl>,
 }
 
-/// 関数定義。名前と本体（ブロック要素のリスト）を持つ。
+/// 関数宣言/定義（Chapter 9）。
 ///
-/// Chapter 5 で `body` が単一文から `Vec<BlockItem>` に変更された。
-/// 戻り値の型は常に `int`、引数は常に `void`。
+/// - `params`: パラメータ名のリスト（戻り値の型は常に `int`）
+/// - `body`: `Some(...)` なら関数定義、`None` なら前方宣言（プロトタイプ）
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Function {
+pub struct FunctionDecl {
     pub name: String,
-    pub body: Vec<BlockItem>,
+    pub params: Vec<String>,
+    pub body: Option<Vec<BlockItem>>,
 }
 
 /// ブロック要素（Chapter 5 で追加）。
@@ -163,6 +168,8 @@ pub enum Expr {
     PostfixIncrement(String),
     /// 後置デクリメント（Chapter 7）。`a--` — 旧値を返す。
     PostfixDecrement(String),
+    /// 関数呼び出し（Chapter 9）。`foo(a, b)` → `FunctionCall("foo", vec![a, b])`
+    FunctionCall(String, Vec<Expr>),
 }
 
 /// 単項演算子の種類（Chapter 2）。
