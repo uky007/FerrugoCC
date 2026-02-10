@@ -10,202 +10,193 @@
 //! - 後段の最適化パスを挿入しやすい
 //! - テストしやすい（構造体の比較で検証できる）
 //!
-//! # x86-64 レジスタ（Chapter 1-3 で使用するもの）
-//! - `%eax` — 32ビット汎用レジスタ。関数の戻り値や算術演算の結果を格納する。
-//!   Cの `return` 文はこのレジスタに値を置いてから `ret` する。
-//! - `%al` — `%eax` の下位8ビット。`sete` 等の SetCC 命令で使用。
-//! - `%ecx` — 二項演算の一時レジスタ。除算の除数格納にも使用。
-//! - `%edx` — `cdq`/`idivl` で使用。符号拡張と剰余格納。
+//! # Chapter 11: AsmType による命令サイズの区別
+//! `Longword` (32bit) と `Quadword` (64bit) で命令のサイズを区別する。
 
-/// アセンブリプログラム全体（Chapter 10: 静的変数対応）
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// アセンブリ命令のサイズ（Chapter 11, 13）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsmType {
+    /// 32ビット（int）
+    Longword,
+    /// 64ビット（long）
+    Quadword,
+    /// 64ビット浮動小数点（double）（Chapter 13）
+    Double,
+}
+
+/// 静的変数/定数の初期値（Chapter 13）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StaticInit {
+    /// 整数初期値
+    IntInit(i64),
+    /// 浮動小数点初期値
+    DoubleInit(f64),
+}
+
+/// 読み取り専用の静的定数（Chapter 13）。`.rodata` セクションに配置。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsmStaticConstant {
+    pub name: String,
+    pub alignment: usize,
+    pub init: StaticInit,
+}
+
+/// アセンブリプログラム全体（Chapter 10: 静的変数対応, Chapter 13: 静的定数追加）
+#[derive(Debug, Clone, PartialEq)]
 pub struct AsmProgram {
     pub functions: Vec<AsmFunction>,
     pub static_vars: Vec<AsmStaticVar>,
+    pub static_constants: Vec<AsmStaticConstant>,
 }
 
 /// アセンブリレベルの関数。名前と命令列を持つ。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AsmFunction {
     pub name: String,
     pub instructions: Vec<Instruction>,
     pub global: bool,
 }
 
-/// 静的変数（Chapter 10）。グローバル変数および static ローカル変数。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 静的変数（Chapter 10, 11, 13）。グローバル変数および static ローカル変数。
+#[derive(Debug, Clone, PartialEq)]
 pub struct AsmStaticVar {
     pub name: String,
     pub global: bool,
-    pub init: i64,
+    pub init: StaticInit,
+    pub asm_type: AsmType,
 }
 
 /// 個々のアセンブリ命令。
 ///
 /// 各バリアントが1つの x86-64 命令に対応する。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Chapter 11: サイズ依存命令に `asm_type` フィールドを追加。
+#[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
-    /// `movl src, dst` — 値の転送（32ビット）
-    ///
-    /// 即値をレジスタにロードする、またはレジスタ間のコピーに使う。
-    /// 例: `movl $42, %eax` → EAX に 42 を格納
-    Mov { src: Operand, dst: Operand },
+    /// `movl`/`movq` — 値の転送
+    Mov { asm_type: AsmType, src: Operand, dst: Operand },
 
-    /// 単項演算命令（Chapter 2）
-    ///
-    /// `negl %eax` (Neg) や `notl %eax` (Not) を表す。
-    /// オペランドを直接書き換える（破壊的操作）。
-    Unary { op: AsmUnaryOp, operand: Operand },
+    /// 単項演算命令（neg/not）
+    Unary { asm_type: AsmType, op: AsmUnaryOp, operand: Operand },
 
-    /// `cmpl src, dst` — 比較命令（Chapter 2: 論理否定 `!` で使用）
-    ///
-    /// src と dst を比較し、結果をフラグレジスタに設定する。
-    /// 値そのものは変更しない。
-    /// 例: `cmpl $0, %eax` → EAX が 0 かどうかをフラグに反映
-    Cmp { src: Operand, dst: Operand },
+    /// `cmpl`/`cmpq` — 比較命令
+    Cmp { asm_type: AsmType, src: Operand, dst: Operand },
 
-    /// `setCC dst` — 条件付きバイト設定（Chapter 2: 論理否定 `!` で使用）
-    ///
-    /// フラグレジスタの状態に基づき、dst の下位8ビットに 0 または 1 を設定する。
-    /// 例: `sete %al` → ZF（ゼロフラグ）が立っていれば AL=1、そうでなければ AL=0
+    /// `setCC dst` — 条件付きバイト設定
     SetCC { condition: CondCode, operand: Operand },
 
-    /// 二項演算命令（Chapter 3）
-    ///
-    /// `addl`, `subl`, `imull` を表す。
-    /// 例: `addl %ecx, %eax` → EAX = EAX + ECX
-    Binary { op: AsmBinaryOp, src: Operand, dst: Operand },
+    /// 二項演算命令（add/sub/imul）
+    Binary { asm_type: AsmType, op: AsmBinaryOp, src: Operand, dst: Operand },
 
-    /// `idivl operand` — 符号付き除算（Chapter 3）
-    ///
-    /// `%edx:%eax` を被除数、operand を除数として除算する。
-    /// 商 → `%eax`、余り → `%edx`
-    Idiv(Operand),
+    /// `idivl`/`idivq` — 符号付き除算
+    Idiv { asm_type: AsmType, operand: Operand },
 
-    /// `cdq` — EAX を EDX:EAX に符号拡張（Chapter 3）
-    ///
-    /// `idivl` の前に呼び出して被除数を64ビットに拡張する。
-    Cdq,
+    /// `divl`/`divq` — 符号なし除算（Chapter 12）
+    Div { asm_type: AsmType, operand: Operand },
 
-    /// `push operand` — スタックにプッシュ（Chapter 3）
-    ///
-    /// 二項演算で左辺の結果を一時退避するために使用。
+    /// `cdq` (Longword) / `cqo` (Quadword) — 符号拡張
+    SignExtend(AsmType),
+
+    /// `movslq src, dst` — int → long 符号拡張（Chapter 11）
+    Movsx { src: Operand, dst: Operand },
+
+    /// `movl src, dst` — 32→64 ゼロ拡張（Chapter 12）
+    /// x86-64 で32ビット mov は上位32ビットを自動ゼロクリアする。
+    MovZeroExtend { src: Operand, dst: Operand },
+
+    /// `movl src, dst` — long → int 切り詰め（Chapter 11）
+    /// 32ビット mov で上位32ビットを暗黙的にゼロクリア。
+    Truncate { src: Operand, dst: Operand },
+
+    /// `push operand` — スタックにプッシュ
     Push(Operand),
 
-    /// `pop operand` — スタックからポップ（Chapter 3）
-    ///
-    /// 退避した左辺の結果を復帰する。
+    /// `pop operand` — スタックからポップ
     Pop(Operand),
 
-    /// `jmp label` — 無条件ジャンプ（Chapter 4: 論理演算子で使用）
+    /// `jmp label` — 無条件ジャンプ
     Jmp(String),
 
-    /// `jCC label` — 条件ジャンプ（Chapter 4: 論理演算子で使用）
-    ///
-    /// フラグレジスタの状態に基づき、条件が成立すればジャンプする。
+    /// `jCC label` — 条件ジャンプ
     JmpCC(CondCode, String),
 
-    /// `label:` — ラベル定義（Chapter 4: 論理演算子で使用）
-    ///
-    /// ジャンプ先のターゲットとなるラベルを定義する。
+    /// `label:` — ラベル定義
     Label(String),
 
-    /// `subq $N, %rsp` — スタック領域の確保（Chapter 5）
-    ///
-    /// ローカル変数用のスタック領域を確保する。
+    /// `subq $N, %rsp` — スタック領域の確保
     AllocateStack(usize),
 
-    /// `addq $N, %rsp` — スタック領域の解放（Chapter 9）
-    ///
-    /// 関数呼び出し後にスタック引数とパディングを解放する。
+    /// `addq $N, %rsp` — スタック領域の解放
     DeallocateStack(usize),
 
-    /// `call <function>` — 関数呼び出し（Chapter 9）
+    /// `call <function>` — 関数呼び出し
     Call(String),
 
     /// `ret` — 関数からの復帰
-    ///
-    /// コールスタックからリターンアドレスを取り出してジャンプする。
-    /// `%eax` の値が呼び出し元に戻り値として渡される（x86-64 ABI）。
     Ret,
+
+    /// `cvtsi2sd` — 整数→double 変換（Chapter 13）
+    Cvtsi2sd { asm_type: AsmType, src: Operand, dst: Operand },
+
+    /// `cvttsd2si` — double→整数 変換（切り捨て）（Chapter 13）
+    Cvttsd2si { asm_type: AsmType, src: Operand, dst: Operand },
 }
 
-/// アセンブリレベルの単項演算子（Chapter 2）
+/// アセンブリレベルの単項演算子
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsmUnaryOp {
-    /// `negl` — 2の補数による符号反転。C の `-x` に対応。
-    /// 内部動作: operand = 0 - operand
+    /// `negl`/`negq` — 符号反転
     Neg,
-    /// `notl` — ビット反転。C の `~x` に対応。
-    /// 内部動作: 各ビットを反転（0↔1）
+    /// `notl`/`notq` — ビット反転
     Not,
 }
 
-/// アセンブリレベルの二項演算子（Chapter 3）
+/// アセンブリレベルの二項演算子
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsmBinaryOp {
-    /// `addl` — 加算。C の `a + b` に対応。
+    /// `addl`/`addq`/`addsd` — 加算
     Add,
-    /// `subl` — 減算。C の `a - b` に対応。
+    /// `subl`/`subq`/`subsd` — 減算
     Sub,
-    /// `imull` — 符号付き乗算。C の `a * b` に対応。
+    /// `imull`/`imulq`/`mulsd` — 乗算
     Mult,
+    /// `divsd` — SSE 除算（Chapter 13）
+    DivDouble,
+    /// `xorpd` — XOR（符号ビット反転用）（Chapter 13）
+    Xor,
 }
 
-/// 条件コード（Chapter 2-4）
-///
-/// `SetCC` や `JmpCC` 命令でどのフラグ条件を使うかを指定する。
+/// 条件コード
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CondCode {
-    /// Equal — ZF (ゼロフラグ) が 1 のとき真
-    E,
-    /// Not Equal — ZF が 0 のとき真
-    NE,
-    /// Less Than — SF ≠ OF のとき真（符号付き比較）
-    L,
-    /// Less or Equal — ZF=1 または SF≠OF のとき真
-    LE,
-    /// Greater Than — ZF=0 かつ SF=OF のとき真
-    G,
-    /// Greater or Equal — SF=OF のとき真
-    GE,
+    E, NE, L, LE, G, GE,
+    /// `a` — 符号なし大なり（Chapter 12）
+    A,
+    /// `ae` — 符号なし大なりイコール（Chapter 12）
+    AE,
+    /// `b` — 符号なし小なり（Chapter 12）
+    B,
+    /// `be` — 符号なし小なりイコール（Chapter 12）
+    BE,
 }
 
 /// オペランド（命令の引数）
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Operand {
     /// 即値（定数）。例: `$42`
     Imm(i64),
     /// レジスタ。例: `%eax`
     Register(Reg),
-    /// スタック上の変数（Chapter 5）。例: `-4(%rbp)`
-    ///
-    /// オフセットは `%rbp` からの相対位置（負の値）。
+    /// スタック上の変数。例: `-4(%rbp)`
     Stack(i32),
-    /// グローバル/静的変数（Chapter 10）。例: `x(%rip)`
-    ///
-    /// RIP相対アドレッシングでデータセクションの変数にアクセスする。
+    /// グローバル/静的変数。例: `x(%rip)`
     Data(String),
 }
 
 /// レジスタ名
-///
-/// AT&T 構文では命令に応じて `%eax`（32ビット）や `%al`（8ビット）として出力する。
-/// Chapter 9: 関数呼び出し用の引数レジスタを追加。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reg {
-    /// EAX レジスタ — 戻り値・算術演算用
-    AX,
-    /// ECX レジスタ — 二項演算の一時格納・除算の除数用（Chapter 3）。第4引数。
-    CX,
-    /// EDX レジスタ — `cdq`/`idivl` で使用（Chapter 3）。第3引数。
-    DX,
-    /// EDI レジスタ — 第1引数（Chapter 9）
-    DI,
-    /// ESI レジスタ — 第2引数（Chapter 9）
-    SI,
-    /// R8D レジスタ — 第5引数（Chapter 9）
-    R8,
-    /// R9D レジスタ — 第6引数（Chapter 9）
-    R9,
+    AX, CX, DX, DI, SI, R8, R9,
+    /// XMM レジスタ（Chapter 13: SSE 浮動小数点演算）
+    XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+    XMM14, XMM15,
 }

@@ -12,10 +12,12 @@
 //!    - `=` → `==` or `=`  /  `&` → `&&`  /  `|` → `||`
 //!    - `+` → `++`, `+=`, or `+`  /  `-` → `--`, `-=`, or `-`  (Chapter 7)
 //!    - `*` → `*=` or `*`  /  `/` → `/=` or `/`  /  `%` → `%=` or `%`  (Chapter 7)
-//! 3. 数字で始まる → 連続する数字を読み取り `IntLiteral` に変換
+//! 3. 数字で始まる → 連続する数字を読み取り、サフィックスに応じて変換
+//!    - `L`/`l` サフィックス → `LongLiteral` に変換（Chapter 11）
+//!    - サフィックスなし → `IntLiteral` に変換
 //!    - 数字の直後に英字/`_` があればエラー（例: `123abc`）
 //! 4. 英字/`_` で始まる → 連続する英数字/`_` を読み取り、
-//!    キーワードテーブルと照合して `KwInt` 等かを判定。一致しなければ `Identifier`
+//!    キーワードテーブルと照合して `KwInt`, `KwLong` 等かを判定。一致しなければ `Identifier`
 //! 5. それ以外 → エラー
 //!
 //! # 例
@@ -188,31 +190,135 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             continue;
         }
 
-        // ── 整数リテラル ──
-        // 数字の連続を読み取り、i64 に変換する。
-        // 直後に英字や `_` が続く場合（例: `123abc`）はエラーとする。
-        if b.is_ascii_digit() {
+        // ── 数値リテラル（整数 or 浮動小数点）──
+        // 数字で始まる場合: `.` か `e`/`E` があれば浮動小数点、なければ整数。
+        // `.` で始まり次が数字の場合も浮動小数点（`.5` 等）。
+        if b.is_ascii_digit() || (b == b'.' && pos + 1 < bytes.len() && bytes[pos + 1].is_ascii_digit()) {
             let start = pos;
             let start_col = column;
+            let mut is_float = false;
+
+            // `.` で始まる場合（例: `.5`）
+            if b == b'.' {
+                is_float = true;
+            }
+
+            // 整数部を読み取り
             while pos < bytes.len() && bytes[pos].is_ascii_digit() {
                 pos += 1;
                 column += 1;
             }
-            // 整数リテラルの直後に識別子文字が来るのは不正
-            if pos < bytes.len() && (bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_') {
+
+            // 小数点
+            if pos < bytes.len() && bytes[pos] == b'.' {
+                is_float = true;
+                pos += 1;
+                column += 1;
+                // 小数部
+                while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                    pos += 1;
+                    column += 1;
+                }
+            }
+
+            // 指数部（e/E）
+            if pos < bytes.len() && (bytes[pos] == b'e' || bytes[pos] == b'E') {
+                is_float = true;
+                pos += 1;
+                column += 1;
+                // オプショナルの符号
+                if pos < bytes.len() && (bytes[pos] == b'+' || bytes[pos] == b'-') {
+                    pos += 1;
+                    column += 1;
+                }
+                // 指数の数字（必須）
+                if pos >= bytes.len() || !bytes[pos].is_ascii_digit() {
+                    return Err(CompileError::LexError(format!(
+                        "invalid floating-point literal at line {line}, column {start_col}: \
+                         expected digit after exponent"
+                    )));
+                }
+                while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                    pos += 1;
+                    column += 1;
+                }
+            }
+
+            if is_float {
+                // 後続文字チェック（英字, _, . は不正）
+                if pos < bytes.len() && (bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' || bytes[pos] == b'.') {
+                    return Err(CompileError::LexError(format!(
+                        "invalid token at line {line}, column {start_col}: \
+                         invalid suffix on floating-point literal"
+                    )));
+                }
+
+                let text = &source[start..pos];
+                let value: f64 = text.parse().map_err(|e| {
+                    CompileError::LexError(format!(
+                        "invalid floating-point literal '{text}' at line {line}, column {start_col}: {e}"
+                    ))
+                })?;
+                tokens.push(Token {
+                    kind: TokenKind::DoubleLiteral(value),
+                    span: Span { offset: start, len: pos - start, line, column: start_col },
+                });
+                continue;
+            }
+
+            // 整数リテラル: サフィックス解析（Chapter 11, 12）
+            let digit_end = pos;
+            let mut has_u = false;
+            let mut has_l = false;
+            // 最大2文字のサフィックスを消費（U/u, L/l の組み合わせ）
+            for _ in 0..2 {
+                if pos < bytes.len() && (bytes[pos] == b'U' || bytes[pos] == b'u') && !has_u {
+                    has_u = true;
+                    pos += 1;
+                    column += 1;
+                } else if pos < bytes.len() && (bytes[pos] == b'L' || bytes[pos] == b'l') && !has_l {
+                    has_l = true;
+                    pos += 1;
+                    column += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // サフィックスの後にさらに英数字が続くのは不正
+            if pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
                 return Err(CompileError::LexError(format!(
                     "invalid token at line {line}, column {start_col}: \
-                     integer literal followed by identifier character"
+                     invalid suffix on integer literal"
                 )));
             }
-            let text = &source[start..pos];
-            let value: i64 = text.parse().map_err(|e| {
-                CompileError::LexError(format!(
-                    "invalid integer literal '{text}' at line {line}, column {start_col}: {e}"
-                ))
-            })?;
+
+            let text = &source[start..digit_end];
+            let kind = if has_u {
+                let value: u64 = text.parse().map_err(|e| {
+                    CompileError::LexError(format!(
+                        "invalid integer literal '{text}' at line {line}, column {start_col}: {e}"
+                    ))
+                })?;
+                if has_l {
+                    TokenKind::ULongLiteral(value)
+                } else {
+                    TokenKind::UIntLiteral(value)
+                }
+            } else {
+                let value: i64 = text.parse().map_err(|e| {
+                    CompileError::LexError(format!(
+                        "invalid integer literal '{text}' at line {line}, column {start_col}: {e}"
+                    ))
+                })?;
+                if has_l {
+                    TokenKind::LongLiteral(value)
+                } else {
+                    TokenKind::IntLiteral(value)
+                }
+            };
             tokens.push(Token {
-                kind: TokenKind::IntLiteral(value),
+                kind,
                 span: Span { offset: start, len: pos - start, line, column: start_col },
             });
             continue;
@@ -243,6 +349,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "continue" => TokenKind::KwContinue,
                 "static"   => TokenKind::KwStatic,
                 "extern"   => TokenKind::KwExtern,
+                "long"     => TokenKind::KwLong,
+                "unsigned" => TokenKind::KwUnsigned,
+                "signed"   => TokenKind::KwSigned,
+                "double"   => TokenKind::KwDouble,
                 _        => TokenKind::Identifier(text.to_string()),
             };
             tokens.push(Token {
@@ -571,6 +681,98 @@ mod tests {
                 &TokenKind::KwExtern,
             ]
         );
+    }
+
+    /// Chapter 11: long キーワードのトークン化
+    #[test]
+    fn lex_long_keyword() {
+        let tokens = lex("long").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::KwLong);
+    }
+
+    /// Chapter 11: L サフィックス付きリテラル
+    #[test]
+    fn lex_long_literal() {
+        let tokens = lex("100L").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::LongLiteral(100));
+    }
+
+    /// Chapter 11: l サフィックス付きリテラル（小文字）
+    #[test]
+    fn lex_long_literal_lowercase() {
+        let tokens = lex("0l").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::LongLiteral(0));
+    }
+
+    /// Chapter 11: L の後に英数字が続くとエラー
+    #[test]
+    fn lex_long_literal_invalid_suffix() {
+        let result = lex("123La");
+        assert!(result.is_err());
+    }
+
+    /// Chapter 12: unsigned/signed キーワード
+    #[test]
+    fn lex_unsigned_signed_keywords() {
+        let tokens = lex("unsigned signed").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(kinds, vec![&TokenKind::KwUnsigned, &TokenKind::KwSigned]);
+    }
+
+    /// Chapter 12: U サフィックス付きリテラル
+    #[test]
+    fn lex_uint_literal() {
+        let tokens = lex("42U").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::UIntLiteral(42));
+    }
+
+    /// Chapter 12: u サフィックス付きリテラル（小文字）
+    #[test]
+    fn lex_uint_literal_lowercase() {
+        let tokens = lex("42u").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::UIntLiteral(42));
+    }
+
+    /// Chapter 12: UL サフィックス付きリテラル
+    #[test]
+    fn lex_ulong_literal() {
+        let tokens = lex("42UL").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::ULongLiteral(42));
+    }
+
+    /// Chapter 12: ul サフィックス付きリテラル（小文字）
+    #[test]
+    fn lex_ulong_literal_lowercase() {
+        let tokens = lex("42ul").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::ULongLiteral(42));
+    }
+
+    /// Chapter 12: LU サフィックス（逆順）
+    #[test]
+    fn lex_ulong_literal_lu() {
+        let tokens = lex("42LU").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::ULongLiteral(42));
+    }
+
+    /// Chapter 12: lu サフィックス（逆順・小文字）
+    #[test]
+    fn lex_ulong_literal_lu_lowercase() {
+        let tokens = lex("42lu").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::ULongLiteral(42));
+    }
+
+    /// Chapter 12: 混合ケース Ul
+    #[test]
+    fn lex_ulong_literal_mixed_case() {
+        let tokens = lex("42Ul").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::ULongLiteral(42));
+    }
+
+    /// Chapter 12: U の後に英数字が続くとエラー
+    #[test]
+    fn lex_uint_literal_invalid_suffix() {
+        let result = lex("123Ua");
+        assert!(result.is_err());
     }
 
     /// Chapter 2: 括弧付きの式

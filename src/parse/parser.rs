@@ -9,15 +9,16 @@
 //! - `peek()` で先読み、`advance()` で消費、`expect()` で特定トークンを要求
 //! - 各 `parse_*` メソッドが文法規則に対応
 //!
-//! # 対応する文法（Chapter 10）
+//! # 対応する文法（Chapter 11）
 //! ```text
 //! <program>        ::= <top_level_decl>*
 //! <top_level_decl> ::= <function_decl> | <variable_decl>
-//! <function_decl>  ::= <storage_class>? "int" <id> "(" <params> ")" ( "{" <block>* "}" | ";" )
-//! <variable_decl>  ::= <storage_class>? "int" <id> ("=" <expr>)? ";"
+//! <function_decl>  ::= <storage_class>? <type> <id> "(" <params> ")" ( "{" <block>* "}" | ";" )
+//! <variable_decl>  ::= <storage_class>? <type> <id> ("=" <expr>)? ";"
+//! <type>           ::= "int" | "long" | "long" "int" | "int" "long"  ← Ch11: 型指定子
 //! <storage_class>  ::= "static" | "extern"
 //! <block_item>     ::= <statement> | <declaration>
-//! <declaration>    ::= <storage_class>? "int" <identifier> ("=" <assignment>)? ";"
+//! <declaration>    ::= <storage_class>? <type> <identifier> ("=" <assignment>)? ";"
 //! <statement>      ::= "return" <exp> ";"
 //!                    | <exp> ";"
 //!                    | ";"
@@ -42,13 +43,13 @@
 //! <unary>          ::= <unary_op> <unary> | <postfix>
 //! <unary_op>       ::= "-" | "~" | "!" | "++" | "--"
 //! <postfix>        ::= <primary> ("++" | "--")*
-//! <primary>        ::= <int> | <identifier> ("(" <args>? ")")? | "(" <exp> ")"
+//! <primary>        ::= <int> | <long> | <identifier> ("(" <args>? ")")? | "(" <exp> ")"
 //! <args>           ::= <assignment> ("," <assignment>)*
 //! ```
 
 use crate::error::{CompileError, Result};
 use crate::lex::{Token, TokenKind};
-use super::ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit, StorageClass, TopLevelDecl};
+use super::ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit, StorageClass, TopLevelDecl, Type};
 
 /// トークン列を構文解析して AST に変換する。
 ///
@@ -125,6 +126,140 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// 型指定子をパースする（Chapter 11, 12）。
+    ///
+    /// フラグ方式でキーワードを任意順に収集し、型に解決する。
+    /// 有効な組み合わせ:
+    /// - `int` / `signed` / `signed int` → Int
+    /// - `long` / `long int` / `int long` / `signed long` / `signed long int` → Long
+    /// - `unsigned` / `unsigned int` → UInt
+    /// - `unsigned long` / `unsigned long int` → ULong
+    fn parse_type_specifier(&mut self) -> Result<Type> {
+        let mut has_int = false;
+        let mut has_long = false;
+        let mut has_unsigned = false;
+        let mut has_signed = false;
+        let mut has_double = false;
+        let mut count = 0;
+
+        loop {
+            if self.pos >= self.tokens.len() {
+                break;
+            }
+            match &self.peek()?.kind {
+                TokenKind::KwInt => {
+                    if has_int {
+                        return Err(CompileError::ParseError(
+                            "duplicate 'int' type specifier".to_string()
+                        ));
+                    }
+                    if has_double {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'double' with other type specifiers".to_string()
+                        ));
+                    }
+                    has_int = true;
+                    self.advance()?;
+                    count += 1;
+                }
+                TokenKind::KwLong => {
+                    if has_long {
+                        return Err(CompileError::ParseError(
+                            "duplicate 'long' type specifier".to_string()
+                        ));
+                    }
+                    if has_double {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'double' with other type specifiers".to_string()
+                        ));
+                    }
+                    has_long = true;
+                    self.advance()?;
+                    count += 1;
+                }
+                TokenKind::KwUnsigned => {
+                    if has_unsigned {
+                        return Err(CompileError::ParseError(
+                            "duplicate 'unsigned' type specifier".to_string()
+                        ));
+                    }
+                    if has_signed {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'signed' and 'unsigned'".to_string()
+                        ));
+                    }
+                    if has_double {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'double' with other type specifiers".to_string()
+                        ));
+                    }
+                    has_unsigned = true;
+                    self.advance()?;
+                    count += 1;
+                }
+                TokenKind::KwSigned => {
+                    if has_signed {
+                        return Err(CompileError::ParseError(
+                            "duplicate 'signed' type specifier".to_string()
+                        ));
+                    }
+                    if has_unsigned {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'signed' and 'unsigned'".to_string()
+                        ));
+                    }
+                    if has_double {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'double' with other type specifiers".to_string()
+                        ));
+                    }
+                    has_signed = true;
+                    self.advance()?;
+                    count += 1;
+                }
+                TokenKind::KwDouble => {
+                    if has_double {
+                        return Err(CompileError::ParseError(
+                            "duplicate 'double' type specifier".to_string()
+                        ));
+                    }
+                    if has_int || has_long || has_unsigned || has_signed {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'double' with other type specifiers".to_string()
+                        ));
+                    }
+                    has_double = true;
+                    self.advance()?;
+                    count += 1;
+                }
+                _ => break,
+            }
+        }
+
+        if count == 0 {
+            let token = self.advance()?;
+            return Err(CompileError::ParseError(format!(
+                "expected type specifier, got {:?}", token.kind
+            )));
+        }
+
+        // 型の解決
+        if has_double {
+            Ok(Type::Double)
+        } else if has_unsigned {
+            if has_long {
+                Ok(Type::ULong)
+            } else {
+                Ok(Type::UInt)
+            }
+        } else if has_long {
+            Ok(Type::Long)
+        } else {
+            // has_int or has_signed (or both)
+            Ok(Type::Int)
+        }
+    }
+
     /// `<program> ::= <top_level_decl>*`
     fn parse_program(&mut self) -> Result<Program> {
         let mut declarations = Vec::new();
@@ -140,7 +275,7 @@ impl<'a> Parser<'a> {
     /// `[static|extern]? int <id>` の後に `(` → 関数、`=` or `;` → 変数。
     fn parse_top_level_decl(&mut self) -> Result<TopLevelDecl> {
         let storage_class = self.parse_storage_class()?;
-        self.expect(&TokenKind::KwInt)?;
+        let decl_type = self.parse_type_specifier()?;
 
         let name_token = self.advance()?;
         let name = match &name_token.kind {
@@ -162,10 +297,10 @@ impl<'a> Parser<'a> {
                 Vec::new()
             } else {
                 let mut params = Vec::new();
-                self.expect(&TokenKind::KwInt)?;
+                let param_type = self.parse_type_specifier()?;
                 let param_token = self.advance()?;
                 match &param_token.kind {
-                    TokenKind::Identifier(name) => params.push(name.clone()),
+                    TokenKind::Identifier(name) => params.push((param_type, name.clone())),
                     other => {
                         return Err(CompileError::ParseError(format!(
                             "expected parameter name, got {:?}", other
@@ -174,10 +309,10 @@ impl<'a> Parser<'a> {
                 }
                 while self.peek()?.kind == TokenKind::Comma {
                     self.advance()?;
-                    self.expect(&TokenKind::KwInt)?;
+                    let param_type = self.parse_type_specifier()?;
                     let param_token = self.advance()?;
                     match &param_token.kind {
-                        TokenKind::Identifier(name) => params.push(name.clone()),
+                        TokenKind::Identifier(name) => params.push((param_type, name.clone())),
                         other => {
                             return Err(CompileError::ParseError(format!(
                                 "expected parameter name, got {:?}", other
@@ -203,7 +338,7 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            Ok(TopLevelDecl::Function(FunctionDecl { name, params, body, storage_class }))
+            Ok(TopLevelDecl::Function(FunctionDecl { name, return_type: decl_type, params, body, storage_class }))
         } else {
             // 変数宣言
             let init = if self.peek()?.kind == TokenKind::Assign {
@@ -213,16 +348,18 @@ impl<'a> Parser<'a> {
                 None
             };
             self.expect(&TokenKind::Semicolon)?;
-            Ok(TopLevelDecl::Variable(Declaration { name, init, storage_class }))
+            Ok(TopLevelDecl::Variable(Declaration { name, var_type: decl_type, init, storage_class }))
         }
     }
 
     /// `<block_item> ::= <statement> | <declaration>`
     ///
-    /// `KwInt`, `KwStatic`, `KwExtern` で始まれば宣言、それ以外は文。
+    /// 型キーワードまたはストレージクラスで始まれば宣言、それ以外は文。
     fn parse_block_item(&mut self) -> Result<BlockItem> {
         match &self.peek()?.kind {
-            TokenKind::KwInt | TokenKind::KwStatic | TokenKind::KwExtern => {
+            TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
+            | TokenKind::KwDouble
+            | TokenKind::KwStatic | TokenKind::KwExtern => {
                 Ok(BlockItem::Declaration(self.parse_declaration()?))
             }
             _ => {
@@ -231,10 +368,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `<declaration> ::= <storage_class>? "int" <identifier> ("=" <assignment>)? ";"`
+    /// `<declaration> ::= <storage_class>? <type_specifier> <identifier> ("=" <assignment>)? ";"`
     fn parse_declaration(&mut self) -> Result<Declaration> {
         let storage_class = self.parse_storage_class()?;
-        self.expect(&TokenKind::KwInt)?;
+        let var_type = self.parse_type_specifier()?;
 
         let name_token = self.advance()?;
         let name = match &name_token.kind {
@@ -254,7 +391,7 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(&TokenKind::Semicolon)?;
-        Ok(Declaration { name, init, storage_class })
+        Ok(Declaration { name, var_type, init, storage_class })
     }
 
     /// `<statement> ::= "return" <exp> ";" | <exp> ";" | ";"
@@ -329,7 +466,9 @@ impl<'a> Parser<'a> {
 
                 // for-init: 宣言 or 式文 or 空文
                 let init = match &self.peek()?.kind {
-                    TokenKind::KwInt | TokenKind::KwStatic | TokenKind::KwExtern => {
+                    TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
+                    | TokenKind::KwDouble
+                    | TokenKind::KwStatic | TokenKind::KwExtern => {
                         ForInit::Declaration(self.parse_declaration()?)
                     }
                     TokenKind::Semicolon => {
@@ -684,6 +823,38 @@ impl<'a> Parser<'a> {
                 let token = self.advance()?;
                 if let TokenKind::IntLiteral(value) = &token.kind {
                     Ok(Expr::Constant(*value))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::LongLiteral(_) => {
+                let token = self.advance()?;
+                if let TokenKind::LongLiteral(value) = &token.kind {
+                    Ok(Expr::ConstantLong(*value))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::UIntLiteral(_) => {
+                let token = self.advance()?;
+                if let TokenKind::UIntLiteral(value) = &token.kind {
+                    Ok(Expr::ConstantUInt(*value))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::ULongLiteral(_) => {
+                let token = self.advance()?;
+                if let TokenKind::ULongLiteral(value) = &token.kind {
+                    Ok(Expr::ConstantULong(*value))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::DoubleLiteral(_) => {
+                let token = self.advance()?;
+                if let TokenKind::DoubleLiteral(value) = &token.kind {
+                    Ok(Expr::ConstantDouble(*value))
                 } else {
                     unreachable!()
                 }
@@ -1130,6 +1301,7 @@ mod tests {
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
+                    var_type: Type::Int,
                     init: Some(Expr::Constant(5)),
                     storage_class: None,
                 }),
@@ -1149,6 +1321,7 @@ mod tests {
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
+                    var_type: Type::Int,
                     init: None,
                     storage_class: None,
                 }),
@@ -1168,6 +1341,7 @@ mod tests {
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
+                    var_type: Type::Int,
                     init: None,
                     storage_class: None,
                 }),
@@ -1190,11 +1364,13 @@ mod tests {
             vec![
                 BlockItem::Declaration(Declaration {
                     name: "a".to_string(),
+                    var_type: Type::Int,
                     init: Some(Expr::Constant(2)),
                     storage_class: None,
                 }),
                 BlockItem::Declaration(Declaration {
                     name: "b".to_string(),
+                    var_type: Type::Int,
                     init: Some(Expr::Constant(3)),
                     storage_class: None,
                 }),
@@ -1284,6 +1460,7 @@ mod tests {
                 BlockItem::Statement(Statement::Compound(vec![
                     BlockItem::Declaration(Declaration {
                         name: "a".to_string(),
+                        var_type: Type::Int,
                         init: Some(Expr::Constant(2)),
                         storage_class: None,
                     }),
@@ -1405,6 +1582,7 @@ mod tests {
             func.body.as_ref().unwrap()[0],
             BlockItem::Declaration(Declaration {
                 name: "a".to_string(),
+                var_type: Type::Int,
                 init: Some(Expr::Binary(
                     BinaryOp::Comma,
                     Box::new(Expr::Constant(1)),
@@ -1477,6 +1655,7 @@ mod tests {
         if let BlockItem::Statement(Statement::For { init, condition, post, body: _ }) = &func.body.as_ref().unwrap()[1] {
             assert_eq!(*init, ForInit::Declaration(Declaration {
                 name: "i".to_string(),
+                var_type: Type::Int,
                 init: Some(Expr::Constant(0)),
                 storage_class: None,
             }));
@@ -1545,7 +1724,7 @@ mod tests {
         let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(f0.name, "five");
-        assert_eq!(f0.params, Vec::<String>::new());
+        assert_eq!(f0.params, Vec::<(Type, String)>::new());
         assert_eq!(f1.name, "main");
         assert_eq!(
             f1.body.as_ref().unwrap()[0],
@@ -1563,7 +1742,7 @@ mod tests {
         let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(f0.name, "add");
-        assert_eq!(f0.params, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(f0.params, vec![(Type::Int, "a".to_string()), (Type::Int, "b".to_string())]);
         assert_eq!(
             f1.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::Return(
@@ -1584,7 +1763,7 @@ mod tests {
         let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(f0.name, "add");
         assert!(f0.body.is_none());
-        assert_eq!(f0.params, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(f0.params, vec![(Type::Int, "a".to_string()), (Type::Int, "b".to_string())]);
     }
 
     /// 複数関数: 宣言+定義
@@ -1672,6 +1851,7 @@ mod tests {
             func.body.as_ref().unwrap()[0],
             BlockItem::Declaration(Declaration {
                 name: "c".to_string(),
+                var_type: Type::Int,
                 init: Some(Expr::Constant(0)),
                 storage_class: Some(StorageClass::Static),
             })
@@ -1688,6 +1868,7 @@ mod tests {
             func.body.as_ref().unwrap()[0],
             BlockItem::Declaration(Declaration {
                 name: "x".to_string(),
+                var_type: Type::Int,
                 init: None,
                 storage_class: Some(StorageClass::Extern),
             })

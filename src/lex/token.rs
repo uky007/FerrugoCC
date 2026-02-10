@@ -13,11 +13,19 @@
 ///
 /// Cソースコードの各字句要素に対応する。
 /// リテラルや識別子はデータを保持し、キーワードや記号は単純なバリアント。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // ── リテラル ──
     /// 整数リテラル（例: `42`, `0`）。値そのものを保持する。
     IntLiteral(i64),
+    /// long 整数リテラル（例: `42L`, `100l`）（Chapter 11）。
+    LongLiteral(i64),
+    /// unsigned int リテラル（例: `42U`, `100u`）（Chapter 12）。
+    UIntLiteral(u64),
+    /// unsigned long リテラル（例: `42UL`, `100ul`）（Chapter 12）。
+    ULongLiteral(u64),
+    /// 浮動小数点リテラル（例: `3.14`, `.5`, `2e10`）（Chapter 13）。
+    DoubleLiteral(f64),
 
     // ── 識別子 ──
     /// 識別子（例: `main`, `foo`）。名前の文字列を保持する。
@@ -48,6 +56,14 @@ pub enum TokenKind {
     KwStatic,
     /// `extern` キーワード — 外部リンケージ（Chapter 10）
     KwExtern,
+    /// `long` キーワード — 64ビット整数型（Chapter 11）
+    KwLong,
+    /// `unsigned` キーワード — 符号なし型（Chapter 12）
+    KwUnsigned,
+    /// `signed` キーワード — 符号付き型（Chapter 12）
+    KwSigned,
+    /// `double` キーワード — 倍精度浮動小数点型（Chapter 13）
+    KwDouble,
 
     // ── 演算子 ──（Chapter 2 で追加）
     /// `-` — 単項マイナス / 二項減算
@@ -143,7 +159,7 @@ pub struct Span {
 }
 
 /// 字句解析の出力単位。トークンの種類と位置情報を持つ。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,

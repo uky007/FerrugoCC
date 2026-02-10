@@ -13,5 +13,5 @@
 pub mod ast;
 pub mod parser;
 
-pub use ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, StorageClass, TopLevelDecl};
+pub use ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, StorageClass, TopLevelDecl, Type};
 pub use parser::parse;

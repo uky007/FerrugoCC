@@ -7,6 +7,7 @@
 //! ferrugocc <source.c>              # フルコンパイル（実行ファイル生成）
 //! ferrugocc --lex <source.c>        # 字句解析のみ
 //! ferrugocc --parse <source.c>      # 構文解析まで
+//! ferrugocc --validate <source.c>   # 型検査まで
 //! ferrugocc --codegen <source.c>    # コード生成まで
 //! ferrugocc -S <source.c>           # アセンブリ出力まで（.s ファイル生成）
 //! ```
@@ -14,6 +15,7 @@
 mod error;
 mod lex;
 mod parse;
+mod typecheck;
 mod codegen;
 mod emit;
 mod driver;
@@ -40,6 +42,10 @@ struct Cli {
     #[arg(long)]
     parse: bool,
 
+    /// Run through type checking (validate)
+    #[arg(long)]
+    validate: bool,
+
     /// Run through code generation
     #[arg(long)]
     codegen: bool,
@@ -60,6 +66,8 @@ fn main() {
         Stage::Lex
     } else if cli.parse {
         Stage::Parse
+    } else if cli.validate {
+        Stage::Validate
     } else if cli.codegen {
         Stage::Codegen
     } else if cli.emit_asm {

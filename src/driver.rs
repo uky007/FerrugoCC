@@ -5,10 +5,14 @@
 //!
 //! # パイプライン
 //! ```text
-//! source.c → [Lex] → [Parse] → [Codegen] → [Emit] → source.s → [gcc] → source（実行ファイル）
+//! source.c → [Lex] → [Parse] → [Validate] → [Codegen] → [Emit] → source.s → [gcc] → source
 //! ```
 //!
-//! `--lex`, `--parse`, `--codegen`, `-S` フラグで途中のステージで停止できる。
+//! Chapter 11 で型検査パス（Validate）が Parse と Codegen の間に追加された。
+//! Chapter 12 で `unsigned int`/`unsigned long` に対応。
+//! Chapter 13 で `double`（浮動小数点）に対応。
+//!
+//! `--lex`, `--parse`, `--validate`, `--codegen`, `-S` フラグで途中のステージで停止できる。
 //! これは本のテストスイートとの互換性のために必要。
 
 use std::path::Path;
@@ -17,6 +21,7 @@ use std::process::Command;
 use crate::error::{CompileError, Result};
 use crate::lex;
 use crate::parse;
+use crate::typecheck;
 use crate::codegen;
 use crate::emit;
 
@@ -27,6 +32,8 @@ pub enum Stage {
     Lex,
     /// 構文解析まで（AST 構築が成功すれば OK）
     Parse,
+    /// 型検査まで
+    Validate,
     /// コード生成まで（アセンブリ AST 構築が成功すれば OK）
     Codegen,
     /// アセンブリ出力まで（.s ファイルを書き出す）
@@ -49,8 +56,14 @@ pub fn run(source_path: &Path, stage: Stage) -> Result<()> {
     }
 
     // ── Stage 2: 構文解析 ──
-    let program = parse::parse(&tokens)?;
+    let mut program = parse::parse(&tokens)?;
     if stage == Stage::Parse {
+        return Ok(());
+    }
+
+    // ── Stage 2.5: 型検査 ──
+    typecheck::typecheck(&mut program)?;
+    if stage == Stage::Validate {
         return Ok(());
     }
 

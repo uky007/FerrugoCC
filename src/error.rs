@@ -25,6 +25,10 @@ pub enum CompileError {
     #[error("Parse error: {0}")]
     ParseError(String),
 
+    /// 型検査（Typecheck）で型の不一致を検出した場合（Chapter 11）
+    #[error("Type error: {0}")]
+    TypeError(String),
+
     /// コード生成（Codegen）でサポート外の構文に遭遇した場合
     #[error("Codegen error: {0}")]
     CodegenError(String),

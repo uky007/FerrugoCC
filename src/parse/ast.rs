@@ -3,16 +3,18 @@
 //! パーサーが構築する木構造を定義する。
 //! 各ノードはCの文法要素に対応し、ソースの構造を忠実に表現する。
 //!
-//! # 現在サポートする文法（Chapter 10）
+//! # 現在サポートする文法（Chapter 12）
 //! ```text
 //! <program>        ::= <top_level_decl>*                      ← Ch10: 関数+変数
 //! <top_level_decl> ::= <function_decl> | <variable_decl>
-//! <function_decl>  ::= <storage_class>? "int" <id> "(" <params> ")" ( "{" <block>* "}" | ";" )
-//! <variable_decl>  ::= <storage_class>? "int" <id> ("=" <expr>)? ";"
+//! <function_decl>  ::= <storage_class>? <type> <id> "(" <params> ")" ( "{" <block>* "}" | ";" )
+//! <variable_decl>  ::= <storage_class>? <type> <id> ("=" <expr>)? ";"
+//! <type>           ::= <type_specifier>+                       ← Ch12: 任意順の型指定子
+//! <type_specifier> ::= "int" | "long" | "signed" | "unsigned"  ← Ch12: unsigned/signed 追加
 //! <storage_class>  ::= "static" | "extern"
-//! <params>         ::= "void" | "int" <identifier> ("," "int" <identifier>)*
+//! <params>         ::= "void" | <type> <identifier> ("," <type> <identifier>)*
 //! <block_item>     ::= <statement> | <declaration>
-//! <declaration>    ::= <storage_class>? "int" <identifier> ("=" <assignment>)? ";"
+//! <declaration>    ::= <storage_class>? <type> <identifier> ("=" <assignment>)? ";"
 //! <statement>      ::= "return" <exp> ";"
 //!                    | <exp> ";"
 //!                    | ";"
@@ -38,11 +40,50 @@
 //! <unary>          ::= <unary_op> <unary> | <postfix>         ← Ch7: postfix呼び出し
 //! <unary_op>       ::= "-" | "~" | "!" | "++" | "--"          ← Ch7: 前置++/--
 //! <postfix>        ::= <primary> ("++" | "--")*                ← Ch7: 後置++/--
-//! <primary>        ::= <int>
+//! <primary>        ::= <int> | <long> | <uint> | <ulong>      ← Ch12: unsigned リテラル
 //!                    | <identifier> ("(" <args>? ")")?         ← Ch9: 関数呼び出し
 //!                    | "(" <exp> ")"
+//! <int>            ::= [0-9]+                                  ← 整数リテラル
+//! <long>           ::= [0-9]+ ("l" | "L")                     ← Ch11: long リテラル
+//! <uint>           ::= [0-9]+ ("u" | "U")                     ← Ch12: unsigned int リテラル
+//! <ulong>          ::= [0-9]+ ("ul" | "UL" | "lu" | "LU")    ← Ch12: unsigned long リテラル
 //! <args>           ::= <assignment> ("," <assignment>)*        ← カンマ演算子と区別
 //! ```
+
+/// 型（Chapter 11, 12）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Type {
+    /// `int` — 32ビット符号付き整数
+    Int,
+    /// `long` — 64ビット符号付き整数
+    Long,
+    /// `unsigned int` — 32ビット符号なし整数（Chapter 12）
+    UInt,
+    /// `unsigned long` — 64ビット符号なし整数（Chapter 12）
+    ULong,
+    /// `double` — IEEE 754 倍精度浮動小数点（Chapter 13）
+    Double,
+}
+
+impl Type {
+    /// 符号なし型かどうかを判定する。
+    pub fn is_unsigned(&self) -> bool {
+        matches!(self, Type::UInt | Type::ULong)
+    }
+
+    /// 浮動小数点型かどうかを判定する（Chapter 13）。
+    pub fn is_double(&self) -> bool {
+        matches!(self, Type::Double)
+    }
+
+    /// 型のバイトサイズを返す。
+    pub fn size(&self) -> usize {
+        match self {
+            Type::Int | Type::UInt => 4,
+            Type::Long | Type::ULong | Type::Double => 8,
+        }
+    }
+}
 
 /// ストレージクラス指定子（Chapter 10）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +95,7 @@ pub enum StorageClass {
 }
 
 /// トップレベル宣言（Chapter 10）。関数宣言/定義または変数宣言。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TopLevelDecl {
     /// 関数宣言/定義
     Function(FunctionDecl),
@@ -63,20 +104,22 @@ pub enum TopLevelDecl {
 }
 
 /// プログラム全体。トップレベル宣言の列を持つ（Chapter 10）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub declarations: Vec<TopLevelDecl>,
 }
 
-/// 関数宣言/定義（Chapter 9, 10）。
+/// 関数宣言/定義（Chapter 9, 10, 11）。
 ///
-/// - `params`: パラメータ名のリスト（戻り値の型は常に `int`）
+/// - `return_type`: 戻り値の型（Chapter 11）
+/// - `params`: パラメータの (型, 名前) のリスト（Chapter 11）
 /// - `body`: `Some(...)` なら関数定義、`None` なら前方宣言（プロトタイプ）
 /// - `storage_class`: オプショナルのストレージクラス指定子（Chapter 10）
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDecl {
     pub name: String,
-    pub params: Vec<String>,
+    pub return_type: Type,
+    pub params: Vec<(Type, String)>,
     pub body: Option<Vec<BlockItem>>,
     pub storage_class: Option<StorageClass>,
 }
@@ -84,7 +127,7 @@ pub struct FunctionDecl {
 /// ブロック要素（Chapter 5 で追加）。
 ///
 /// 関数本体は文と宣言の列からなる。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BlockItem {
     /// 文（return文、式文、空文）
     Statement(Statement),
@@ -92,13 +135,15 @@ pub enum BlockItem {
     Declaration(Declaration),
 }
 
-/// 変数宣言（Chapter 5, 10 で拡張）。
+/// 変数宣言（Chapter 5, 10, 11 で拡張）。
 ///
-/// `int <name>;` または `int <name> = <expr>;`
+/// `int <name>;` または `long <name> = <expr>;`
 /// Chapter 10: オプショナルのストレージクラス指定子を追加。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Chapter 11: 変数の型フィールドを追加。
+#[derive(Debug, Clone, PartialEq)]
 pub struct Declaration {
     pub name: String,
+    pub var_type: Type,
     pub init: Option<Expr>,
     pub storage_class: Option<StorageClass>,
 }
@@ -108,7 +153,7 @@ pub struct Declaration {
 /// Chapter 5 で式文と空文が追加された。
 /// Chapter 6 で if文と複合文が追加された。
 /// Chapter 8 で while, do-while, for, break, continue が追加された。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     /// `return <expr>;` — 式の値を返して関数を終了する
     Return(Expr),
@@ -148,7 +193,7 @@ pub enum Statement {
 }
 
 /// forループの初期化部（Chapter 8）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ForInit {
     /// 宣言（例: `int i = 0;`）
     Declaration(Declaration),
@@ -159,10 +204,21 @@ pub enum ForInit {
 /// 式（Expression）。
 ///
 /// 式は値を持つ構文要素。定数、単項演算、二項演算、変数参照、代入がある。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     /// 整数定数（例: `42`）
     Constant(i64),
+    /// long 整数定数（例: `42L`）（Chapter 11）
+    ConstantLong(i64),
+    /// unsigned int 定数（例: `42U`）（Chapter 12）
+    ConstantUInt(u64),
+    /// unsigned long 定数（例: `42UL`）（Chapter 12）
+    ConstantULong(u64),
+    /// 浮動小数点定数（例: `3.14`）（Chapter 13）
+    ConstantDouble(f64),
+    /// 型変換（Chapter 11, 12）。型検査パスが挿入する。
+    /// `source_type` はコード生成で符号付き/なし拡張を区別するために使う。
+    Cast { target_type: Type, source_type: Type, expr: Box<Expr> },
     /// 単項演算（Chapter 2）。演算子と被演算子を持つ。
     ///
     /// 例: `-5` → `Unary(Negate, Constant(5))`
