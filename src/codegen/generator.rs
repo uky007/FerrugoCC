@@ -19,6 +19,22 @@
 //! - 単項 `-` は `xorpd` で符号ビット反転（`-0.0` 定数とXOR）
 //! - 型変換: `Cvtsi2sd` (整数→double), `Cvttsd2si` (double→整数, 切り捨て)
 //! - 関数呼出規約: 整数引数 (DI,SI,DX,CX,R8,R9) と double 引数 (XMM0〜XMM7) を独立カウント
+//!
+//! # Chapter 14: ポインタ
+//! - `Dereref` (間接参照): アドレスを生成し `Mov { src: Memory(AX), dst: AX }` で値を読み出す
+//! - `AddrOf` (アドレス取得): `generate_lvalue_addr()` で左辺値のアドレスを AX に配置
+//! - `generate_lvalue_addr()`: `Var` → `Lea`、`Dereref` → 内部式を評価（値がそのままアドレス）
+//! - ポインタ経由の代入: LHS アドレスを Push → RHS 評価 → Pop CX → `Mov { src: AX, dst: Memory(CX) }`
+//! - ポインタ ↔ 整数キャスト: 同サイズ (64bit) → no-op、小→大 → 符号/ゼロ拡張、大→小 → 切り詰め
+//!
+//! # Chapter 15: 配列とポインタ算術
+//! - 配列変数: `Var` が配列型なら `Lea`（アドレスロード）で decay → ポインタとして扱う
+//! - 配列スタック割り当て: `elem.size() * count` バイトを確保
+//! - グローバル配列: `ZeroInit(size)` で `.bss` セクションにゼロ初期化
+//! - ポインタ加算 (`ptr + int`): 右辺を `elem_size` で `imulq` スケーリング後に `addq`
+//! - ポインタ減算 (`ptr - ptr`): バイト差分を `idivq elem_size` で要素数に変換
+//! - ポインタ増減 (`++`/`--`/`+=`/`-=`): 増分を `sizeof(*ptr)` にスケーリング
+//! - `sizeof`: 型チェッカーで `ConstantULong` に解決済み（コード生成では到達しない）
 
 use std::collections::{HashMap, HashSet};
 use crate::error::{CompileError, Result};
@@ -64,17 +80,22 @@ const XMM_ARG_REGISTERS: [Reg; 8] = [
 ];
 
 /// Type → AsmType 変換。
-fn type_to_asm(t: Type) -> AsmType {
+fn type_to_asm(t: &Type) -> AsmType {
     match t {
+        Type::Char | Type::UChar => AsmType::Byte,
         Type::Int | Type::UInt => AsmType::Longword,
         Type::Long | Type::ULong => AsmType::Quadword,
         Type::Double => AsmType::Double,
+        Type::Pointer(_) => AsmType::Quadword,
+        // 配列は decay 後ポインタとして扱う（Chapter 15）
+        Type::Array(_, _) => AsmType::Quadword,
     }
 }
 
 /// AsmType のバイトサイズ。
 fn asm_type_size(t: AsmType) -> i32 {
     match t {
+        AsmType::Byte => 1,
         AsmType::Longword => 4,
         AsmType::Quadword | AsmType::Double => 8,
     }
@@ -88,13 +109,13 @@ fn resolve_var(
 ) -> Result<(Operand, AsmType, Type)> {
     if let Some(loc) = var_map.get(name) {
         match loc {
-            VarLocation::Stack(offset, var_type) => Ok((Operand::Stack(*offset), type_to_asm(*var_type), *var_type)),
-            VarLocation::Static(label, var_type) => Ok((Operand::Data(label.clone()), type_to_asm(*var_type), *var_type)),
+            VarLocation::Stack(offset, var_type) => Ok((Operand::Stack(*offset), type_to_asm(var_type), var_type.clone())),
+            VarLocation::Static(label, var_type) => Ok((Operand::Data(label.clone()), type_to_asm(var_type), var_type.clone())),
         }
     } else if let Some(loc) = global_var_map.get(name) {
         match loc {
             VarLocation::Stack(_, _) => unreachable!("global var should not be on stack"),
-            VarLocation::Static(label, var_type) => Ok((Operand::Data(label.clone()), type_to_asm(*var_type), *var_type)),
+            VarLocation::Static(label, var_type) => Ok((Operand::Data(label.clone()), type_to_asm(var_type), var_type.clone())),
         }
     } else {
         Err(CompileError::CodegenError(format!(
@@ -126,12 +147,15 @@ pub fn generate(program: &Program) -> Result<AsmProgram> {
     // double 定数プール: ビットパターン → (ラベル, アラインメント)
     let mut double_constants: HashMap<u64, (String, usize)> = HashMap::new();
     let mut const_label_counter: usize = 0;
+    // 文字列定数プール: (ラベル, 内容)（Chapter 16）
+    let mut string_constants: Vec<(String, String)> = Vec::new();
+    let mut string_label_counter: usize = 0;
 
     for decl in &program.declarations {
         match decl {
             TopLevelDecl::Function(func_decl) => {
                 let has_body = func_decl.body.is_some();
-                let param_types: Vec<Type> = func_decl.params.iter().map(|(t, _)| *t).collect();
+                let param_types: Vec<Type> = func_decl.params.iter().map(|(t, _)| t.clone()).collect();
                 if let Some(existing) = func_table.get(&func_decl.name) {
                     if existing.param_count != func_decl.params.len() {
                         return Err(CompileError::CodegenError(format!(
@@ -147,7 +171,7 @@ pub fn generate(program: &Program) -> Result<AsmProgram> {
                 let entry = func_table.entry(func_decl.name.clone()).or_insert(FunctionInfo {
                     param_count: func_decl.params.len(),
                     defined: false,
-                    return_type: func_decl.return_type,
+                    return_type: func_decl.return_type.clone(),
                     param_types: param_types.clone(),
                 });
                 if has_body {
@@ -156,7 +180,7 @@ pub fn generate(program: &Program) -> Result<AsmProgram> {
             }
             TopLevelDecl::Variable(var_decl) => {
                 let sc = var_decl.storage_class;
-                let asm_type = type_to_asm(var_decl.var_type);
+                let asm_type = type_to_asm(&var_decl.var_type);
 
                 if sc == Some(StorageClass::Extern) && var_decl.init.is_some() {
                     return Err(CompileError::CodegenError(format!(
@@ -170,6 +194,8 @@ pub fn generate(program: &Program) -> Result<AsmProgram> {
                             "file-scope variable '{}' {}", var_decl.name, msg
                         ))
                     })?
+                } else if var_decl.var_type.is_array() {
+                    StaticInit::ZeroInit(var_decl.var_type.size())
                 } else {
                     if var_decl.var_type == Type::Double {
                         StaticInit::DoubleInit(0.0)
@@ -180,7 +206,7 @@ pub fn generate(program: &Program) -> Result<AsmProgram> {
 
                 global_var_map.insert(
                     var_decl.name.clone(),
-                    VarLocation::Static(var_decl.name.clone(), var_decl.var_type),
+                    VarLocation::Static(var_decl.name.clone(), var_decl.var_type.clone()),
                 );
 
                 match sc {
@@ -221,6 +247,8 @@ pub fn generate(program: &Program) -> Result<AsmProgram> {
                     global,
                     &mut double_constants,
                     &mut const_label_counter,
+                    &mut string_constants,
+                    &mut string_label_counter,
                 )?);
             }
         }
@@ -237,6 +265,16 @@ pub fn generate(program: &Program) -> Result<AsmProgram> {
             }
         })
         .collect();
+    // 文字列定数を追加（Chapter 16）
+    for (label, content) in string_constants {
+        let byte_len = content.len() + 1; // +1 for null terminator
+        static_constants.push(AsmStaticConstant {
+            name: label,
+            alignment: 1,
+            init: StaticInit::StringInit(content, byte_len),
+        });
+    }
+
     // ラベル名でソート（決定論的な出力のため）
     static_constants.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -266,20 +304,20 @@ fn classify_parameters(params: &[(Type, String)]) -> ParamClassification {
     for (param_type, _) in params {
         if param_type.is_double() {
             if xmm_idx < 8 {
-                locations.push((*param_type, ParamLocation::XmmReg(xmm_idx)));
+                locations.push((param_type.clone(), ParamLocation::XmmReg(xmm_idx)));
                 xmm_idx += 1;
             } else {
                 let offset = 16 + stack_idx * 8;
-                locations.push((*param_type, ParamLocation::Stack(offset as i32)));
+                locations.push((param_type.clone(), ParamLocation::Stack(offset as i32)));
                 stack_idx += 1;
             }
         } else {
             if int_idx < 6 {
-                locations.push((*param_type, ParamLocation::IntReg(int_idx)));
+                locations.push((param_type.clone(), ParamLocation::IntReg(int_idx)));
                 int_idx += 1;
             } else {
                 let offset = 16 + stack_idx * 8;
-                locations.push((*param_type, ParamLocation::Stack(offset as i32)));
+                locations.push((param_type.clone(), ParamLocation::Stack(offset as i32)));
                 stack_idx += 1;
             }
         }
@@ -298,6 +336,8 @@ fn generate_function(
     global: bool,
     double_constants: &mut HashMap<u64, (String, usize)>,
     const_label_counter: &mut usize,
+    string_constants: &mut Vec<(String, String)>,
+    string_label_counter: &mut usize,
 ) -> Result<AsmFunction> {
     let mut var_map: HashMap<String, VarLocation> = HashMap::new();
     let mut next_offset: i32 = 0;
@@ -307,7 +347,7 @@ fn generate_function(
     let classification = classify_parameters(&func.params);
 
     for (i, (param_type, param_name)) in func.params.iter().enumerate() {
-        let asm_type = type_to_asm(*param_type);
+        let asm_type = type_to_asm(param_type);
         let size = asm_type_size(asm_type);
         // アラインメント考慮
         next_offset -= size;
@@ -315,7 +355,7 @@ fn generate_function(
             next_offset -= size + (next_offset % size);
         }
         let offset = next_offset;
-        var_map.insert(param_name.clone(), VarLocation::Stack(offset, *param_type));
+        var_map.insert(param_name.clone(), VarLocation::Stack(offset, param_type.clone()));
 
         let (_, ref loc) = classification.locations[i];
         match loc {
@@ -372,6 +412,7 @@ fn generate_function(
             item, &mut var_map, &mut next_offset, label_counter,
             Some(&mut scope_decls), None, func_table, global_var_map,
             static_vars, static_label_counter, double_constants, const_label_counter,
+            string_constants, string_label_counter,
         )?;
         instructions.extend(instrs);
     }
@@ -386,7 +427,7 @@ fn generate_function(
             dst: Operand::Register(Reg::XMM0),
         });
     } else {
-        let ret_asm_type = type_to_asm(func.return_type);
+        let ret_asm_type = type_to_asm(&func.return_type);
         instructions.push(Instruction::Mov {
             asm_type: ret_asm_type,
             src: Operand::Imm(0),
@@ -422,17 +463,21 @@ fn generate_block_item(
     static_label_counter: &mut usize,
     double_constants: &mut HashMap<u64, (String, usize)>,
     const_label_counter: &mut usize,
+    string_constants: &mut Vec<(String, String)>,
+    string_label_counter: &mut usize,
 ) -> Result<Vec<Instruction>> {
     match item {
         BlockItem::Statement(stmt) => generate_statement(
             stmt, var_map, next_offset, label_counter, loop_labels,
             func_table, global_var_map, static_vars, static_label_counter,
             double_constants, const_label_counter,
+            string_constants, string_label_counter,
         ),
         BlockItem::Declaration(decl) => generate_declaration(
             decl, var_map, next_offset, label_counter, scope_decls,
             func_table, global_var_map, static_vars, static_label_counter,
             double_constants, const_label_counter,
+            string_constants, string_label_counter,
         ),
     }
 }
@@ -449,9 +494,11 @@ fn generate_declaration(
     static_label_counter: &mut usize,
     double_constants: &mut HashMap<u64, (String, usize)>,
     const_label_counter: &mut usize,
+    string_constants: &mut Vec<(String, String)>,
+    string_label_counter: &mut usize,
 ) -> Result<Vec<Instruction>> {
     let sc = decl.storage_class;
-    let asm_type = type_to_asm(decl.var_type);
+    let asm_type = type_to_asm(&decl.var_type);
 
     if sc == Some(StorageClass::Extern) {
         if decl.init.is_some() {
@@ -459,7 +506,7 @@ fn generate_declaration(
                 "extern variable '{}' cannot have initializer", decl.name
             )));
         }
-        var_map.insert(decl.name.clone(), VarLocation::Static(decl.name.clone(), decl.var_type));
+        var_map.insert(decl.name.clone(), VarLocation::Static(decl.name.clone(), decl.var_type.clone()));
         return Ok(Vec::new());
     }
 
@@ -470,6 +517,8 @@ fn generate_declaration(
                     "static variable '{}' {}", decl.name, msg
                 ))
             })?
+        } else if decl.var_type.is_array() {
+            StaticInit::ZeroInit(decl.var_type.size())
         } else {
             if decl.var_type == Type::Double {
                 StaticInit::DoubleInit(0.0)
@@ -488,7 +537,7 @@ fn generate_declaration(
             asm_type,
         });
 
-        var_map.insert(decl.name.clone(), VarLocation::Static(unique_label, decl.var_type));
+        var_map.insert(decl.name.clone(), VarLocation::Static(unique_label, decl.var_type.clone()));
         return Ok(Vec::new());
     }
 
@@ -501,20 +550,32 @@ fn generate_declaration(
         }
     }
 
-    let size = asm_type_size(asm_type);
+    // 配列はフルサイズを確保、スカラーは AsmType サイズ（Chapter 15）
+    let size = if decl.var_type.is_array() {
+        decl.var_type.size() as i32
+    } else {
+        asm_type_size(asm_type)
+    };
     *next_offset -= size;
-    // アラインメント
-    if *next_offset % size != 0 {
-        *next_offset -= size + (*next_offset % size);
+    // アラインメント（配列は要素サイズに合わせる）
+    let align = if decl.var_type.is_array() {
+        // 配列のアラインメントは要素型のサイズ
+        decl.var_type.target_type().map(|t| t.size() as i32).unwrap_or(4)
+    } else {
+        asm_type_size(asm_type)
+    };
+    if *next_offset % align != 0 {
+        *next_offset -= align + (*next_offset % align);
     }
     let offset = *next_offset;
-    var_map.insert(decl.name.clone(), VarLocation::Stack(offset, decl.var_type));
+    var_map.insert(decl.name.clone(), VarLocation::Stack(offset, decl.var_type.clone()));
 
     let mut instrs = Vec::new();
     if let Some(init) = &decl.init {
         instrs.extend(generate_expr(
             init, var_map, label_counter, func_table, global_var_map,
             double_constants, const_label_counter,
+            string_constants, string_label_counter,
         )?);
         let result_reg = if decl.var_type.is_double() { Reg::XMM0 } else { Reg::AX };
         instrs.push(Instruction::Mov {
@@ -568,12 +629,15 @@ fn generate_statement(
     static_label_counter: &mut usize,
     double_constants: &mut HashMap<u64, (String, usize)>,
     const_label_counter: &mut usize,
+    string_constants: &mut Vec<(String, String)>,
+    string_label_counter: &mut usize,
 ) -> Result<Vec<Instruction>> {
     match stmt {
         Statement::Return(expr) => {
             let mut instrs = generate_expr(
                 expr, var_map, label_counter, func_table, global_var_map,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?;
             instrs.push(Instruction::Ret);
             Ok(instrs)
@@ -582,6 +646,7 @@ fn generate_statement(
             generate_expr(
                 expr, var_map, label_counter, func_table, global_var_map,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )
         }
         Statement::Null => Ok(Vec::new()),
@@ -593,6 +658,7 @@ fn generate_statement(
             let mut instrs = generate_expr(
                 condition, var_map, label_counter, func_table, global_var_map,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?;
             emit_condition_check(&mut instrs, cond_type, double_constants, const_label_counter);
 
@@ -604,6 +670,7 @@ fn generate_statement(
                     then_branch, var_map, next_offset, label_counter, loop_labels,
                     func_table, global_var_map, static_vars, static_label_counter,
                     double_constants, const_label_counter,
+                    string_constants, string_label_counter,
                 )?);
                 instrs.push(Instruction::Jmp(end_label.clone()));
                 instrs.push(Instruction::Label(else_label));
@@ -611,6 +678,7 @@ fn generate_statement(
                     else_stmt, var_map, next_offset, label_counter, loop_labels,
                     func_table, global_var_map, static_vars, static_label_counter,
                     double_constants, const_label_counter,
+                    string_constants, string_label_counter,
                 )?);
                 instrs.push(Instruction::Label(end_label));
             } else {
@@ -620,6 +688,7 @@ fn generate_statement(
                     then_branch, var_map, next_offset, label_counter, loop_labels,
                     func_table, global_var_map, static_vars, static_label_counter,
                     double_constants, const_label_counter,
+                    string_constants, string_label_counter,
                 )?);
                 instrs.push(Instruction::Label(end_label));
             }
@@ -634,6 +703,7 @@ fn generate_statement(
                     item, &mut inner_map, next_offset, label_counter,
                     Some(&mut scope_decls), loop_labels, func_table, global_var_map,
                     static_vars, static_label_counter, double_constants, const_label_counter,
+                    string_constants, string_label_counter,
                 )?);
             }
             Ok(instrs)
@@ -653,6 +723,7 @@ fn generate_statement(
             instrs.extend(generate_expr(
                 condition, var_map, label_counter, func_table, global_var_map,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?);
             emit_condition_check(&mut instrs, cond_type, double_constants, const_label_counter);
             instrs.push(Instruction::JmpCC(CondCode::E, end_label.clone()));
@@ -660,6 +731,7 @@ fn generate_statement(
                 body, var_map, next_offset, label_counter, Some(&labels),
                 func_table, global_var_map, static_vars, static_label_counter,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?);
             instrs.push(Instruction::Jmp(start_label));
             instrs.push(Instruction::Label(end_label));
@@ -682,11 +754,13 @@ fn generate_statement(
                 body, var_map, next_offset, label_counter, Some(&labels),
                 func_table, global_var_map, static_vars, static_label_counter,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?);
             instrs.push(Instruction::Label(continue_label));
             instrs.extend(generate_expr(
                 condition, var_map, label_counter, func_table, global_var_map,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?);
             emit_condition_check(&mut instrs, cond_type, double_constants, const_label_counter);
             instrs.push(Instruction::JmpCC(CondCode::NE, start_label));
@@ -717,12 +791,14 @@ fn generate_statement(
                         decl, map_ref, next_offset, label_counter, None,
                         func_table, global_var_map, static_vars, static_label_counter,
                         double_constants, const_label_counter,
+                        string_constants, string_label_counter,
                     )?);
                 }
                 ForInit::Expression(Some(expr)) => {
                     instrs.extend(generate_expr(
                         expr, map_ref, label_counter, func_table, global_var_map,
                         double_constants, const_label_counter,
+                        string_constants, string_label_counter,
                     )?);
                 }
                 ForInit::Expression(None) => {}
@@ -735,6 +811,7 @@ fn generate_statement(
                 instrs.extend(generate_expr(
                     cond, map_ref, label_counter, func_table, global_var_map,
                     double_constants, const_label_counter,
+                    string_constants, string_label_counter,
                 )?);
                 emit_condition_check(&mut instrs, cond_type, double_constants, const_label_counter);
                 instrs.push(Instruction::JmpCC(CondCode::E, end_label.clone()));
@@ -744,6 +821,7 @@ fn generate_statement(
                 body, map_ref, next_offset, label_counter, Some(&labels),
                 func_table, global_var_map, static_vars, static_label_counter,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?);
 
             instrs.push(Instruction::Label(continue_label));
@@ -751,6 +829,7 @@ fn generate_statement(
                 instrs.extend(generate_expr(
                     post_expr, map_ref, label_counter, func_table, global_var_map,
                     double_constants, const_label_counter,
+                    string_constants, string_label_counter,
                 )?);
             }
 
@@ -786,27 +865,24 @@ fn expr_type(
         Expr::ConstantUInt(_) => Type::UInt,
         Expr::ConstantULong(_) => Type::ULong,
         Expr::ConstantDouble(_) => Type::Double,
-        Expr::Cast { target_type, .. } => *target_type,
+        Expr::StringLiteral(_) => Type::Pointer(Box::new(Type::Char)),
+        Expr::Cast { target_type, .. } => target_type.clone(),
         Expr::Var(name) => {
             if let Ok((_, _, var_type)) = resolve_var(var_map, global_var_map, name) {
-                var_type
+                // 配列→ポインタ減衰（Chapter 15）
+                match var_type {
+                    Type::Array(elem, _) => Type::Pointer(elem),
+                    other => other,
+                }
             } else {
                 Type::Int
             }
         }
-        Expr::Assign(name, _) | Expr::CompoundAssign(_, name, _) => {
-            if let Ok((_, _, var_type)) = resolve_var(var_map, global_var_map, name) {
-                var_type
-            } else {
-                Type::Int
-            }
+        Expr::Assign(lhs, _) | Expr::CompoundAssign(_, lhs, _) => {
+            expr_type(lhs, var_map, global_var_map, func_table)
         }
-        Expr::PostfixIncrement(name) | Expr::PostfixDecrement(name) => {
-            if let Ok((_, _, var_type)) = resolve_var(var_map, global_var_map, name) {
-                var_type
-            } else {
-                Type::Int
-            }
+        Expr::PostfixIncrement(inner) | Expr::PostfixDecrement(inner) => {
+            expr_type(inner, var_map, global_var_map, func_table)
         }
         Expr::Unary(op, inner) => {
             match op {
@@ -833,11 +909,26 @@ fn expr_type(
         }
         Expr::FunctionCall(name, _) => {
             if let Some(info) = func_table.get(name) {
-                info.return_type
+                info.return_type.clone()
             } else {
                 Type::Int
             }
         }
+        Expr::Dereref(inner) => {
+            // Chapter 14: ポインタ間接参照 — inner が Pointer(target) なら target を返す
+            let inner_t = expr_type(inner, var_map, global_var_map, func_table);
+            match inner_t {
+                Type::Pointer(target) => *target,
+                _ => Type::Int, // fallback (should not happen after type check)
+            }
+        }
+        Expr::AddrOf(inner) => {
+            // Chapter 14: アドレス取得 — Pointer(inner の型) を返す
+            let inner_t = expr_type(inner, var_map, global_var_map, func_table);
+            Type::Pointer(Box::new(inner_t))
+        }
+        // sizeof は型チェッカーで ConstantULong に置換済み（到達しないはず）
+        Expr::SizeOfType(_) | Expr::SizeOfExpr(_) => Type::ULong,
     }
 }
 
@@ -848,7 +939,44 @@ fn expr_asm_type(
     global_var_map: &HashMap<String, VarLocation>,
     func_table: &HashMap<String, FunctionInfo>,
 ) -> AsmType {
-    type_to_asm(expr_type(expr, var_map, global_var_map, func_table))
+    let t = expr_type(expr, var_map, global_var_map, func_table);
+    type_to_asm(&t)
+}
+
+/// 左辺値のアドレスを %rax に生成するヘルパー（Chapter 14）。
+///
+/// - `Var(name)` → `leaq offset(%rbp), %rax` or `leaq label(%rip), %rax`
+/// - `Dereref(inner)` → inner の値を評価（inner の値がそのままアドレス）
+fn generate_lvalue_addr(
+    expr: &Expr,
+    var_map: &HashMap<String, VarLocation>,
+    label_counter: &mut usize,
+    func_table: &HashMap<String, FunctionInfo>,
+    global_var_map: &HashMap<String, VarLocation>,
+    double_constants: &mut HashMap<u64, (String, usize)>,
+    const_label_counter: &mut usize,
+    string_constants: &mut Vec<(String, String)>,
+    string_label_counter: &mut usize,
+) -> Result<Vec<Instruction>> {
+    match expr {
+        Expr::Var(name) => {
+            let (operand, _, _) = resolve_var(var_map, global_var_map, name)?;
+            Ok(vec![
+                Instruction::Lea { src: operand, dst: Operand::Register(Reg::AX) },
+            ])
+        }
+        Expr::Dereref(inner) => {
+            // inner の値がアドレスそのもの
+            generate_expr(
+                inner, var_map, label_counter, func_table, global_var_map,
+                double_constants, const_label_counter,
+                string_constants, string_label_counter,
+            )
+        }
+        _ => Err(CompileError::CodegenError(
+            "cannot take address of non-lvalue expression".to_string()
+        )),
+    }
 }
 
 /// 符号なし除算の命令列を生成するヘルパー。
@@ -899,6 +1027,8 @@ fn generate_expr(
     global_var_map: &HashMap<String, VarLocation>,
     double_constants: &mut HashMap<u64, (String, usize)>,
     const_label_counter: &mut usize,
+    string_constants: &mut Vec<(String, String)>,
+    string_label_counter: &mut usize,
 ) -> Result<Vec<Instruction>> {
     match expr {
         Expr::Constant(value) => {
@@ -942,10 +1072,21 @@ fn generate_expr(
             }])
         }
 
+        Expr::StringLiteral(content) => {
+            let label = format!(".Lstr_{}", *string_label_counter);
+            *string_label_counter += 1;
+            string_constants.push((label.clone(), content.clone()));
+            Ok(vec![Instruction::Lea {
+                src: Operand::Data(label),
+                dst: Operand::Register(Reg::AX),
+            }])
+        }
+
         Expr::Cast { target_type, source_type, expr: inner } => {
             let mut instrs = generate_expr(
                 inner, var_map, label_counter, func_table, global_var_map,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?;
 
             // Double ↔ Integer conversions
@@ -954,7 +1095,7 @@ fn generate_expr(
                 match target_type {
                     Type::Int | Type::Long => {
                         // cvttsd2si → AX
-                        let dst_asm = type_to_asm(*target_type);
+                        let dst_asm = type_to_asm(target_type);
                         instrs.push(Instruction::Cvttsd2si {
                             asm_type: dst_asm,
                             src: Operand::Register(Reg::XMM0),
@@ -1030,13 +1171,48 @@ fn generate_expr(
                         });
                         instrs.push(Instruction::Label(end_label));
                     }
-                    Type::Double => unreachable!(),
+                    Type::Char | Type::UChar => {
+                        // Double → Char/UChar: convert to int first, then truncate
+                        instrs.push(Instruction::Cvttsd2si {
+                            asm_type: AsmType::Longword,
+                            src: Operand::Register(Reg::XMM0),
+                            dst: Operand::Register(Reg::AX),
+                        });
+                        // Truncate handled: value already in AL
+                    }
+                    Type::Double | Type::Pointer(_) | Type::Array(_, _) => unreachable!(),
                 }
             } else if !source_type.is_double() && target_type.is_double() {
                 // Integer → Double
                 match source_type {
+                    Type::Char => {
+                        // Sign-extend byte to longword, then cvtsi2sd
+                        instrs.push(Instruction::MovsxByte {
+                            asm_type: AsmType::Longword,
+                            src: Operand::Register(Reg::AX),
+                            dst: Operand::Register(Reg::AX),
+                        });
+                        instrs.push(Instruction::Cvtsi2sd {
+                            asm_type: AsmType::Longword,
+                            src: Operand::Register(Reg::AX),
+                            dst: Operand::Register(Reg::XMM0),
+                        });
+                    }
+                    Type::UChar => {
+                        // Zero-extend byte to longword, then cvtsi2sd
+                        instrs.push(Instruction::MovZeroExtendByte {
+                            asm_type: AsmType::Longword,
+                            src: Operand::Register(Reg::AX),
+                            dst: Operand::Register(Reg::AX),
+                        });
+                        instrs.push(Instruction::Cvtsi2sd {
+                            asm_type: AsmType::Longword,
+                            src: Operand::Register(Reg::AX),
+                            dst: Operand::Register(Reg::XMM0),
+                        });
+                    }
                     Type::Int | Type::Long => {
-                        let src_asm = type_to_asm(*source_type);
+                        let src_asm = type_to_asm(source_type);
                         instrs.push(Instruction::Cvtsi2sd {
                             asm_type: src_asm,
                             src: Operand::Register(Reg::AX),
@@ -1141,16 +1317,32 @@ fn generate_expr(
                         });
                         instrs.push(Instruction::Label(end_label));
                     }
-                    Type::Double => unreachable!(),
+                    Type::Double | Type::Pointer(_) | Type::Array(_, _) => unreachable!(),
                 }
             } else if !source_type.is_double() && !target_type.is_double() {
-                // Integer ↔ Integer (existing logic)
+                // Integer ↔ Integer (existing logic + Chapter 16: Byte)
                 let src_size = source_type.size();
                 let dst_size = target_type.size();
                 if src_size == dst_size {
                     // Same size: no-op
                 } else if src_size < dst_size {
-                    if source_type.is_unsigned() {
+                    if src_size == 1 {
+                        // Byte → Longword/Quadword (Chapter 16)
+                        let dst_asm = type_to_asm(target_type);
+                        if source_type.is_unsigned() {
+                            instrs.push(Instruction::MovZeroExtendByte {
+                                asm_type: dst_asm,
+                                src: Operand::Register(Reg::AX),
+                                dst: Operand::Register(Reg::AX),
+                            });
+                        } else {
+                            instrs.push(Instruction::MovsxByte {
+                                asm_type: dst_asm,
+                                src: Operand::Register(Reg::AX),
+                                dst: Operand::Register(Reg::AX),
+                            });
+                        }
+                    } else if source_type.is_unsigned() {
                         instrs.push(Instruction::MovZeroExtend {
                             src: Operand::Register(Reg::AX),
                             dst: Operand::Register(Reg::AX),
@@ -1162,10 +1354,20 @@ fn generate_expr(
                         });
                     }
                 } else {
-                    instrs.push(Instruction::Truncate {
-                        src: Operand::Register(Reg::AX),
-                        dst: Operand::Register(Reg::AX),
-                    });
+                    // dst_size < src_size: truncate
+                    if dst_size == 1 {
+                        // Truncate to byte: just use the low byte (movb %al, %al is a no-op)
+                        // We still emit a Truncate for clarity; emitter will handle it
+                        instrs.push(Instruction::Truncate {
+                            src: Operand::Register(Reg::AX),
+                            dst: Operand::Register(Reg::AX),
+                        });
+                    } else {
+                        instrs.push(Instruction::Truncate {
+                            src: Operand::Register(Reg::AX),
+                            dst: Operand::Register(Reg::AX),
+                        });
+                    }
                 }
             }
             // Double → Double: no-op
@@ -1173,37 +1375,83 @@ fn generate_expr(
         }
 
         Expr::Var(name) => {
-            let (operand, asm_type, _) = resolve_var(var_map, global_var_map, name)?;
-            let dst_reg = if asm_type == AsmType::Double { Reg::XMM0 } else { Reg::AX };
-            Ok(vec![Instruction::Mov {
-                asm_type,
-                src: operand,
-                dst: Operand::Register(dst_reg),
-            }])
+            let (operand, asm_type, var_type) = resolve_var(var_map, global_var_map, name)?;
+            if var_type.is_array() {
+                // 配列→ポインタ decay: アドレスをロード（Chapter 15）
+                Ok(vec![Instruction::Lea {
+                    src: operand,
+                    dst: Operand::Register(Reg::AX),
+                }])
+            } else {
+                let dst_reg = if asm_type == AsmType::Double { Reg::XMM0 } else { Reg::AX };
+                Ok(vec![Instruction::Mov {
+                    asm_type,
+                    src: operand,
+                    dst: Operand::Register(dst_reg),
+                }])
+            }
         }
 
-        Expr::Assign(name, rhs) => {
-            let (dst_operand, asm_type, _) = resolve_var(var_map, global_var_map, name)?;
-            let mut instrs = generate_expr(
-                rhs, var_map, label_counter, func_table, global_var_map,
-                double_constants, const_label_counter,
-            )?;
-            let src_reg = if asm_type == AsmType::Double { Reg::XMM0 } else { Reg::AX };
-            instrs.push(Instruction::Mov {
-                asm_type,
-                src: Operand::Register(src_reg),
-                dst: dst_operand,
-            });
-            Ok(instrs)
+        Expr::Assign(lhs, rhs) => {
+            let lhs_type = expr_type(lhs, var_map, global_var_map, func_table);
+            let asm_type = type_to_asm(&lhs_type);
+
+            if let Expr::Var(name) = lhs.as_ref() {
+                // 変数への直接代入（高速パス）
+                let (dst_operand, _, _) = resolve_var(var_map, global_var_map, name)?;
+                let mut instrs = generate_expr(
+                    rhs, var_map, label_counter, func_table, global_var_map,
+                    double_constants, const_label_counter,
+                    string_constants, string_label_counter,
+                )?;
+                let src_reg = if asm_type == AsmType::Double { Reg::XMM0 } else { Reg::AX };
+                instrs.push(Instruction::Mov {
+                    asm_type,
+                    src: Operand::Register(src_reg),
+                    dst: dst_operand,
+                });
+                Ok(instrs)
+            } else {
+                // 一般的な左辺値（*ptr など）への代入
+                // 1. LHS のアドレスを計算 → push
+                let mut instrs = generate_lvalue_addr(
+                    lhs, var_map, label_counter, func_table, global_var_map,
+                    double_constants, const_label_counter,
+                    string_constants, string_label_counter,
+                )?;
+                instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
+                // 2. RHS を評価 → AX/XMM0
+                instrs.extend(generate_expr(
+                    rhs, var_map, label_counter, func_table, global_var_map,
+                    double_constants, const_label_counter,
+                    string_constants, string_label_counter,
+                )?);
+                // 3. アドレスを復元 → CX
+                instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
+                // 4. *(CX) = AX/XMM0
+                let src_reg = if asm_type == AsmType::Double { Reg::XMM0 } else { Reg::AX };
+                instrs.push(Instruction::Mov {
+                    asm_type,
+                    src: Operand::Register(src_reg),
+                    dst: Operand::Memory(Reg::CX),
+                });
+                Ok(instrs)
+            }
         }
 
         Expr::Unary(op, inner) => {
             match op {
                 UnaryOp::PreIncrement | UnaryOp::PreDecrement => {
                     if let Expr::Var(name) = inner.as_ref() {
-                        let (operand, asm_type, _) = resolve_var(var_map, global_var_map, name)?;
+                        let (operand, asm_type, var_type) = resolve_var(var_map, global_var_map, name)?;
                         let is_double = asm_type == AsmType::Double;
                         let result_reg = if is_double { Reg::XMM0 } else { Reg::AX };
+                        // ポインタ型の場合は要素サイズ分増減（Chapter 15）
+                        let increment = if var_type.is_pointer() {
+                            var_type.target_type().unwrap().size() as i64
+                        } else {
+                            1
+                        };
                         let mut instrs = vec![
                             Instruction::Mov {
                                 asm_type,
@@ -1226,14 +1474,14 @@ fn generate_expr(
                                 instrs.push(Instruction::Binary {
                                     asm_type,
                                     op: AsmBinaryOp::Add,
-                                    src: Operand::Imm(1),
+                                    src: Operand::Imm(increment),
                                     dst: Operand::Register(Reg::AX),
                                 });
                             } else {
                                 instrs.push(Instruction::Binary {
                                     asm_type,
                                     op: AsmBinaryOp::Sub,
-                                    src: Operand::Imm(1),
+                                    src: Operand::Imm(increment),
                                     dst: Operand::Register(Reg::AX),
                                 });
                             }
@@ -1256,6 +1504,7 @@ fn generate_expr(
                     let mut instrs = generate_expr(
                         inner, var_map, label_counter, func_table, global_var_map,
                         double_constants, const_label_counter,
+                        string_constants, string_label_counter,
                     )?;
                     match op {
                         UnaryOp::Negate => {
@@ -1336,30 +1585,86 @@ fn generate_expr(
             let mut instrs = generate_expr(
                 condition, var_map, label_counter, func_table, global_var_map,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?;
             emit_condition_check(&mut instrs, cond_type, double_constants, const_label_counter);
             instrs.push(Instruction::JmpCC(CondCode::E, else_label.clone()));
             instrs.extend(generate_expr(
                 then_expr, var_map, label_counter, func_table, global_var_map,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?);
             instrs.push(Instruction::Jmp(end_label.clone()));
             instrs.push(Instruction::Label(else_label));
             instrs.extend(generate_expr(
                 else_expr, var_map, label_counter, func_table, global_var_map,
                 double_constants, const_label_counter,
+                string_constants, string_label_counter,
             )?);
             instrs.push(Instruction::Label(end_label));
             Ok(instrs)
         }
 
-        Expr::CompoundAssign(op, name, rhs) => {
-            let (var_operand, asm_type, var_type) = resolve_var(var_map, global_var_map, name)?;
-            let is_double = asm_type == AsmType::Double;
+        Expr::CompoundAssign(op, lhs, rhs) => {
+            if let Expr::Var(name) = lhs.as_ref() {
+                let (var_operand, asm_type, var_type) = resolve_var(var_map, global_var_map, name)?;
+                let is_double = asm_type == AsmType::Double;
 
-            match op {
+                match op {
                 BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
-                    if is_double {
+                    if var_type.is_pointer() && matches!(op, BinaryOp::Add | BinaryOp::Subtract) {
+                        // ポインタ複合代入: ptr += int, ptr -= int（Chapter 15）
+                        let elem_size = var_type.target_type().unwrap().size() as i64;
+                        let mut instrs = generate_expr(
+                            rhs, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?;
+                        // AX = rhs (integer), scale by elem_size
+                        if elem_size != 1 {
+                            instrs.push(Instruction::Binary {
+                                asm_type: AsmType::Quadword,
+                                op: AsmBinaryOp::Mult,
+                                src: Operand::Imm(elem_size),
+                                dst: Operand::Register(Reg::AX),
+                            });
+                        }
+                        // Load pointer value
+                        instrs.push(Instruction::Mov {
+                            asm_type: AsmType::Quadword,
+                            src: var_operand.clone(),
+                            dst: Operand::Register(Reg::CX),
+                        });
+                        let asm_op = if matches!(op, BinaryOp::Add) { AsmBinaryOp::Add } else { AsmBinaryOp::Sub };
+                        if matches!(op, BinaryOp::Subtract) {
+                            // CX - AX
+                            instrs.push(Instruction::Binary {
+                                asm_type: AsmType::Quadword,
+                                op: asm_op,
+                                src: Operand::Register(Reg::AX),
+                                dst: Operand::Register(Reg::CX),
+                            });
+                            instrs.push(Instruction::Mov {
+                                asm_type: AsmType::Quadword,
+                                src: Operand::Register(Reg::CX),
+                                dst: Operand::Register(Reg::AX),
+                            });
+                        } else {
+                            // AX + CX
+                            instrs.push(Instruction::Binary {
+                                asm_type: AsmType::Quadword,
+                                op: asm_op,
+                                src: Operand::Register(Reg::CX),
+                                dst: Operand::Register(Reg::AX),
+                            });
+                        }
+                        instrs.push(Instruction::Mov {
+                            asm_type: AsmType::Quadword,
+                            src: Operand::Register(Reg::AX),
+                            dst: var_operand,
+                        });
+                        Ok(instrs)
+                    } else if is_double {
                         // Double: load var to XMM14, eval rhs to XMM0, operate, store back
                         let mut instrs = vec![
                             Instruction::Mov {
@@ -1371,6 +1676,7 @@ fn generate_expr(
                         instrs.extend(generate_expr(
                             rhs, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?);
                         // XMM0 = rhs, XMM14 = var
                         let asm_op = match op {
@@ -1419,6 +1725,7 @@ fn generate_expr(
                         instrs.extend(generate_expr(
                             rhs, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?);
                         instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
                         let asm_op = match op {
@@ -1469,6 +1776,7 @@ fn generate_expr(
                         instrs.extend(generate_expr(
                             rhs, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?);
                         // XMM14 / XMM0
                         instrs.push(Instruction::Binary {
@@ -1492,6 +1800,7 @@ fn generate_expr(
                         let mut instrs = generate_expr(
                             rhs, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?;
                         instrs.push(Instruction::Mov {
                             asm_type,
@@ -1523,51 +1832,73 @@ fn generate_expr(
                         Ok(instrs)
                     }
                 }
-                _ => Err(CompileError::CodegenError(format!(
-                    "unsupported compound assignment operator: {:?}", op
-                ))),
+                    _ => Err(CompileError::CodegenError(format!(
+                        "unsupported compound assignment operator: {:?}", op
+                    ))),
+                }
+            } else {
+                Err(CompileError::CodegenError("unsupported lvalue in compound assignment".to_string()))
             }
         }
 
-        Expr::PostfixIncrement(name) => {
-            let (operand, asm_type, _) = resolve_var(var_map, global_var_map, name)?;
-            if asm_type == AsmType::Double {
-                let one_label = add_double_constant(1.0, 8, double_constants, const_label_counter);
-                Ok(vec![
-                    // Load current value to XMM0 (return value)
-                    Instruction::Mov { asm_type: AsmType::Double, src: operand.clone(), dst: Operand::Register(Reg::XMM0) },
-                    // Copy to XMM14 for incrementing
-                    Instruction::Mov { asm_type: AsmType::Double, src: Operand::Register(Reg::XMM0), dst: Operand::Register(Reg::XMM14) },
-                    Instruction::Binary { asm_type: AsmType::Double, op: AsmBinaryOp::Add, src: Operand::Data(one_label), dst: Operand::Register(Reg::XMM14) },
-                    Instruction::Mov { asm_type: AsmType::Double, src: Operand::Register(Reg::XMM14), dst: operand },
-                ])
+        Expr::PostfixIncrement(inner) => {
+            if let Expr::Var(name) = inner.as_ref() {
+                let (operand, asm_type, var_type) = resolve_var(var_map, global_var_map, name)?;
+                // ポインタ型の場合は要素サイズ分増減（Chapter 15）
+                let increment = if var_type.is_pointer() {
+                    var_type.target_type().unwrap().size() as i64
+                } else {
+                    1
+                };
+                if asm_type == AsmType::Double {
+                    let one_label = add_double_constant(1.0, 8, double_constants, const_label_counter);
+                    Ok(vec![
+                        // Load current value to XMM0 (return value)
+                        Instruction::Mov { asm_type: AsmType::Double, src: operand.clone(), dst: Operand::Register(Reg::XMM0) },
+                        // Copy to XMM14 for incrementing
+                        Instruction::Mov { asm_type: AsmType::Double, src: Operand::Register(Reg::XMM0), dst: Operand::Register(Reg::XMM14) },
+                        Instruction::Binary { asm_type: AsmType::Double, op: AsmBinaryOp::Add, src: Operand::Data(one_label), dst: Operand::Register(Reg::XMM14) },
+                        Instruction::Mov { asm_type: AsmType::Double, src: Operand::Register(Reg::XMM14), dst: operand },
+                    ])
+                } else {
+                    Ok(vec![
+                        Instruction::Mov { asm_type, src: operand.clone(), dst: Operand::Register(Reg::AX) },
+                        Instruction::Mov { asm_type, src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
+                        Instruction::Binary { asm_type, op: AsmBinaryOp::Add, src: Operand::Imm(increment), dst: Operand::Register(Reg::CX) },
+                        Instruction::Mov { asm_type, src: Operand::Register(Reg::CX), dst: operand },
+                    ])
+                }
             } else {
-                Ok(vec![
-                    Instruction::Mov { asm_type, src: operand.clone(), dst: Operand::Register(Reg::AX) },
-                    Instruction::Mov { asm_type, src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
-                    Instruction::Binary { asm_type, op: AsmBinaryOp::Add, src: Operand::Imm(1), dst: Operand::Register(Reg::CX) },
-                    Instruction::Mov { asm_type, src: Operand::Register(Reg::CX), dst: operand },
-                ])
+                Err(CompileError::CodegenError("unsupported lvalue in postfix increment".to_string()))
             }
         }
 
-        Expr::PostfixDecrement(name) => {
-            let (operand, asm_type, _) = resolve_var(var_map, global_var_map, name)?;
-            if asm_type == AsmType::Double {
-                let one_label = add_double_constant(1.0, 8, double_constants, const_label_counter);
-                Ok(vec![
-                    Instruction::Mov { asm_type: AsmType::Double, src: operand.clone(), dst: Operand::Register(Reg::XMM0) },
-                    Instruction::Mov { asm_type: AsmType::Double, src: Operand::Register(Reg::XMM0), dst: Operand::Register(Reg::XMM14) },
-                    Instruction::Binary { asm_type: AsmType::Double, op: AsmBinaryOp::Sub, src: Operand::Data(one_label), dst: Operand::Register(Reg::XMM14) },
-                    Instruction::Mov { asm_type: AsmType::Double, src: Operand::Register(Reg::XMM14), dst: operand },
-                ])
+        Expr::PostfixDecrement(inner) => {
+            if let Expr::Var(name) = inner.as_ref() {
+                let (operand, asm_type, var_type) = resolve_var(var_map, global_var_map, name)?;
+                let increment = if var_type.is_pointer() {
+                    var_type.target_type().unwrap().size() as i64
+                } else {
+                    1
+                };
+                if asm_type == AsmType::Double {
+                    let one_label = add_double_constant(1.0, 8, double_constants, const_label_counter);
+                    Ok(vec![
+                        Instruction::Mov { asm_type: AsmType::Double, src: operand.clone(), dst: Operand::Register(Reg::XMM0) },
+                        Instruction::Mov { asm_type: AsmType::Double, src: Operand::Register(Reg::XMM0), dst: Operand::Register(Reg::XMM14) },
+                        Instruction::Binary { asm_type: AsmType::Double, op: AsmBinaryOp::Sub, src: Operand::Data(one_label), dst: Operand::Register(Reg::XMM14) },
+                        Instruction::Mov { asm_type: AsmType::Double, src: Operand::Register(Reg::XMM14), dst: operand },
+                    ])
+                } else {
+                    Ok(vec![
+                        Instruction::Mov { asm_type, src: operand.clone(), dst: Operand::Register(Reg::AX) },
+                        Instruction::Mov { asm_type, src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
+                        Instruction::Binary { asm_type, op: AsmBinaryOp::Sub, src: Operand::Imm(increment), dst: Operand::Register(Reg::CX) },
+                        Instruction::Mov { asm_type, src: Operand::Register(Reg::CX), dst: operand },
+                    ])
+                }
             } else {
-                Ok(vec![
-                    Instruction::Mov { asm_type, src: operand.clone(), dst: Operand::Register(Reg::AX) },
-                    Instruction::Mov { asm_type, src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
-                    Instruction::Binary { asm_type, op: AsmBinaryOp::Sub, src: Operand::Imm(1), dst: Operand::Register(Reg::CX) },
-                    Instruction::Mov { asm_type, src: Operand::Register(Reg::CX), dst: operand },
-                ])
+                Err(CompileError::CodegenError("unsupported lvalue in postfix decrement".to_string()))
             }
         }
 
@@ -1591,7 +1922,7 @@ fn generate_expr(
 
             // Build (type, paramname) tuples for classify_parameters
             let typed_params: Vec<(Type, String)> = param_types.iter()
-                .map(|t| (*t, String::new()))
+                .map(|t| (t.clone(), String::new()))
                 .collect();
             let call_class = classify_parameters(&typed_params);
 
@@ -1648,6 +1979,7 @@ fn generate_expr(
                 instrs.extend(generate_expr(
                     &args[i], var_map, label_counter, func_table, global_var_map,
                     double_constants, const_label_counter,
+                    string_constants, string_label_counter,
                 )?);
                 if param_types[i].is_double() {
                     // For double stack args: save XMM0 to a temp slot, load to AX, push AX
@@ -1705,6 +2037,7 @@ fn generate_expr(
                 instrs.extend(generate_expr(
                     &args[arg_idx], var_map, label_counter, func_table, global_var_map,
                     double_constants, const_label_counter,
+                    string_constants, string_label_counter,
                 )?);
                 instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
             }
@@ -1721,6 +2054,7 @@ fn generate_expr(
                 instrs.extend(generate_expr(
                     &args[arg_idx], var_map, label_counter, func_table, global_var_map,
                     double_constants, const_label_counter,
+                    string_constants, string_label_counter,
                 )?);
                 if reg_idx != 0 {
                     // Move from XMM0 to target XMM reg
@@ -1736,6 +2070,7 @@ fn generate_expr(
                     instrs.extend(generate_expr(
                         &args[arg_idx], var_map, label_counter, func_table, global_var_map,
                         double_constants, const_label_counter,
+                        string_constants, string_label_counter,
                     )?);
                     instrs.push(Instruction::Push(Operand::Register(Reg::XMM0)));
                 }
@@ -1757,9 +2092,9 @@ fn generate_expr(
 
         Expr::Binary(op, left, right) => {
             let result_type = expr_type(expr, var_map, global_var_map, func_table);
-            let asm_type = type_to_asm(result_type);
+            let asm_type = type_to_asm(&result_type);
             let operand_ctype = expr_type(left, var_map, global_var_map, func_table);
-            let operand_asm_type = type_to_asm(operand_ctype);
+            let operand_asm_type = type_to_asm(&operand_ctype);
             let is_double_operand = operand_asm_type == AsmType::Double;
 
             match op {
@@ -1773,6 +2108,7 @@ fn generate_expr(
                     let mut instrs = generate_expr(
                         left, var_map, label_counter, func_table, global_var_map,
                         double_constants, const_label_counter,
+                        string_constants, string_label_counter,
                     )?;
                     emit_condition_check(&mut instrs, left_type, double_constants, const_label_counter);
                     instrs.push(Instruction::JmpCC(CondCode::E, false_label.clone()));
@@ -1781,6 +2117,7 @@ fn generate_expr(
                     instrs.extend(generate_expr(
                         right, var_map, label_counter, func_table, global_var_map,
                         double_constants, const_label_counter,
+                        string_constants, string_label_counter,
                     )?);
                     emit_condition_check(&mut instrs, right_type, double_constants, const_label_counter);
                     instrs.push(Instruction::JmpCC(CondCode::E, false_label.clone()));
@@ -1802,6 +2139,7 @@ fn generate_expr(
                     let mut instrs = generate_expr(
                         left, var_map, label_counter, func_table, global_var_map,
                         double_constants, const_label_counter,
+                        string_constants, string_label_counter,
                     )?;
                     emit_condition_check(&mut instrs, left_type, double_constants, const_label_counter);
                     instrs.push(Instruction::JmpCC(CondCode::NE, true_label.clone()));
@@ -1810,6 +2148,7 @@ fn generate_expr(
                     instrs.extend(generate_expr(
                         right, var_map, label_counter, func_table, global_var_map,
                         double_constants, const_label_counter,
+                        string_constants, string_label_counter,
                     )?);
                     emit_condition_check(&mut instrs, right_type, double_constants, const_label_counter);
                     instrs.push(Instruction::JmpCC(CondCode::NE, true_label.clone()));
@@ -1831,6 +2170,7 @@ fn generate_expr(
                         let mut instrs = generate_expr(
                             left, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?;
                         instrs.push(Instruction::Mov {
                             asm_type: AsmType::Double,
@@ -1840,6 +2180,7 @@ fn generate_expr(
                         instrs.extend(generate_expr(
                             right, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?);
                         // comisd XMM0, XMM14 (compare left (XMM14) with right (XMM0))
                         instrs.push(Instruction::Cmp {
@@ -1871,11 +2212,13 @@ fn generate_expr(
                         let mut instrs = generate_expr(
                             left, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?;
                         instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
                         instrs.extend(generate_expr(
                             right, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?);
                         instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
                         instrs.push(Instruction::Cmp {
@@ -1917,12 +2260,48 @@ fn generate_expr(
                     }
                 }
 
-                BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
-                    if is_double_operand {
-                        // Double arithmetic: left→XMM0, save to XMM14, right→XMM0, operate
+                BinaryOp::Add => {
+                    let left_type = expr_type(left, var_map, global_var_map, func_table);
+
+                    if left_type.is_pointer() {
+                        // ポインタ算術: ptr + int（Chapter 15）
+                        // 型チェッカーが int + ptr → ptr + int にスワップ済み
+                        let elem_size = left_type.target_type().unwrap().size() as i64;
                         let mut instrs = generate_expr(
                             left, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?;
+                        instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
+                        instrs.extend(generate_expr(
+                            right, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?);
+                        // AX = right (integer), scale by elem_size
+                        if elem_size != 1 {
+                            instrs.push(Instruction::Binary {
+                                asm_type: AsmType::Quadword,
+                                op: AsmBinaryOp::Mult,
+                                src: Operand::Imm(elem_size),
+                                dst: Operand::Register(Reg::AX),
+                            });
+                        }
+                        instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
+                        // CX = ptr, AX = scaled offset
+                        instrs.push(Instruction::Binary {
+                            asm_type: AsmType::Quadword,
+                            op: AsmBinaryOp::Add,
+                            src: Operand::Register(Reg::CX),
+                            dst: Operand::Register(Reg::AX),
+                        });
+                        Ok(instrs)
+                    } else if is_double_operand {
+                        // Double 加算
+                        let mut instrs = generate_expr(
+                            left, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?;
                         instrs.push(Instruction::Mov {
                             asm_type: AsmType::Double,
@@ -1932,73 +2311,223 @@ fn generate_expr(
                         instrs.extend(generate_expr(
                             right, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?);
-                        let asm_op = match op {
-                            BinaryOp::Add => AsmBinaryOp::Add,
-                            BinaryOp::Subtract => AsmBinaryOp::Sub,
-                            BinaryOp::Multiply => AsmBinaryOp::Mult,
-                            _ => unreachable!(),
-                        };
-                        if matches!(op, BinaryOp::Subtract) {
-                            // XMM14 - XMM0
-                            instrs.push(Instruction::Binary {
-                                asm_type: AsmType::Double,
-                                op: asm_op,
-                                src: Operand::Register(Reg::XMM0),
-                                dst: Operand::Register(Reg::XMM14),
-                            });
-                            instrs.push(Instruction::Mov {
-                                asm_type: AsmType::Double,
-                                src: Operand::Register(Reg::XMM14),
-                                dst: Operand::Register(Reg::XMM0),
-                            });
-                        } else {
-                            // XMM14 + XMM0 or XMM14 * XMM0
-                            instrs.push(Instruction::Binary {
-                                asm_type: AsmType::Double,
-                                op: asm_op,
-                                src: Operand::Register(Reg::XMM14),
-                                dst: Operand::Register(Reg::XMM0),
-                            });
-                        }
+                        instrs.push(Instruction::Binary {
+                            asm_type: AsmType::Double,
+                            op: AsmBinaryOp::Add,
+                            src: Operand::Register(Reg::XMM14),
+                            dst: Operand::Register(Reg::XMM0),
+                        });
                         Ok(instrs)
                     } else {
+                        // 通常の整数加算
                         let mut instrs = generate_expr(
                             left, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?;
                         instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
                         instrs.extend(generate_expr(
                             right, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?);
                         instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
-                        let asm_op = match op {
-                            BinaryOp::Add => AsmBinaryOp::Add,
-                            BinaryOp::Subtract => AsmBinaryOp::Sub,
-                            BinaryOp::Multiply => AsmBinaryOp::Mult,
-                            _ => unreachable!(),
-                        };
-                        if matches!(op, BinaryOp::Subtract) {
-                            instrs.push(Instruction::Binary {
-                                asm_type,
-                                op: asm_op,
-                                src: Operand::Register(Reg::AX),
+                        instrs.push(Instruction::Binary {
+                            asm_type,
+                            op: AsmBinaryOp::Add,
+                            src: Operand::Register(Reg::CX),
+                            dst: Operand::Register(Reg::AX),
+                        });
+                        Ok(instrs)
+                    }
+                }
+
+                BinaryOp::Subtract => {
+                    let left_type = expr_type(left, var_map, global_var_map, func_table);
+                    let right_type = expr_type(right, var_map, global_var_map, func_table);
+
+                    if left_type.is_pointer() && right_type.is_pointer() {
+                        // ptr - ptr: 要素数差分を返す（Chapter 15）
+                        let elem_size = left_type.target_type().unwrap().size() as i64;
+                        let mut instrs = generate_expr(
+                            left, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?;
+                        instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
+                        instrs.extend(generate_expr(
+                            right, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?);
+                        instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
+                        // CX = left ptr, AX = right ptr → CX - AX
+                        instrs.push(Instruction::Binary {
+                            asm_type: AsmType::Quadword,
+                            op: AsmBinaryOp::Sub,
+                            src: Operand::Register(Reg::AX),
+                            dst: Operand::Register(Reg::CX),
+                        });
+                        instrs.push(Instruction::Mov {
+                            asm_type: AsmType::Quadword,
+                            src: Operand::Register(Reg::CX),
+                            dst: Operand::Register(Reg::AX),
+                        });
+                        // AX = byte difference → divide by elem_size
+                        if elem_size != 1 {
+                            // 符号付き除算で要素数差分を取得
+                            instrs.push(Instruction::Mov {
+                                asm_type: AsmType::Quadword,
+                                src: Operand::Imm(elem_size),
                                 dst: Operand::Register(Reg::CX),
                             });
-                            instrs.push(Instruction::Mov {
-                                asm_type,
-                                src: Operand::Register(Reg::CX),
-                                dst: Operand::Register(Reg::AX),
+                            instrs.push(Instruction::SignExtend(AsmType::Quadword));
+                            instrs.push(Instruction::Idiv {
+                                asm_type: AsmType::Quadword,
+                                operand: Operand::Register(Reg::CX),
                             });
-                        } else {
+                        }
+                        Ok(instrs)
+                    } else if left_type.is_pointer() && !right_type.is_pointer() {
+                        // ptr - int: スケーリング付き減算（Chapter 15）
+                        let elem_size = left_type.target_type().unwrap().size() as i64;
+                        let mut instrs = generate_expr(
+                            left, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?;
+                        instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
+                        instrs.extend(generate_expr(
+                            right, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?);
+                        // AX = right (integer), scale by elem_size
+                        if elem_size != 1 {
                             instrs.push(Instruction::Binary {
-                                asm_type,
-                                op: asm_op,
-                                src: Operand::Register(Reg::CX),
+                                asm_type: AsmType::Quadword,
+                                op: AsmBinaryOp::Mult,
+                                src: Operand::Imm(elem_size),
                                 dst: Operand::Register(Reg::AX),
                             });
                         }
+                        instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
+                        // CX = ptr, AX = scaled offset → CX - AX
+                        instrs.push(Instruction::Binary {
+                            asm_type: AsmType::Quadword,
+                            op: AsmBinaryOp::Sub,
+                            src: Operand::Register(Reg::AX),
+                            dst: Operand::Register(Reg::CX),
+                        });
+                        instrs.push(Instruction::Mov {
+                            asm_type: AsmType::Quadword,
+                            src: Operand::Register(Reg::CX),
+                            dst: Operand::Register(Reg::AX),
+                        });
+                        Ok(instrs)
+                    } else if is_double_operand {
+                        // Double 減算
+                        let mut instrs = generate_expr(
+                            left, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?;
+                        instrs.push(Instruction::Mov {
+                            asm_type: AsmType::Double,
+                            src: Operand::Register(Reg::XMM0),
+                            dst: Operand::Register(Reg::XMM14),
+                        });
+                        instrs.extend(generate_expr(
+                            right, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?);
+                        instrs.push(Instruction::Binary {
+                            asm_type: AsmType::Double,
+                            op: AsmBinaryOp::Sub,
+                            src: Operand::Register(Reg::XMM0),
+                            dst: Operand::Register(Reg::XMM14),
+                        });
+                        instrs.push(Instruction::Mov {
+                            asm_type: AsmType::Double,
+                            src: Operand::Register(Reg::XMM14),
+                            dst: Operand::Register(Reg::XMM0),
+                        });
+                        Ok(instrs)
+                    } else {
+                        // 通常の整数減算
+                        let mut instrs = generate_expr(
+                            left, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?;
+                        instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
+                        instrs.extend(generate_expr(
+                            right, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?);
+                        instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
+                        instrs.push(Instruction::Binary {
+                            asm_type,
+                            op: AsmBinaryOp::Sub,
+                            src: Operand::Register(Reg::AX),
+                            dst: Operand::Register(Reg::CX),
+                        });
+                        instrs.push(Instruction::Mov {
+                            asm_type,
+                            src: Operand::Register(Reg::CX),
+                            dst: Operand::Register(Reg::AX),
+                        });
+                        Ok(instrs)
+                    }
+                }
+
+                BinaryOp::Multiply => {
+                    if is_double_operand {
+                        let mut instrs = generate_expr(
+                            left, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?;
+                        instrs.push(Instruction::Mov {
+                            asm_type: AsmType::Double,
+                            src: Operand::Register(Reg::XMM0),
+                            dst: Operand::Register(Reg::XMM14),
+                        });
+                        instrs.extend(generate_expr(
+                            right, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?);
+                        instrs.push(Instruction::Binary {
+                            asm_type: AsmType::Double,
+                            op: AsmBinaryOp::Mult,
+                            src: Operand::Register(Reg::XMM14),
+                            dst: Operand::Register(Reg::XMM0),
+                        });
+                        Ok(instrs)
+                    } else {
+                        let mut instrs = generate_expr(
+                            left, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?;
+                        instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
+                        instrs.extend(generate_expr(
+                            right, var_map, label_counter, func_table, global_var_map,
+                            double_constants, const_label_counter,
+                            string_constants, string_label_counter,
+                        )?);
+                        instrs.push(Instruction::Pop(Operand::Register(Reg::CX)));
+                        instrs.push(Instruction::Binary {
+                            asm_type,
+                            op: AsmBinaryOp::Mult,
+                            src: Operand::Register(Reg::CX),
+                            dst: Operand::Register(Reg::AX),
+                        });
                         Ok(instrs)
                     }
                 }
@@ -2007,10 +2536,12 @@ fn generate_expr(
                     let mut instrs = generate_expr(
                         left, var_map, label_counter, func_table, global_var_map,
                         double_constants, const_label_counter,
+                        string_constants, string_label_counter,
                     )?;
                     instrs.extend(generate_expr(
                         right, var_map, label_counter, func_table, global_var_map,
                         double_constants, const_label_counter,
+                        string_constants, string_label_counter,
                     )?);
                     Ok(instrs)
                 }
@@ -2022,6 +2553,7 @@ fn generate_expr(
                         let mut instrs = generate_expr(
                             left, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?;
                         instrs.push(Instruction::Mov {
                             asm_type: AsmType::Double,
@@ -2031,6 +2563,7 @@ fn generate_expr(
                         instrs.extend(generate_expr(
                             right, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?);
                         // XMM14 / XMM0
                         instrs.push(Instruction::Binary {
@@ -2049,11 +2582,13 @@ fn generate_expr(
                         let mut instrs = generate_expr(
                             left, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?;
                         instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
                         instrs.extend(generate_expr(
                             right, var_map, label_counter, func_table, global_var_map,
                             double_constants, const_label_counter,
+                            string_constants, string_label_counter,
                         )?);
                         instrs.push(Instruction::Mov {
                             asm_type,
@@ -2077,6 +2612,47 @@ fn generate_expr(
                     }
                 }
             }
+        }
+
+        // sizeof は型チェッカーで ConstantULong に解決済み（到達しない）
+        Expr::SizeOfType(_) | Expr::SizeOfExpr(_) => {
+            unreachable!("sizeof should be resolved by type checker")
+        }
+
+        // ── Chapter 14: ポインタ ──
+        Expr::AddrOf(inner) => {
+            // &expr → inner のアドレスを %rax に
+            generate_lvalue_addr(
+                inner, var_map, label_counter, func_table, global_var_map,
+                double_constants, const_label_counter,
+                string_constants, string_label_counter,
+            )
+        }
+
+        Expr::Dereref(inner) => {
+            // *expr → inner を評価してアドレスを取得し、そのアドレスの値をロード
+            let target_type = expr_type(expr, var_map, global_var_map, func_table);
+            let asm_type = type_to_asm(&target_type);
+            let mut instrs = generate_expr(
+                inner, var_map, label_counter, func_table, global_var_map,
+                double_constants, const_label_counter,
+                string_constants, string_label_counter,
+            )?;
+            // %rax にアドレスが入っている → (%rax) から値をロード
+            if asm_type == AsmType::Double {
+                instrs.push(Instruction::Mov {
+                    asm_type,
+                    src: Operand::Memory(Reg::AX),
+                    dst: Operand::Register(Reg::XMM0),
+                });
+            } else {
+                instrs.push(Instruction::Mov {
+                    asm_type,
+                    src: Operand::Memory(Reg::AX),
+                    dst: Operand::Register(Reg::AX),
+                });
+            }
+            Ok(instrs)
         }
     }
 }
@@ -2292,7 +2868,7 @@ mod tests {
                 BlockItem::Statement(Statement::While {
                     condition: Expr::Binary(BinaryOp::LessThan, Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(5))),
                     body: Box::new(Statement::Expression(
-                        Expr::Assign("a".to_string(), Box::new(Expr::Binary(BinaryOp::Add, Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(1)))))
+                        Expr::Assign(Box::new(Expr::Var("a".to_string())), Box::new(Expr::Binary(BinaryOp::Add, Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(1)))))
                     )),
                 }),
                 BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),

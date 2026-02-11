@@ -26,6 +26,10 @@ pub enum TokenKind {
     ULongLiteral(u64),
     /// 浮動小数点リテラル（例: `3.14`, `.5`, `2e10`）（Chapter 13）。
     DoubleLiteral(f64),
+    /// 文字リテラル（例: `'a'`, `'\n'`）（Chapter 16）。値は signed char。
+    CharLiteral(i8),
+    /// 文字列リテラル（例: `"hello"`）（Chapter 16）。エスケープ解決済みの内容。
+    StringLiteral(String),
 
     // ── 識別子 ──
     /// 識別子（例: `main`, `foo`）。名前の文字列を保持する。
@@ -64,6 +68,10 @@ pub enum TokenKind {
     KwSigned,
     /// `double` キーワード — 倍精度浮動小数点型（Chapter 13）
     KwDouble,
+    /// `sizeof` キーワード — 型/式のバイトサイズ取得（Chapter 15）
+    KwSizeof,
+    /// `char` キーワード — 文字型（Chapter 16）
+    KwChar,
 
     // ── 演算子 ──（Chapter 2 で追加）
     /// `-` — 単項マイナス / 二項減算
@@ -96,6 +104,8 @@ pub enum TokenKind {
     EqualEqual,
     /// `!=` — 非等価
     NotEqual,
+    /// `&` — アドレス演算子（Chapter 14）
+    Ampersand,
     /// `&&` — 論理AND
     AndAnd,
     /// `||` — 論理OR
@@ -140,6 +150,10 @@ pub enum TokenKind {
     CloseBrace,
     /// `;`
     Semicolon,
+    /// `[` — 配列添字（Chapter 15）
+    OpenBracket,
+    /// `]` — 配列添字（Chapter 15）
+    CloseBracket,
 }
 
 /// ソースコード中の位置情報。

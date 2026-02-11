@@ -14,6 +14,13 @@
 //! Chapter 13 で `double` 型のコード生成を追加。SSE 命令 (`addsd`, `subsd`,
 //! `mulsd`, `divsd`, `comisd`, `xorpd`) と XMM レジスタを使用する。
 //! `double` 定数は `.rodata` セクションに `static_constants` として配置される。
+//!
+//! Chapter 14 でポインタ型のコード生成を追加。`Lea` (アドレスロード)、
+//! `Memory(Reg)` (レジスタ間接アドレッシング) で間接参照・アドレス取得を実現する。
+//!
+//! Chapter 15 で配列型・ポインタ算術のコード生成を追加。配列変数は `Lea` で
+//! アドレスをロード（decay）。ポインタ加減算は要素サイズでスケーリング。
+//! グローバル配列は `ZeroInit` で `.bss` セクションにゼロ初期化配置。
 
 pub mod asm_ast;
 pub mod generator;

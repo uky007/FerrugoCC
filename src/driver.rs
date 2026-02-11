@@ -11,6 +11,8 @@
 //! Chapter 11 で型検査パス（Validate）が Parse と Codegen の間に追加された。
 //! Chapter 12 で `unsigned int`/`unsigned long` に対応。
 //! Chapter 13 で `double`（浮動小数点）に対応。
+//! Chapter 14 でポインタ型（`int *`, `double **` 等）に対応。
+//! Chapter 15 で配列型（`int arr[10]`）、ポインタ算術、`sizeof` に対応。
 //!
 //! `--lex`, `--parse`, `--validate`, `--codegen`, `-S` フラグで途中のステージで停止できる。
 //! これは本のテストスイートとの互換性のために必要。

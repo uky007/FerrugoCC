@@ -45,6 +45,142 @@ cargo test
 | 11 | Long 整数 (`long`, 型検査パス導入, 暗黙的型変換) | 完了 |
 | 12 | 符号なし整数 (`unsigned int`, `unsigned long`, 通常算術変換) | 完了 |
 | 13 | 浮動小数点数 (`double`, SSE 命令, XMM レジスタ) | 完了 |
+| 14 | ポインタ (`int *`, `&`, `*`, ポインタ比較, null, キャスト) | 完了 |
+| 15 | 配列とポインタ算術 (`int arr[10]`, `arr[i]`, `ptr + n`, `sizeof`) | 完了 |
+
+### Chapter 15 の詳細
+
+Chapter 15 では以下の機能を追加した:
+
+- **配列型**: `int arr[10]`, `long arr[5]` 等の固定長配列宣言
+  ```c
+  int arr[5];
+  arr[0] = 10;
+  arr[4] = 20;
+  return arr[0] + arr[4];  // 30
+  ```
+- **配列添字**: `arr[i]` はパーサーで `*(arr + i)` に脱糖（desugaring）
+  ```c
+  int arr[3];
+  arr[0] = 100; arr[1] = 200; arr[2] = 300;
+  return arr[2];  // 300
+  ```
+- **配列→ポインタ減衰（decay）**: 式中の配列は自動的にポインタに変換
+  ```c
+  int arr[5];
+  int *p = arr;    // 配列 → 先頭要素へのポインタに暗黙変換
+  ```
+- **ポインタ算術**: ポインタ加減算は要素サイズ分スケーリングされる
+  ```c
+  int arr[10];
+  int *p = arr;
+  *(p + 3) = 42;   // arr[3] に 42 を代入（3 * sizeof(int) = 12 バイト進む）
+  return arr[3];    // 42
+  ```
+- **ポインタ減算**: 同じ型のポインタ同士の差分は要素数で返される
+  ```c
+  int arr[10];
+  int *p = &arr[7];
+  int *q = &arr[2];
+  long diff = p - q;
+  return (int) diff;  // 5
+  ```
+- **ポインタ比較の拡張**: `<`, `<=`, `>`, `>=` を同じポインタ型同士で許可
+  ```c
+  int arr[5];
+  int *p = &arr[1];
+  int *q = &arr[3];
+  return p < q;  // 1
+  ```
+- **ポインタ増分/減分**: `++`, `--`, `+=`, `-=` が要素サイズ分移動
+  ```c
+  int arr[5];
+  arr[0] = 1; arr[1] = 2; arr[2] = 3;
+  int *p = arr;
+  p++;
+  return *p;  // 2
+  ```
+- **`sizeof` 演算子**: 型チェック時に定数（`unsigned long`）に解決
+  ```c
+  int arr[10];
+  return (int) sizeof(arr);   // 40（int は 4 バイト × 10）
+  return (int) sizeof(int);   // 4
+  return (int) sizeof(long);  // 8
+  ```
+- **配列パラメータ**: 関数パラメータの `int arr[]` は `int *arr` に変換
+  ```c
+  int first(int arr[]) { return arr[0]; }
+  int main(void) {
+      int a[3];
+      a[0] = 99;
+      return first(a);  // 99
+  }
+  ```
+- **グローバル配列**: `.bss` セクションにゼロ初期化で配置
+  ```c
+  int arr[3];
+  int main(void) {
+      arr[0] = 5; arr[1] = 10; arr[2] = 15;
+      return arr[0] + arr[1] + arr[2];  // 30
+  }
+  ```
+- **制限事項**: 配列の初期化子リスト（`int arr[3] = {1, 2, 3}`）は未対応（Chapter 18 で実装予定）
+
+### Chapter 14 の詳細
+
+Chapter 14 では以下の機能を追加した:
+
+- **ポインタ型**: `int *`, `double *`, `int **` 等の多段ポインタに対応
+  ```c
+  int x = 3;
+  int *ptr = &x;
+  return *ptr;       // 3
+  ```
+- **アドレス演算子 (`&`)**: 変数のアドレスを取得
+  ```c
+  int x = 10;
+  int *p = &x;       // x のアドレスを p に格納
+  ```
+- **間接参照演算子 (`*`)**: ポインタ経由の読み書き
+  ```c
+  int x = 0;
+  int *ptr = &x;
+  *ptr = 42;          // ポインタ経由で x に書き込み
+  return x;            // 42
+  ```
+- **ポインタの関数引数・戻り値**: ポインタを関数間で受け渡し
+  ```c
+  int *return_pointer(int *in) { return in; }
+  int main(void) {
+      int x = 10;
+      int *p = return_pointer(&x);
+      return *p;       // 10
+  }
+  ```
+- **ポインタ比較**: `==` / `!=` で同じポインタ型同士を比較
+  ```c
+  int a = 0, b = 0;
+  int *a_ptr = &a;
+  int *b_ptr = &b;
+  return a_ptr == b_ptr;  // 0（異なるアドレス）
+  ```
+- **null ポインタ**: 整数定数 0 をポインタに代入可能。条件式で真偽判定
+  ```c
+  int *p = 0;
+  if (p) return 1;
+  return 0;            // 0（null は偽）
+  ```
+- **ポインタ ↔ 整数キャスト**: 明示的キャストで相互変換
+  ```c
+  long l = 128;
+  int *a = (int *) l;
+  int *b = (int *) 128l;
+  return a == b;       // 1
+  ```
+- **宣言子パーサー**: `int *x`, `int **pp` 等のポインタ宣言構文を解析
+- **キャスト式パーサー**: `(int *)expr` と `(expr)` の区別（型キーワードによる先読み）
+- **左辺値の一般化**: `*ptr = val` 形式の代入に対応（`Assign(Box<Expr>, ...)` に変更）
+- **コード生成**: `Lea` (アドレスロード)、`Memory(Reg)` (レジスタ間接アドレッシング)
 
 ### Chapter 13 の詳細
 

@@ -3,18 +3,19 @@
 //! パーサーが構築する木構造を定義する。
 //! 各ノードはCの文法要素に対応し、ソースの構造を忠実に表現する。
 //!
-//! # 現在サポートする文法（Chapter 12）
+//! # 現在サポートする文法（Chapter 15）
 //! ```text
 //! <program>        ::= <top_level_decl>*                      ← Ch10: 関数+変数
 //! <top_level_decl> ::= <function_decl> | <variable_decl>
-//! <function_decl>  ::= <storage_class>? <type> <id> "(" <params> ")" ( "{" <block>* "}" | ";" )
-//! <variable_decl>  ::= <storage_class>? <type> <id> ("=" <expr>)? ";"
+//! <function_decl>  ::= <storage_class>? <type> <declarator> "(" <params> ")" ( "{" <block>* "}" | ";" )
+//! <variable_decl>  ::= <storage_class>? <type> <declarator> ("=" <expr>)? ";"
+//! <declarator>     ::= "*"* <identifier> ("[" <int> "]")?      ← Ch15: 配列宣言子
 //! <type>           ::= <type_specifier>+                       ← Ch12: 任意順の型指定子
-//! <type_specifier> ::= "int" | "long" | "signed" | "unsigned"  ← Ch12: unsigned/signed 追加
+//! <type_specifier> ::= "int" | "long" | "signed" | "unsigned" | "double"
 //! <storage_class>  ::= "static" | "extern"
-//! <params>         ::= "void" | <type> <identifier> ("," <type> <identifier>)*
+//! <params>         ::= "void" | <type> <declarator> ("," <type> <declarator>)*
 //! <block_item>     ::= <statement> | <declaration>
-//! <declaration>    ::= <storage_class>? <type> <identifier> ("=" <assignment>)? ";"
+//! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <assignment>)? ";"
 //! <statement>      ::= "return" <exp> ";"
 //!                    | <exp> ";"
 //!                    | ";"
@@ -27,7 +28,7 @@
 //!                    | "continue" ";"
 //! <for_init>       ::= <declaration> | <exp>? ";"
 //! <exp>            ::= <assignment> ("," <assignment>)*       ← Ch7: カンマ演算子
-//! <assignment>     ::= <identifier> <assign_op> <assignment>  ← Ch7: 複合代入
+//! <assignment>     ::= <lvalue> <assign_op> <assignment>       ← Ch14: 左辺値を一般化
 //!                    | <conditional>
 //! <assign_op>      ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="
 //! <conditional>    ::= <logical_or> ("?" <exp> ":" <conditional>)?
@@ -36,23 +37,34 @@
 //! <equality>       ::= <relational> ( ("==" | "!=") <relational> )*
 //! <relational>     ::= <additive> ( ("<" | "<=" | ">" | ">=") <additive> )*
 //! <additive>       ::= <multiplicative> ( ("+" | "-") <multiplicative> )*
-//! <multiplicative> ::= <unary> ( ("*" | "/" | "%") <unary> )*
-//! <unary>          ::= <unary_op> <unary> | <postfix>         ← Ch7: postfix呼び出し
-//! <unary_op>       ::= "-" | "~" | "!" | "++" | "--"          ← Ch7: 前置++/--
-//! <postfix>        ::= <primary> ("++" | "--")*                ← Ch7: 後置++/--
-//! <primary>        ::= <int> | <long> | <uint> | <ulong>      ← Ch12: unsigned リテラル
+//! <multiplicative> ::= <cast> ( ("*" | "/" | "%") <cast> )*   ← Ch14: cast 挿入
+//! <cast>           ::= "(" <type> <abstract_declarator> ")" <cast>  ← Ch14: キャスト式
+//!                    | <unary>
+//! <abstract_declarator> ::= "*"* ("[" <int> "]")?              ← Ch15: 配列サフィックス
+//! <unary>          ::= <unary_op> <cast>                        ← Ch14: cast を呼ぶ
+//!                    | "sizeof" <unary>                         ← Ch15: sizeof 式
+//!                    | "sizeof" "(" <type> <abstract_declarator> ")"  ← Ch15: sizeof(型)
+//!                    | <postfix>
+//! <unary_op>       ::= "-" | "~" | "!" | "++" | "--" | "*" | "&"  ← Ch14: 間接参照・アドレス取得
+//! <postfix>        ::= <primary> ("++" | "--" | "[" <exp> "]")*  ← Ch15: 配列添字
+//! <primary>        ::= <int> | <long> | <uint> | <ulong> | <double>
 //!                    | <identifier> ("(" <args>? ")")?         ← Ch9: 関数呼び出し
 //!                    | "(" <exp> ")"
 //! <int>            ::= [0-9]+                                  ← 整数リテラル
 //! <long>           ::= [0-9]+ ("l" | "L")                     ← Ch11: long リテラル
 //! <uint>           ::= [0-9]+ ("u" | "U")                     ← Ch12: unsigned int リテラル
 //! <ulong>          ::= [0-9]+ ("ul" | "UL" | "lu" | "LU")    ← Ch12: unsigned long リテラル
+//! <double>         ::= [0-9]*"."[0-9]+ | [0-9]+"."[0-9]* | ...  ← Ch13: 浮動小数点リテラル
 //! <args>           ::= <assignment> ("," <assignment>)*        ← カンマ演算子と区別
 //! ```
 
-/// 型（Chapter 11, 12）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 型（Chapter 11, 12, 14, 16）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
+    /// `char` / `signed char` — 1バイト符号付き整数（Chapter 16）
+    Char,
+    /// `unsigned char` — 1バイト符号なし整数（Chapter 16）
+    UChar,
     /// `int` — 32ビット符号付き整数
     Int,
     /// `long` — 64ビット符号付き整数
@@ -63,12 +75,21 @@ pub enum Type {
     ULong,
     /// `double` — IEEE 754 倍精度浮動小数点（Chapter 13）
     Double,
+    /// ポインタ型（Chapter 14）。`int *` → `Pointer(Box::new(Int))`
+    Pointer(Box<Type>),
+    /// 配列型（Chapter 15）。`int[10]` → `Array(Box::new(Int), 10)`
+    Array(Box<Type>, usize),
 }
 
 impl Type {
     /// 符号なし型かどうかを判定する。
     pub fn is_unsigned(&self) -> bool {
-        matches!(self, Type::UInt | Type::ULong)
+        matches!(self, Type::UInt | Type::ULong | Type::UChar)
+    }
+
+    /// 文字型かどうかを判定する（Chapter 16）。
+    pub fn is_character(&self) -> bool {
+        matches!(self, Type::Char | Type::UChar)
     }
 
     /// 浮動小数点型かどうかを判定する（Chapter 13）。
@@ -76,11 +97,31 @@ impl Type {
         matches!(self, Type::Double)
     }
 
+    /// ポインタ型かどうかを判定する（Chapter 14）。
+    pub fn is_pointer(&self) -> bool {
+        matches!(self, Type::Pointer(_))
+    }
+
+    /// 配列型かどうかを判定する（Chapter 15）。
+    pub fn is_array(&self) -> bool {
+        matches!(self, Type::Array(_, _))
+    }
+
+    /// ポインタまたは配列の指す先の型を返す（Chapter 15）。
+    pub fn target_type(&self) -> Option<&Type> {
+        match self {
+            Type::Pointer(t) | Type::Array(t, _) => Some(t),
+            _ => None,
+        }
+    }
+
     /// 型のバイトサイズを返す。
     pub fn size(&self) -> usize {
         match self {
+            Type::Char | Type::UChar => 1,
             Type::Int | Type::UInt => 4,
-            Type::Long | Type::ULong | Type::Double => 8,
+            Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
+            Type::Array(elem, count) => elem.size() * count,
         }
     }
 }
@@ -232,25 +273,35 @@ pub enum Expr {
     ///
     /// 例: `a` → `Var("a")`
     Var(String),
-    /// 代入式（Chapter 5）。変数名と右辺の式を持つ（右結合）。
+    /// 代入式（Chapter 5, 14で一般化）。左辺値と右辺の式を持つ（右結合）。
     ///
-    /// 例: `a = 5` → `Assign("a", Constant(5))`
-    /// 代入は式として値を返す（代入された値）。
-    Assign(String, Box<Expr>),
+    /// 例: `a = 5` → `Assign(Box::new(Var("a")), Constant(5))`
+    /// 例: `*ptr = 5` → `Assign(Box::new(Dereref(ptr)), Constant(5))`
+    Assign(Box<Expr>, Box<Expr>),
     /// 三項演算子（Chapter 6）。`cond ? then_expr : else_expr`（右結合）。
     Conditional {
         condition: Box<Expr>,
         then_expr: Box<Expr>,
         else_expr: Box<Expr>,
     },
-    /// 複合代入式（Chapter 7）。`a += 5` → `CompoundAssign(Add, "a", Constant(5))`
-    CompoundAssign(BinaryOp, String, Box<Expr>),
-    /// 後置インクリメント（Chapter 7）。`a++` — 旧値を返す。
-    PostfixIncrement(String),
-    /// 後置デクリメント（Chapter 7）。`a--` — 旧値を返す。
-    PostfixDecrement(String),
+    /// 複合代入式（Chapter 7, 14で一般化）。`a += 5` → `CompoundAssign(Add, Box::new(Var("a")), Constant(5))`
+    CompoundAssign(BinaryOp, Box<Expr>, Box<Expr>),
+    /// 後置インクリメント（Chapter 7, 14で一般化）。`a++` — 旧値を返す。
+    PostfixIncrement(Box<Expr>),
+    /// 後置デクリメント（Chapter 7, 14で一般化）。`a--` — 旧値を返す。
+    PostfixDecrement(Box<Expr>),
     /// 関数呼び出し（Chapter 9）。`foo(a, b)` → `FunctionCall("foo", vec![a, b])`
     FunctionCall(String, Vec<Expr>),
+    /// 間接参照（Chapter 14）。`*expr` — ポインタの指す先の値を取得。左辺値にもなる。
+    Dereref(Box<Expr>),
+    /// アドレス取得（Chapter 14）。`&expr` — 式のアドレスを取得。
+    AddrOf(Box<Expr>),
+    /// sizeof(型)（Chapter 15）。型チェッカーで ConstantULong に置換される。
+    SizeOfType(Type),
+    /// sizeof 式（Chapter 15）。型チェッカーで ConstantULong に置換される。
+    SizeOfExpr(Box<Expr>),
+    /// 文字列リテラル（Chapter 16）。コード生成で .rodata ラベルに変換される。
+    StringLiteral(String),
 }
 
 /// 単項演算子の種類（Chapter 2）。

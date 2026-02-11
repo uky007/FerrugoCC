@@ -12,10 +12,19 @@
 //!
 //! # Chapter 11: AsmType による命令サイズの区別
 //! `Longword` (32bit) と `Quadword` (64bit) で命令のサイズを区別する。
+//!
+//! # Chapter 14: ポインタ対応
+//! - `Lea { src, dst }`: アドレスロード命令（`leaq`）。変数のアドレスを取得する。
+//! - `Operand::Memory(Reg)`: レジスタ間接アドレッシング（`(%rax)` 等）。ポインタ経由のメモリアクセスに使用。
+//!
+//! # Chapter 15: 配列とポインタ算術
+//! - `StaticInit::ZeroInit(usize)`: 配列のゼロ初期化（`.bss` セクションに `.zero N` で配置）。
 
-/// アセンブリ命令のサイズ（Chapter 11, 13）。
+/// アセンブリ命令のサイズ（Chapter 11, 13, 16）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsmType {
+    /// 8ビット（char）（Chapter 16）
+    Byte,
     /// 32ビット（int）
     Longword,
     /// 64ビット（long）
@@ -24,13 +33,17 @@ pub enum AsmType {
     Double,
 }
 
-/// 静的変数/定数の初期値（Chapter 13）。
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// 静的変数/定数の初期値（Chapter 13, 15, 16）。
+#[derive(Debug, Clone, PartialEq)]
 pub enum StaticInit {
     /// 整数初期値
     IntInit(i64),
     /// 浮動小数点初期値
     DoubleInit(f64),
+    /// ゼロ初期化（指定バイト数分）（Chapter 15: 配列のゼロ初期化）
+    ZeroInit(usize),
+    /// 文字列初期値（内容, バイト長 = len + 1）（Chapter 16）
+    StringInit(String, usize),
 }
 
 /// 読み取り専用の静的定数（Chapter 13）。`.rodata` セクションに配置。
@@ -99,9 +112,15 @@ pub enum Instruction {
     /// `movslq src, dst` — int → long 符号拡張（Chapter 11）
     Movsx { src: Operand, dst: Operand },
 
+    /// `movsbl`/`movsbq src, dst` — byte → int/long 符号拡張（Chapter 16）
+    MovsxByte { asm_type: AsmType, src: Operand, dst: Operand },
+
     /// `movl src, dst` — 32→64 ゼロ拡張（Chapter 12）
     /// x86-64 で32ビット mov は上位32ビットを自動ゼロクリアする。
     MovZeroExtend { src: Operand, dst: Operand },
+
+    /// `movzbl`/`movzbq src, dst` — byte → int/long ゼロ拡張（Chapter 16）
+    MovZeroExtendByte { asm_type: AsmType, src: Operand, dst: Operand },
 
     /// `movl src, dst` — long → int 切り詰め（Chapter 11）
     /// 32ビット mov で上位32ビットを暗黙的にゼロクリア。
@@ -139,6 +158,9 @@ pub enum Instruction {
 
     /// `cvttsd2si` — double→整数 変換（切り捨て）（Chapter 13）
     Cvttsd2si { asm_type: AsmType, src: Operand, dst: Operand },
+
+    /// `leaq src, dst` — 実効アドレスのロード（Chapter 14）
+    Lea { src: Operand, dst: Operand },
 }
 
 /// アセンブリレベルの単項演算子
@@ -190,6 +212,8 @@ pub enum Operand {
     Stack(i32),
     /// グローバル/静的変数。例: `x(%rip)`
     Data(String),
+    /// レジスタ間接アドレッシング（Chapter 14）。例: `(%rax)`
+    Memory(Reg),
 }
 
 /// レジスタ名

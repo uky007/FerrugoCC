@@ -24,6 +24,13 @@
 //! `double` 定数は `.rodata` セクションに `.quad` (ビットパターン) として配置。
 //! XMM レジスタの Push/Pop は `subq $8,%rsp; movsd` / `movsd; addq $8,%rsp` で実装。
 //!
+//! # Chapter 14: ポインタ
+//! - `Lea` 命令: `leaq src, dst`（アドレスロード）
+//! - `Memory(Reg)` オペランド: `(%rax)`, `(%rcx)` 等（レジスタ間接アドレッシング）
+//!
+//! # Chapter 15: 配列とポインタ算術
+//! - `ZeroInit(n)` → `.bss` セクションに `.zero n` で配列をゼロ初期化配置
+//!
 //! # .note.GNU-stack セクション
 //! 出力末尾に `.section .note.GNU-stack,"",@progbits` を付加する。
 //! これはスタックが実行不可であることをリンカに伝えるセキュリティ上の慣習。
@@ -82,24 +89,32 @@ fn emit_function(out: &mut String, func: &crate::codegen::asm_ast::AsmFunction) 
     Ok(())
 }
 
-/// 静的変数のアセンブリ出力（Chapter 10, 11: 型サイズ対応）。
+/// 静的変数のアセンブリ出力（Chapter 10, 11, 15: 型サイズ対応、配列ゼロ初期化）。
 ///
 /// 初期値が 0 の場合は `.bss` セクション、非0 の場合は `.data` セクションに配置する。
 /// `global` が true のとき `.globl` ディレクティブを出力する。
 fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
-    let (align, size) = match var.asm_type {
-        AsmType::Longword => (4, 4),
-        AsmType::Quadword | AsmType::Double => (8, 8),
+    let (align, size) = match var.init {
+        StaticInit::ZeroInit(n) => (16, n),  // 配列は16バイトアラインメント
+        _ => match var.asm_type {
+            AsmType::Byte => (1, 1),
+            AsmType::Longword => (4, 4),
+            AsmType::Quadword | AsmType::Double => (8, 8),
+        },
     };
     if var.global {
         writeln!(out, "    .globl {}", var.name)
             .map_err(|e| CompileError::EmitError(e.to_string()))?;
     }
 
-    let is_zero = match var.init {
-        StaticInit::IntInit(v) => v == 0,
+    let is_zero = match &var.init {
+        StaticInit::IntInit(v) => *v == 0,
         // Double は -0.0 と +0.0 を区別するため常に .data に配置
         StaticInit::DoubleInit(_) => false,
+        // 配列のゼロ初期化は .bss に配置（Chapter 15）
+        StaticInit::ZeroInit(_) => true,
+        // 文字列は .data に配置
+        StaticInit::StringInit(_, _) => false,
     };
 
     if !is_zero {
@@ -109,14 +124,23 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
             .map_err(|e| CompileError::EmitError(e.to_string()))?;
         writeln!(out, "{}:", var.name)
             .map_err(|e| CompileError::EmitError(e.to_string()))?;
-        match var.init {
+        match &var.init {
             StaticInit::IntInit(v) => {
-                let directive = if var.asm_type == AsmType::Longword { "long" } else { "quad" };
+                let directive = match var.asm_type {
+                    AsmType::Byte => "byte",
+                    AsmType::Longword => "long",
+                    _ => "quad",
+                };
                 writeln!(out, "    .{directive} {v}")
                     .map_err(|e| CompileError::EmitError(e.to_string()))?;
             }
             StaticInit::DoubleInit(v) => {
                 writeln!(out, "    .quad {}", v.to_bits())
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
+            StaticInit::ZeroInit(_) => unreachable!(),
+            StaticInit::StringInit(content, _) => {
+                writeln!(out, "    .asciz \"{}\"", escape_string_for_asm(content))
                     .map_err(|e| CompileError::EmitError(e.to_string()))?;
             }
         }
@@ -141,13 +165,21 @@ fn emit_static_constant(out: &mut String, constant: &AsmStaticConstant) -> Resul
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
     writeln!(out, "{}:", constant.name)
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
-    match constant.init {
+    match &constant.init {
         StaticInit::IntInit(v) => {
             writeln!(out, "    .quad {v}")
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         StaticInit::DoubleInit(v) => {
             writeln!(out, "    .quad {}", v.to_bits())
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        StaticInit::ZeroInit(n) => {
+            writeln!(out, "    .zero {n}")
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        StaticInit::StringInit(content, _) => {
+            writeln!(out, "    .asciz \"{}\"", escape_string_for_asm(content))
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
     }
@@ -238,7 +270,7 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
             let mnemonic = match asm_type {
                 AsmType::Longword => "cdq",
                 AsmType::Quadword => "cqo",
-                AsmType::Double => unreachable!("SignExtend not applicable to Double"),
+                AsmType::Byte | AsmType::Double => unreachable!("SignExtend not applicable to {:?}", asm_type),
             };
             writeln!(out, "    {mnemonic}")
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
@@ -256,6 +288,22 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
         // Chapter 12: 32→64 ゼロ拡張（movl で上位32ビットを自動ゼロクリア）
         Instruction::MovZeroExtend { src, dst } => {
             writeln!(out, "    movl {}, {}", format_operand(src), format_operand(dst))
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        // Chapter 16: byte → int/long 符号拡張（movsbl/movsbq）
+        Instruction::MovsxByte { asm_type, src, dst } => {
+            let suffix = type_suffix(asm_type);
+            writeln!(out, "    movsb{suffix} {}, {}",
+                format_operand_byte(src),
+                format_operand_typed(dst, asm_type))
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        // Chapter 16: byte → int/long ゼロ拡張（movzbl/movzbq）
+        Instruction::MovZeroExtendByte { asm_type, src, dst } => {
+            let suffix = type_suffix(asm_type);
+            writeln!(out, "    movzb{suffix} {}, {}",
+                format_operand_byte(src),
+                format_operand_typed(dst, asm_type))
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 3/13: スタックにプッシュ
@@ -341,6 +389,11 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
                 format_operand_typed(dst, asm_type))
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
+        // Chapter 14: LEA（実効アドレスロード）
+        Instruction::Lea { src, dst } => {
+            writeln!(out, "    leaq {}, {}", format_operand_quad(src), format_operand_quad(dst))
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
         // Chapter 5: ret はエピローグを含む
         Instruction::Ret => {
             writeln!(out, "    movq %rbp, %rsp")
@@ -357,6 +410,7 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
 /// AsmType に対応する命令サフィックスを返す。
 fn type_suffix(asm_type: &AsmType) -> &'static str {
     match asm_type {
+        AsmType::Byte => "b",
         AsmType::Longword => "l",
         AsmType::Quadword => "q",
         AsmType::Double => "sd",
@@ -366,6 +420,7 @@ fn type_suffix(asm_type: &AsmType) -> &'static str {
 /// AsmType に応じたオペランドのフォーマット（32ビットまたは64ビット）。
 fn format_operand_typed(operand: &Operand, asm_type: &AsmType) -> String {
     match asm_type {
+        AsmType::Byte => format_operand_byte(operand),
         AsmType::Longword => format_operand(operand),
         AsmType::Quadword => format_operand_quad(operand),
         AsmType::Double => format_operand_xmm(operand),
@@ -379,6 +434,7 @@ fn format_operand(operand: &Operand) -> String {
         Operand::Register(reg) => format_register(reg).to_string(),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
         Operand::Data(name) => format!("{name}(%rip)"),
+        Operand::Memory(reg) => format!("({})", format_register_quad(reg)),
     }
 }
 
@@ -392,6 +448,7 @@ fn format_operand_byte(operand: &Operand) -> String {
         Operand::Register(reg) => format_register_byte(reg).to_string(),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
         Operand::Data(name) => format!("{name}(%rip)"),
+        Operand::Memory(reg) => format!("({})", format_register_quad(reg)),
     }
 }
 
@@ -404,6 +461,7 @@ fn format_operand_quad(operand: &Operand) -> String {
         Operand::Register(reg) => format_register_quad(reg).to_string(),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
         Operand::Data(name) => format!("{name}(%rip)"),
+        Operand::Memory(reg) => format!("({})", format_register_quad(reg)),
     }
 }
 
@@ -414,6 +472,7 @@ fn format_operand_xmm(operand: &Operand) -> String {
         Operand::Register(reg) => format_register_xmm(reg).to_string(),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
         Operand::Data(name) => format!("{name}(%rip)"),
+        Operand::Memory(reg) => format!("({})", format_register_quad(reg)),
     }
 }
 
@@ -510,6 +569,29 @@ fn format_condition(cc: &CondCode) -> &'static str {
         CondCode::B => "b",
         CondCode::BE => "be",
     }
+}
+
+/// 文字列をアセンブリの `.asciz` ディレクティブ用にエスケープする。
+///
+/// 特殊文字をアセンブリのエスケープシーケンスに変換する。
+fn escape_string_for_asm(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => result.push_str("\\\\"),
+            '"' => result.push_str("\\\""),
+            '\n' => result.push_str("\\n"),
+            '\t' => result.push_str("\\t"),
+            '\r' => result.push_str("\\r"),
+            '\0' => result.push_str("\\0"),
+            '\x07' => result.push_str("\\a"),
+            '\x08' => result.push_str("\\b"),
+            '\x0c' => result.push_str("\\f"),
+            '\x0b' => result.push_str("\\v"),
+            c => result.push(c),
+        }
+    }
+    result
 }
 
 #[cfg(test)]

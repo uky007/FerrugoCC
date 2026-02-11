@@ -9,16 +9,19 @@
 //! - `peek()` で先読み、`advance()` で消費、`expect()` で特定トークンを要求
 //! - 各 `parse_*` メソッドが文法規則に対応
 //!
-//! # 対応する文法（Chapter 11）
+//! # 対応する文法（Chapter 15）
 //! ```text
 //! <program>        ::= <top_level_decl>*
 //! <top_level_decl> ::= <function_decl> | <variable_decl>
-//! <function_decl>  ::= <storage_class>? <type> <id> "(" <params> ")" ( "{" <block>* "}" | ";" )
-//! <variable_decl>  ::= <storage_class>? <type> <id> ("=" <expr>)? ";"
-//! <type>           ::= "int" | "long" | "long" "int" | "int" "long"  ← Ch11: 型指定子
+//! <function_decl>  ::= <storage_class>? <type> <declarator> "(" <params> ")" ( "{" <block>* "}" | ";" )
+//! <variable_decl>  ::= <storage_class>? <type> <declarator> ("=" <expr>)? ";"
+//! <declarator>     ::= "*"* <identifier> ("[" <int> "]")?      ← Ch15: 配列宣言子
+//! <type>           ::= <type_specifier>+
+//! <type_specifier> ::= "int" | "long" | "signed" | "unsigned" | "double"
 //! <storage_class>  ::= "static" | "extern"
+//! <params>         ::= "void" | <type> <declarator> ("," <type> <declarator>)*
 //! <block_item>     ::= <statement> | <declaration>
-//! <declaration>    ::= <storage_class>? <type> <identifier> ("=" <assignment>)? ";"
+//! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <assignment>)? ";"
 //! <statement>      ::= "return" <exp> ";"
 //!                    | <exp> ";"
 //!                    | ";"
@@ -31,7 +34,7 @@
 //!                    | "continue" ";"
 //! <for_init>       ::= <declaration> | <exp>? ";"
 //! <exp>            ::= <assignment> ("," <assignment>)*
-//! <assignment>     ::= <identifier> <assign_op> <assignment> | <conditional>
+//! <assignment>     ::= <lvalue> <assign_op> <assignment> | <conditional>
 //! <assign_op>      ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="
 //! <conditional>    ::= <logical_or> ("?" <exp> ":" <conditional>)?
 //! <logical_or>     ::= <logical_and> ( "||" <logical_and> )*
@@ -39,11 +42,18 @@
 //! <equality>       ::= <relational> ( ("==" | "!=") <relational> )*
 //! <relational>     ::= <additive> ( ("<" | "<=" | ">" | ">=") <additive> )*
 //! <additive>       ::= <multiplicative> ( ("+" | "-") <multiplicative> )*
-//! <multiplicative> ::= <unary> ( ("*" | "/" | "%") <unary> )*
-//! <unary>          ::= <unary_op> <unary> | <postfix>
-//! <unary_op>       ::= "-" | "~" | "!" | "++" | "--"
-//! <postfix>        ::= <primary> ("++" | "--")*
-//! <primary>        ::= <int> | <long> | <identifier> ("(" <args>? ")")? | "(" <exp> ")"
+//! <multiplicative> ::= <cast> ( ("*" | "/" | "%") <cast> )*
+//! <cast>           ::= "(" <type> <abstract_declarator> ")" <cast>
+//!                    | <unary>
+//! <abstract_declarator> ::= "*"* ("[" <int> "]")?              ← Ch15: 配列サフィックス
+//! <unary>          ::= <unary_op> <cast> | "sizeof" <unary>    ← Ch15: sizeof
+//!                    | "sizeof" "(" <type> <abstract_declarator> ")"
+//!                    | <postfix>
+//! <unary_op>       ::= "-" | "~" | "!" | "++" | "--" | "*" | "&"
+//! <postfix>        ::= <primary> ("++" | "--" | "[" <exp> "]")* ← Ch15: 配列添字
+//! <primary>        ::= <int> | <long> | <uint> | <ulong> | <double>
+//!                    | <identifier> ("(" <args>? ")")?
+//!                    | "(" <exp> ")"
 //! <args>           ::= <assignment> ("," <assignment>)*
 //! ```
 
@@ -126,6 +136,21 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// 型キーワードの先読み判定（Chapter 14）。
+    ///
+    /// 現在位置のトークンが型指定子キーワードかどうかを返す。
+    /// キャスト式 `(type)expr` と括弧式 `(expr)` の区別に使う。
+    fn is_type_keyword(&self) -> bool {
+        if self.pos >= self.tokens.len() {
+            return false;
+        }
+        matches!(
+            self.tokens[self.pos].kind,
+            TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
+            | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
+        )
+    }
+
     /// 型指定子をパースする（Chapter 11, 12）。
     ///
     /// フラグ方式でキーワードを任意順に収集し、型に解決する。
@@ -140,6 +165,7 @@ impl<'a> Parser<'a> {
         let mut has_unsigned = false;
         let mut has_signed = false;
         let mut has_double = false;
+        let mut has_char = false;
         let mut count = 0;
 
         loop {
@@ -158,6 +184,11 @@ impl<'a> Parser<'a> {
                             "cannot combine 'double' with other type specifiers".to_string()
                         ));
                     }
+                    if has_char {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'char' with 'int'".to_string()
+                        ));
+                    }
                     has_int = true;
                     self.advance()?;
                     count += 1;
@@ -171,6 +202,11 @@ impl<'a> Parser<'a> {
                     if has_double {
                         return Err(CompileError::ParseError(
                             "cannot combine 'double' with other type specifiers".to_string()
+                        ));
+                    }
+                    if has_char {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'char' with 'long'".to_string()
                         ));
                     }
                     has_long = true;
@@ -223,12 +259,27 @@ impl<'a> Parser<'a> {
                             "duplicate 'double' type specifier".to_string()
                         ));
                     }
-                    if has_int || has_long || has_unsigned || has_signed {
+                    if has_int || has_long || has_unsigned || has_signed || has_char {
                         return Err(CompileError::ParseError(
                             "cannot combine 'double' with other type specifiers".to_string()
                         ));
                     }
                     has_double = true;
+                    self.advance()?;
+                    count += 1;
+                }
+                TokenKind::KwChar => {
+                    if has_char {
+                        return Err(CompileError::ParseError(
+                            "duplicate 'char' type specifier".to_string()
+                        ));
+                    }
+                    if has_int || has_long || has_double {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'char' with other type specifiers".to_string()
+                        ));
+                    }
+                    has_char = true;
                     self.advance()?;
                     count += 1;
                 }
@@ -246,6 +297,13 @@ impl<'a> Parser<'a> {
         // 型の解決
         if has_double {
             Ok(Type::Double)
+        } else if has_char {
+            if has_unsigned {
+                Ok(Type::UChar)
+            } else {
+                // char, signed char
+                Ok(Type::Char)
+            }
         } else if has_unsigned {
             if has_long {
                 Ok(Type::ULong)
@@ -258,6 +316,84 @@ impl<'a> Parser<'a> {
             // has_int or has_signed (or both)
             Ok(Type::Int)
         }
+    }
+
+    /// 宣言子のパース（Chapter 14）。
+    ///
+    /// `int *x`, `int **pp` などのポインタ宣言をパースする。
+    /// 先頭の `*` の個数をカウントし、識別子を読み、型をラップして返す。
+    fn parse_declarator(&mut self, base_type: Type) -> Result<(Type, String)> {
+        // leading '*' をカウント
+        let mut stars = 0;
+        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Star {
+            self.advance()?;
+            stars += 1;
+        }
+
+        let name_token = self.advance()?;
+        let name = match &name_token.kind {
+            TokenKind::Identifier(name) => name.clone(),
+            other => {
+                return Err(CompileError::ParseError(format!(
+                    "expected identifier in declarator, got {:?}", other
+                )));
+            }
+        };
+
+        let mut ty = base_type;
+        for _ in 0..stars {
+            ty = Type::Pointer(Box::new(ty));
+        }
+
+        // Chapter 15: 配列サフィックス `[N]`
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
+            self.advance()?; // consume '['
+            if let TokenKind::IntLiteral(n) = &self.peek()?.kind {
+                let n = *n as usize;
+                self.advance()?;
+                ty = Type::Array(Box::new(ty), n);
+            } else if self.peek()?.kind == TokenKind::CloseBracket {
+                // パラメータ用: `int arr[]` → Array(ty, 0)
+                ty = Type::Array(Box::new(ty), 0);
+            } else {
+                return Err(CompileError::ParseError(
+                    "expected array size or ']' in declarator".to_string()
+                ));
+            }
+            self.expect(&TokenKind::CloseBracket)?;
+        }
+
+        Ok((ty, name))
+    }
+
+    /// 抽象宣言子のパース（Chapter 14）。
+    ///
+    /// キャスト式 `(int *)`, `(double **)` で使用する。
+    /// 識別子なしで型だけを返す。
+    fn parse_abstract_declarator(&mut self, base_type: Type) -> Result<Type> {
+        let mut stars = 0;
+        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Star {
+            self.advance()?;
+            stars += 1;
+        }
+
+        let mut ty = base_type;
+        for _ in 0..stars {
+            ty = Type::Pointer(Box::new(ty));
+        }
+
+        // Chapter 15: 配列サフィックス `[N]` for sizeof(int[10]) etc.
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
+            self.advance()?; // consume '['
+            if let TokenKind::IntLiteral(n) = &self.peek()?.kind {
+                let n = *n as usize;
+                self.advance()?;
+                ty = Type::Array(Box::new(ty), n);
+            }
+            self.expect(&TokenKind::CloseBracket)?;
+        }
+
+        Ok(ty)
     }
 
     /// `<program> ::= <top_level_decl>*`
@@ -275,17 +411,8 @@ impl<'a> Parser<'a> {
     /// `[static|extern]? int <id>` の後に `(` → 関数、`=` or `;` → 変数。
     fn parse_top_level_decl(&mut self) -> Result<TopLevelDecl> {
         let storage_class = self.parse_storage_class()?;
-        let decl_type = self.parse_type_specifier()?;
-
-        let name_token = self.advance()?;
-        let name = match &name_token.kind {
-            TokenKind::Identifier(name) => name.clone(),
-            other => {
-                return Err(CompileError::ParseError(format!(
-                    "expected identifier, got {:?}", other
-                )));
-            }
-        };
+        let base_type = self.parse_type_specifier()?;
+        let (decl_type, name) = self.parse_declarator(base_type)?;
 
         // `(` → 関数、`=`/`;` → 変数
         if self.peek()?.kind == TokenKind::OpenParen {
@@ -297,28 +424,21 @@ impl<'a> Parser<'a> {
                 Vec::new()
             } else {
                 let mut params = Vec::new();
-                let param_type = self.parse_type_specifier()?;
-                let param_token = self.advance()?;
-                match &param_token.kind {
-                    TokenKind::Identifier(name) => params.push((param_type, name.clone())),
-                    other => {
-                        return Err(CompileError::ParseError(format!(
-                            "expected parameter name, got {:?}", other
-                        )));
-                    }
+                let param_base = self.parse_type_specifier()?;
+                let (mut param_type, param_name) = self.parse_declarator(param_base)?;
+                // Chapter 15: 配列パラメータ → ポインタに変換
+                if let Type::Array(elem, _) = param_type {
+                    param_type = Type::Pointer(elem);
                 }
+                params.push((param_type, param_name));
                 while self.peek()?.kind == TokenKind::Comma {
                     self.advance()?;
-                    let param_type = self.parse_type_specifier()?;
-                    let param_token = self.advance()?;
-                    match &param_token.kind {
-                        TokenKind::Identifier(name) => params.push((param_type, name.clone())),
-                        other => {
-                            return Err(CompileError::ParseError(format!(
-                                "expected parameter name, got {:?}", other
-                            )));
-                        }
+                    let param_base = self.parse_type_specifier()?;
+                    let (mut param_type, param_name) = self.parse_declarator(param_base)?;
+                    if let Type::Array(elem, _) = param_type {
+                        param_type = Type::Pointer(elem);
                     }
+                    params.push((param_type, param_name));
                 }
                 params
             };
@@ -358,7 +478,7 @@ impl<'a> Parser<'a> {
     fn parse_block_item(&mut self) -> Result<BlockItem> {
         match &self.peek()?.kind {
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
-            | TokenKind::KwDouble
+            | TokenKind::KwDouble | TokenKind::KwChar
             | TokenKind::KwStatic | TokenKind::KwExtern => {
                 Ok(BlockItem::Declaration(self.parse_declaration()?))
             }
@@ -368,20 +488,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `<declaration> ::= <storage_class>? <type_specifier> <identifier> ("=" <assignment>)? ";"`
+    /// `<declaration> ::= <storage_class>? <type_specifier> <declarator> ("=" <assignment>)? ";"`
     fn parse_declaration(&mut self) -> Result<Declaration> {
         let storage_class = self.parse_storage_class()?;
-        let var_type = self.parse_type_specifier()?;
-
-        let name_token = self.advance()?;
-        let name = match &name_token.kind {
-            TokenKind::Identifier(name) => name.clone(),
-            other => {
-                return Err(CompileError::ParseError(format!(
-                    "expected variable name, got {:?}", other
-                )));
-            }
-        };
+        let base_type = self.parse_type_specifier()?;
+        let (var_type, name) = self.parse_declarator(base_type)?;
 
         let init = if self.peek()?.kind == TokenKind::Assign {
             self.advance()?; // consume '='
@@ -467,7 +578,7 @@ impl<'a> Parser<'a> {
                 // for-init: 宣言 or 式文 or 空文
                 let init = match &self.peek()?.kind {
                     TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
-                    | TokenKind::KwDouble
+                    | TokenKind::KwDouble | TokenKind::KwChar
                     | TokenKind::KwStatic | TokenKind::KwExtern => {
                         ForInit::Declaration(self.parse_declaration()?)
                     }
@@ -538,42 +649,41 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// 代入式のパース（Chapter 5-7 で拡張）。
+    /// 代入式のパース（Chapter 5-7, 14 で拡張）。
     ///
     /// ```text
-    /// <assignment> ::= <identifier> <assign_op> <assignment> | <conditional>
+    /// <assignment> ::= <lvalue_expr> <assign_op> <assignment> | <conditional>
     /// <assign_op>  ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="
     /// ```
     ///
-    /// 代入は右結合。先読みで `<identifier> <assign_op>` パターンを検出する。
+    /// Chapter 14: 左辺値が `*ptr` などの任意式に一般化された。
+    /// 左辺を `parse_conditional()` でパースした後、代入演算子が続けば代入式とする。
+    /// 左辺値の検証は型チェッカーに委譲する。
     fn parse_assignment(&mut self) -> Result<Expr> {
-        if let TokenKind::Identifier(_) = &self.peek()?.kind {
-            if self.pos + 1 < self.tokens.len() {
-                let next = &self.tokens[self.pos + 1].kind;
-                if matches!(next,
-                    TokenKind::Assign | TokenKind::PlusAssign | TokenKind::MinusAssign
-                    | TokenKind::StarAssign | TokenKind::SlashAssign | TokenKind::PercentAssign
-                ) {
-                    let name_token = self.advance()?;
-                    let name = match &name_token.kind {
-                        TokenKind::Identifier(name) => name.clone(),
-                        _ => unreachable!(),
-                    };
-                    let op_token = self.advance()?;
-                    let rhs = self.parse_assignment()?; // 右結合
-                    return match &op_token.kind {
-                        TokenKind::Assign => Ok(Expr::Assign(name, Box::new(rhs))),
-                        TokenKind::PlusAssign => Ok(Expr::CompoundAssign(BinaryOp::Add, name, Box::new(rhs))),
-                        TokenKind::MinusAssign => Ok(Expr::CompoundAssign(BinaryOp::Subtract, name, Box::new(rhs))),
-                        TokenKind::StarAssign => Ok(Expr::CompoundAssign(BinaryOp::Multiply, name, Box::new(rhs))),
-                        TokenKind::SlashAssign => Ok(Expr::CompoundAssign(BinaryOp::Divide, name, Box::new(rhs))),
-                        TokenKind::PercentAssign => Ok(Expr::CompoundAssign(BinaryOp::Remainder, name, Box::new(rhs))),
-                        _ => unreachable!(),
-                    };
-                }
+        let lhs = self.parse_conditional()?;
+
+        if self.pos < self.tokens.len() {
+            let op = match &self.peek()?.kind {
+                TokenKind::Assign => Some(None), // 単純代入
+                TokenKind::PlusAssign => Some(Some(BinaryOp::Add)),
+                TokenKind::MinusAssign => Some(Some(BinaryOp::Subtract)),
+                TokenKind::StarAssign => Some(Some(BinaryOp::Multiply)),
+                TokenKind::SlashAssign => Some(Some(BinaryOp::Divide)),
+                TokenKind::PercentAssign => Some(Some(BinaryOp::Remainder)),
+                _ => None,
+            };
+
+            if let Some(compound_op) = op {
+                self.advance()?; // consume assignment operator
+                let rhs = self.parse_assignment()?; // 右結合
+                return match compound_op {
+                    None => Ok(Expr::Assign(Box::new(lhs), Box::new(rhs))),
+                    Some(bin_op) => Ok(Expr::CompoundAssign(bin_op, Box::new(lhs), Box::new(rhs))),
+                };
             }
         }
-        self.parse_conditional()
+
+        Ok(lhs)
     }
 
     /// 三項演算子のパース（Chapter 6 で追加）。
@@ -721,10 +831,10 @@ impl<'a> Parser<'a> {
     /// 乗除剰余の左結合パース。
     ///
     /// ```text
-    /// <multiplicative> ::= <unary> ( ("*" | "/" | "%") <unary> )*
+    /// <multiplicative> ::= <cast> ( ("*" | "/" | "%") <cast> )*
     /// ```
     fn parse_multiplicative(&mut self) -> Result<Expr> {
-        let mut left = self.parse_unary()?;
+        let mut left = self.parse_cast()?;
         loop {
             if self.pos >= self.tokens.len() {
                 break;
@@ -736,21 +846,81 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance()?; // 演算子を消費
-            let right = self.parse_unary()?;
+            let right = self.parse_cast()?;
             left = Expr::Binary(op, Box::new(left), Box::new(right));
         }
         Ok(left)
+    }
+
+    /// キャスト式のパース（Chapter 14）。
+    ///
+    /// ```text
+    /// <cast> ::= "(" <type> <abstract_declarator> ")" <cast> | <unary>
+    /// ```
+    ///
+    /// `(` の次が型キーワードならキャスト式、そうでなければ `parse_unary()` に委譲。
+    fn parse_cast(&mut self) -> Result<Expr> {
+        // `(` の次が型キーワードならキャスト式
+        if self.pos < self.tokens.len()
+            && self.peek()?.kind == TokenKind::OpenParen
+            && self.pos + 1 < self.tokens.len()
+        {
+            // 先読み: `(` の次のトークンが型キーワードか
+            let next = &self.tokens[self.pos + 1].kind;
+            if matches!(
+                next,
+                TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
+                | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
+            ) {
+                self.advance()?; // consume '('
+                let base_type = self.parse_type_specifier()?;
+                let target_type = self.parse_abstract_declarator(base_type)?;
+                self.expect(&TokenKind::CloseParen)?;
+                let inner = self.parse_cast()?; // 右結合
+                return Ok(Expr::Cast {
+                    target_type,
+                    source_type: Type::Int, // プレースホルダー。型チェッカーが設定する。
+                    expr: Box::new(inner),
+                });
+            }
+        }
+        self.parse_unary()
     }
 
     /// 単項演算のパース（右結合）。
     ///
     /// ```text
     /// <unary> ::= <unary_op> <unary> | <postfix>
-    /// <unary_op> ::= "-" | "~" | "!" | "++" | "--"
+    /// <unary_op> ::= "-" | "~" | "!" | "++" | "--" | "*" | "&"
     /// ```
     fn parse_unary(&mut self) -> Result<Expr> {
         let token = self.peek()?;
         match &token.kind {
+            // Chapter 15: sizeof
+            TokenKind::KwSizeof => {
+                self.advance()?; // consume 'sizeof'
+                // sizeof(type) or sizeof expr
+                if self.pos < self.tokens.len()
+                    && self.peek()?.kind == TokenKind::OpenParen
+                    && self.pos + 1 < self.tokens.len()
+                {
+                    let next = &self.tokens[self.pos + 1].kind;
+                    if matches!(
+                        next,
+                        TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
+                        | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
+                    ) {
+                        self.advance()?; // consume '('
+                        let base_type = self.parse_type_specifier()?;
+                        let ty = self.parse_abstract_declarator(base_type)?;
+                        self.expect(&TokenKind::CloseParen)?;
+                        return Ok(Expr::SizeOfType(ty));
+                    }
+                }
+                // sizeof expr (unary precedence)
+                let inner = self.parse_unary()?;
+                return Ok(Expr::SizeOfExpr(Box::new(inner)));
+            }
             TokenKind::Minus | TokenKind::Tilde | TokenKind::Bang => {
                 let op_token = self.advance()?;
                 let op = match &op_token.kind {
@@ -772,6 +942,18 @@ impl<'a> Parser<'a> {
                 let inner = self.parse_unary()?;
                 Ok(Expr::Unary(op, Box::new(inner)))
             }
+            // Chapter 14: `*expr` — 間接参照（dereference）
+            TokenKind::Star => {
+                self.advance()?;
+                let inner = self.parse_cast()?;
+                Ok(Expr::Dereref(Box::new(inner)))
+            }
+            // Chapter 14: `&expr` — アドレス取得
+            TokenKind::Ampersand => {
+                self.advance()?;
+                let inner = self.parse_cast()?;
+                Ok(Expr::AddrOf(Box::new(inner)))
+            }
             _ => self.parse_postfix(),
         }
     }
@@ -787,23 +969,22 @@ impl<'a> Parser<'a> {
             match &self.peek()?.kind {
                 TokenKind::PlusPlus => {
                     self.advance()?;
-                    if let Expr::Var(name) = expr {
-                        expr = Expr::PostfixIncrement(name);
-                    } else {
-                        return Err(CompileError::ParseError(
-                            "lvalue required for postfix '++'".to_string()
-                        ));
-                    }
+                    expr = Expr::PostfixIncrement(Box::new(expr));
                 }
                 TokenKind::MinusMinus => {
                     self.advance()?;
-                    if let Expr::Var(name) = expr {
-                        expr = Expr::PostfixDecrement(name);
-                    } else {
-                        return Err(CompileError::ParseError(
-                            "lvalue required for postfix '--'".to_string()
-                        ));
-                    }
+                    expr = Expr::PostfixDecrement(Box::new(expr));
+                }
+                // Chapter 15: 配列添字 `arr[i]` → `*(arr + i)` に脱糖
+                TokenKind::OpenBracket => {
+                    self.advance()?; // consume '['
+                    let index = self.parse_expr()?;
+                    self.expect(&TokenKind::CloseBracket)?;
+                    expr = Expr::Dereref(Box::new(Expr::Binary(
+                        BinaryOp::Add,
+                        Box::new(expr),
+                        Box::new(index),
+                    )));
                 }
                 _ => break,
             }
@@ -855,6 +1036,23 @@ impl<'a> Parser<'a> {
                 let token = self.advance()?;
                 if let TokenKind::DoubleLiteral(value) = &token.kind {
                     Ok(Expr::ConstantDouble(*value))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::CharLiteral(_) => {
+                let token = self.advance()?;
+                if let TokenKind::CharLiteral(value) = &token.kind {
+                    // C仕様: 文字定数は int 型
+                    Ok(Expr::Constant(*value as i64))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::StringLiteral(_) => {
+                let token = self.advance()?;
+                if let TokenKind::StringLiteral(content) = &token.kind {
+                    Ok(Expr::StringLiteral(content.clone()))
                 } else {
                     unreachable!()
                 }
@@ -1346,7 +1544,7 @@ mod tests {
                     storage_class: None,
                 }),
                 BlockItem::Statement(Statement::Expression(
-                    Expr::Assign("a".to_string(), Box::new(Expr::Constant(10)))
+                    Expr::Assign(Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(10)))
                 )),
                 BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
             ]
@@ -1502,7 +1700,7 @@ mod tests {
         assert_eq!(
             func.body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Expression(
-                Expr::CompoundAssign(BinaryOp::Add, "a".to_string(), Box::new(Expr::Constant(3)))
+                Expr::CompoundAssign(BinaryOp::Add, Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(3)))
             ))
         );
     }
@@ -1530,7 +1728,7 @@ mod tests {
         assert_eq!(
             func.body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Return(
-                Expr::PostfixIncrement("a".to_string())
+                Expr::PostfixIncrement(Box::new(Expr::Var("a".to_string())))
             ))
         );
     }
@@ -1544,7 +1742,7 @@ mod tests {
         assert_eq!(
             func.body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::Return(
-                Expr::PostfixDecrement("a".to_string())
+                Expr::PostfixDecrement(Box::new(Expr::Var("a".to_string())))
             ))
         );
     }
@@ -1603,8 +1801,8 @@ mod tests {
             func.body.as_ref().unwrap()[2],
             BlockItem::Statement(Statement::Expression(
                 Expr::Assign(
-                    "a".to_string(),
-                    Box::new(Expr::Assign("b".to_string(), Box::new(Expr::Constant(5))))
+                    Box::new(Expr::Var("a".to_string())),
+                    Box::new(Expr::Assign(Box::new(Expr::Var("b".to_string())), Box::new(Expr::Constant(5))))
                 )
             ))
         );
@@ -1638,7 +1836,7 @@ mod tests {
             BlockItem::Statement(Statement::DoWhile {
                 body: Box::new(Statement::Compound(vec![
                     BlockItem::Statement(Statement::Expression(
-                        Expr::Assign("a".to_string(), Box::new(Expr::Constant(1)))
+                        Expr::Assign(Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(1)))
                     )),
                 ])),
                 condition: Expr::Constant(0),
@@ -1873,5 +2071,151 @@ mod tests {
                 storage_class: Some(StorageClass::Extern),
             })
         );
+    }
+
+    // ── Chapter 14 テスト ──
+
+    /// ポインタ変数宣言: `int *ptr;`
+    #[test]
+    fn parse_pointer_declaration() {
+        let tokens = lex::lex("int main(void) { int *ptr; return 0; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(
+            func.body.as_ref().unwrap()[0],
+            BlockItem::Declaration(Declaration {
+                name: "ptr".to_string(),
+                var_type: Type::Pointer(Box::new(Type::Int)),
+                init: None,
+                storage_class: None,
+            })
+        );
+    }
+
+    /// 多重ポインタ宣言: `int **pp;`
+    #[test]
+    fn parse_double_pointer_declaration() {
+        let tokens = lex::lex("int main(void) { int **pp; return 0; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(
+            func.body.as_ref().unwrap()[0],
+            BlockItem::Declaration(Declaration {
+                name: "pp".to_string(),
+                var_type: Type::Pointer(Box::new(Type::Pointer(Box::new(Type::Int)))),
+                init: None,
+                storage_class: None,
+            })
+        );
+    }
+
+    /// アドレス取得: `&x`
+    #[test]
+    fn parse_address_of() {
+        let tokens = lex::lex("int main(void) { int x; int *p = &x; return 0; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(
+            func.body.as_ref().unwrap()[1],
+            BlockItem::Declaration(Declaration {
+                name: "p".to_string(),
+                var_type: Type::Pointer(Box::new(Type::Int)),
+                init: Some(Expr::AddrOf(Box::new(Expr::Var("x".to_string())))),
+                storage_class: None,
+            })
+        );
+    }
+
+    /// 間接参照: `*p`
+    #[test]
+    fn parse_dereference() {
+        let tokens = lex::lex("int main(void) { int x = 5; int *p = &x; return *p; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(
+            func.body.as_ref().unwrap()[2],
+            BlockItem::Statement(Statement::Return(
+                Expr::Dereref(Box::new(Expr::Var("p".to_string())))
+            ))
+        );
+    }
+
+    /// ポインタ経由の書き込み: `*p = 42;`
+    #[test]
+    fn parse_dereference_assign() {
+        let tokens = lex::lex("int main(void) { int x; int *p = &x; *p = 42; return 0; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(
+            func.body.as_ref().unwrap()[2],
+            BlockItem::Statement(Statement::Expression(
+                Expr::Assign(
+                    Box::new(Expr::Dereref(Box::new(Expr::Var("p".to_string())))),
+                    Box::new(Expr::Constant(42))
+                )
+            ))
+        );
+    }
+
+    /// キャスト式: `(int *)0`
+    #[test]
+    fn parse_cast_to_pointer() {
+        let tokens = lex::lex("int main(void) { int *p = (int *)0; return 0; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        if let BlockItem::Declaration(decl) = &func.body.as_ref().unwrap()[0] {
+            assert_eq!(decl.name, "p");
+            assert_eq!(decl.var_type, Type::Pointer(Box::new(Type::Int)));
+            match &decl.init {
+                Some(Expr::Cast { target_type, expr, .. }) => {
+                    assert_eq!(*target_type, Type::Pointer(Box::new(Type::Int)));
+                    assert_eq!(**expr, Expr::Constant(0));
+                }
+                other => panic!("expected Cast, got {:?}", other),
+            }
+        } else {
+            panic!("expected declaration");
+        }
+    }
+
+    /// ポインタ型パラメータ: `int *p`
+    #[test]
+    fn parse_pointer_parameter() {
+        let tokens = lex::lex("int deref(int *p) { return *p; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(func.name, "deref");
+        assert_eq!(func.params, vec![(Type::Pointer(Box::new(Type::Int)), "p".to_string())]);
+        assert_eq!(
+            func.body.as_ref().unwrap()[0],
+            BlockItem::Statement(Statement::Return(
+                Expr::Dereref(Box::new(Expr::Var("p".to_string())))
+            ))
+        );
+    }
+
+    /// ポインタ戻り値型: `int *return_ptr(int *p)`
+    #[test]
+    fn parse_pointer_return_type() {
+        let tokens = lex::lex("int *identity(int *p) { return p; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        assert_eq!(func.name, "identity");
+        assert_eq!(func.return_type, Type::Pointer(Box::new(Type::Int)));
+        assert_eq!(func.params, vec![(Type::Pointer(Box::new(Type::Int)), "p".to_string())]);
+    }
+
+    /// グローバルポインタ変数: `int *g;`
+    #[test]
+    fn parse_global_pointer_variable() {
+        let tokens = lex::lex("int *g; int main(void) { return 0; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        match &program.declarations[0] {
+            TopLevelDecl::Variable(decl) => {
+                assert_eq!(decl.name, "g");
+                assert_eq!(decl.var_type, Type::Pointer(Box::new(Type::Int)));
+            }
+            _ => panic!("expected variable declaration"),
+        }
     }
 }

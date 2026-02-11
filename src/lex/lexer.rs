@@ -9,7 +9,7 @@
 //! 2b. 先読みが必要な記号 → 次の文字を見て判定
 //!    - `!` → `!=` or `!`
 //!    - `<` → `<=` or `<`  /  `>` → `>=` or `>`
-//!    - `=` → `==` or `=`  /  `&` → `&&`  /  `|` → `||`
+//!    - `=` → `==` or `=`  /  `&` → `&&` or `&`  /  `|` → `||`
 //!    - `+` → `++`, `+=`, or `+`  /  `-` → `--`, `-=`, or `-`  (Chapter 7)
 //!    - `*` → `*=` or `*`  /  `/` → `/=` or `/`  /  `%` → `%=` or `%`  (Chapter 7)
 //! 3. 数字で始まる → 連続する数字を読み取り、サフィックスに応じて変換
@@ -75,6 +75,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             b':' => Some(TokenKind::Colon),
             // Chapter 7: カンマ演算子
             b',' => Some(TokenKind::Comma),
+            // Chapter 15: 配列添字
+            b'[' => Some(TokenKind::OpenBracket),
+            b']' => Some(TokenKind::CloseBracket),
             _ => None,
         };
 
@@ -123,10 +126,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 if pos + 1 < bytes.len() && bytes[pos + 1] == b'&' {
                     Some((TokenKind::AndAnd, 2))
                 } else {
-                    return Err(CompileError::LexError(format!(
-                        "unexpected character '&' at line {line}, column {column} \
-                         (bitwise AND is not supported)"
-                    )));
+                    Some((TokenKind::Ampersand, 1))
                 }
             }
             b'|' => {
@@ -324,6 +324,145 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             continue;
         }
 
+        // ── 文字リテラル ──（Chapter 16）
+        // `'` で始まり、1文字（またはエスケープシーケンス）を読み取り、`'` で閉じる。
+        if b == b'\'' {
+            let start = pos;
+            let start_col = column;
+            pos += 1; // consume opening '\''
+            column += 1;
+
+            if pos >= bytes.len() {
+                return Err(CompileError::LexError(format!(
+                    "unterminated character literal at line {line}, column {start_col}"
+                )));
+            }
+
+            let value: i8 = if bytes[pos] == b'\\' {
+                // エスケープシーケンス
+                pos += 1;
+                column += 1;
+                if pos >= bytes.len() {
+                    return Err(CompileError::LexError(format!(
+                        "unterminated escape sequence in character literal at line {line}, column {start_col}"
+                    )));
+                }
+                let esc = bytes[pos];
+                pos += 1;
+                column += 1;
+                match esc {
+                    b'n'  => 10,
+                    b't'  => 9,
+                    b'r'  => 13,
+                    b'\\' => 92,
+                    b'\'' => 39,
+                    b'"'  => 34,
+                    b'0'  => 0,
+                    b'a'  => 7,
+                    b'b'  => 8,
+                    b'f'  => 12,
+                    b'v'  => 11,
+                    b'?'  => 63,
+                    _ => {
+                        return Err(CompileError::LexError(format!(
+                            "unknown escape sequence '\\{}' at line {line}, column {start_col}",
+                            esc as char
+                        )));
+                    }
+                }
+            } else {
+                let ch = bytes[pos] as i8;
+                pos += 1;
+                column += 1;
+                ch
+            };
+
+            if pos >= bytes.len() || bytes[pos] != b'\'' {
+                return Err(CompileError::LexError(format!(
+                    "unterminated character literal at line {line}, column {start_col}"
+                )));
+            }
+            pos += 1; // consume closing '\''
+            column += 1;
+
+            tokens.push(Token {
+                kind: TokenKind::CharLiteral(value),
+                span: Span { offset: start, len: pos - start, line, column: start_col },
+            });
+            continue;
+        }
+
+        // ── 文字列リテラル ──（Chapter 16）
+        // `"` で始まり、エスケープシーケンスを処理しながら `"` で閉じる。
+        if b == b'"' {
+            let start = pos;
+            let start_col = column;
+            pos += 1; // consume opening '"'
+            column += 1;
+
+            let mut content = String::new();
+            loop {
+                if pos >= bytes.len() {
+                    return Err(CompileError::LexError(format!(
+                        "unterminated string literal at line {line}, column {start_col}"
+                    )));
+                }
+                if bytes[pos] == b'"' {
+                    pos += 1; // consume closing '"'
+                    column += 1;
+                    break;
+                }
+                if bytes[pos] == b'\\' {
+                    pos += 1;
+                    column += 1;
+                    if pos >= bytes.len() {
+                        return Err(CompileError::LexError(format!(
+                            "unterminated escape sequence in string literal at line {line}, column {start_col}"
+                        )));
+                    }
+                    let esc = bytes[pos];
+                    pos += 1;
+                    column += 1;
+                    let ch = match esc {
+                        b'n'  => '\n',
+                        b't'  => '\t',
+                        b'r'  => '\r',
+                        b'\\' => '\\',
+                        b'\'' => '\'',
+                        b'"'  => '"',
+                        b'0'  => '\0',
+                        b'a'  => '\x07',
+                        b'b'  => '\x08',
+                        b'f'  => '\x0C',
+                        b'v'  => '\x0B',
+                        b'?'  => '?',
+                        _ => {
+                            return Err(CompileError::LexError(format!(
+                                "unknown escape sequence '\\{}' in string literal at line {line}, column {start_col}",
+                                esc as char
+                            )));
+                        }
+                    };
+                    content.push(ch);
+                } else {
+                    if bytes[pos] == b'\n' {
+                        line += 1;
+                        column = 1;
+                    } else {
+                        column += 1;
+                    }
+                    content.push(bytes[pos] as char);
+                    pos += 1;
+                }
+            }
+
+            tokens.push(Token {
+                kind: TokenKind::StringLiteral(content),
+                span: Span { offset: start, len: pos - start, line, column: start_col },
+            });
+            continue;
+        }
+
         // ── 識別子・キーワード ──
         // 英字または `_` で始まり、英数字・`_` が続く限り読み取る。
         // 読み取った文字列がキーワードに一致すれば対応する TokenKind、
@@ -353,6 +492,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "unsigned" => TokenKind::KwUnsigned,
                 "signed"   => TokenKind::KwSigned,
                 "double"   => TokenKind::KwDouble,
+                "sizeof"   => TokenKind::KwSizeof,
+                "char"     => TokenKind::KwChar,
                 _        => TokenKind::Identifier(text.to_string()),
             };
             tokens.push(Token {
@@ -543,11 +684,12 @@ mod tests {
         );
     }
 
-    /// `&` 単体はエラー
+    /// `&` 単体はアドレス演算子（Chapter 14）
     #[test]
-    fn lex_single_ampersand_error() {
-        let result = lex("1 & 2");
-        assert!(result.is_err());
+    fn lex_single_ampersand() {
+        let tokens = lex("&x").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(kinds, vec![&TokenKind::Ampersand, &TokenKind::Identifier("x".to_string())]);
     }
 
     /// `|` 単体はエラー
