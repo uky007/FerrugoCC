@@ -31,6 +31,16 @@
 //! # Chapter 15: 配列とポインタ算術
 //! - `ZeroInit(n)` → `.bss` セクションに `.zero n` で配列をゼロ初期化配置
 //!
+//! # Chapter 18: 構造体
+//! - `MemoryOffset(Reg, i32)` オペランド: `N(%rax)` 等（レジスタ+オフセット間接アドレッシング）
+//!   構造体メンバアクセスで使用する。
+//!
+//! # Chapter 20: レジスタ割り当て対応
+//! - プロローグ/エピローグは emitter ではなく fixup パスが `Push`/`Pop`/`AllocateStack`/
+//!   `DeallocateStack` 命令として生成する。emitter はこれらを個々の命令として出力するだけ。
+//! - 新レジスタ（BX, R10-R15, SP, BP, XMM8-XMM13）のフォーマットを追加。
+//! - `Operand::Pseudo` が emit まで残った場合はバグとして `panic!` する。
+//!
 //! # .note.GNU-stack セクション
 //! 出力末尾に `.section .note.GNU-stack,"",@progbits` を付加する。
 //! これはスタックが実行不可であることをリンカに伝えるセキュリティ上の慣習。
@@ -76,11 +86,8 @@ fn emit_function(out: &mut String, func: &crate::codegen::asm_ast::AsmFunction) 
     writeln!(out, "{}:", func.name)
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
 
-    // Chapter 5: プロローグ（スタックフレームの設定）
-    writeln!(out, "    pushq %rbp")
-        .map_err(|e| CompileError::EmitError(e.to_string()))?;
-    writeln!(out, "    movq %rsp, %rbp")
-        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    // Chapter 20: プロローグ/エピローグは fixup パスが Push/Mov/AllocateStack/
+    // DeallocateStack/Pop/Ret 命令として生成するため、ここでは出力しない。
 
     for instr in &func.instructions {
         emit_instruction(out, instr)?;
@@ -394,12 +401,8 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
             writeln!(out, "    leaq {}, {}", format_operand_quad(src), format_operand_quad(dst))
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
-        // Chapter 5: ret はエピローグを含む
+        // Chapter 20: ret のみ出力。エピローグは fixup パスが Ret の前に挿入する。
         Instruction::Ret => {
-            writeln!(out, "    movq %rbp, %rsp")
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
-            writeln!(out, "    popq %rbp")
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
             writeln!(out, "    ret")
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
@@ -432,9 +435,11 @@ fn format_operand(operand: &Operand) -> String {
     match operand {
         Operand::Imm(value) => format!("${value}"),
         Operand::Register(reg) => format_register(reg).to_string(),
+        Operand::Pseudo(name) => panic!("BUG: Pseudo '{}' survived to emission", name),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
         Operand::Data(name) => format!("{name}(%rip)"),
         Operand::Memory(reg) => format!("({})", format_register_quad(reg)),
+        Operand::MemoryOffset(reg, offset) => format!("{offset}({})", format_register_quad(reg)),
     }
 }
 
@@ -446,9 +451,11 @@ fn format_operand_byte(operand: &Operand) -> String {
     match operand {
         Operand::Imm(value) => format!("${value}"),
         Operand::Register(reg) => format_register_byte(reg).to_string(),
+        Operand::Pseudo(name) => panic!("BUG: Pseudo '{}' survived to emission", name),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
         Operand::Data(name) => format!("{name}(%rip)"),
         Operand::Memory(reg) => format!("({})", format_register_quad(reg)),
+        Operand::MemoryOffset(reg, offset) => format!("{offset}({})", format_register_quad(reg)),
     }
 }
 
@@ -459,9 +466,11 @@ fn format_operand_quad(operand: &Operand) -> String {
     match operand {
         Operand::Imm(value) => format!("${value}"),
         Operand::Register(reg) => format_register_quad(reg).to_string(),
+        Operand::Pseudo(name) => panic!("BUG: Pseudo '{}' survived to emission", name),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
         Operand::Data(name) => format!("{name}(%rip)"),
         Operand::Memory(reg) => format!("({})", format_register_quad(reg)),
+        Operand::MemoryOffset(reg, offset) => format!("{offset}({})", format_register_quad(reg)),
     }
 }
 
@@ -470,9 +479,11 @@ fn format_operand_xmm(operand: &Operand) -> String {
     match operand {
         Operand::Imm(value) => format!("${value}"),
         Operand::Register(reg) => format_register_xmm(reg).to_string(),
+        Operand::Pseudo(name) => panic!("BUG: Pseudo '{}' survived to emission", name),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
         Operand::Data(name) => format!("{name}(%rip)"),
         Operand::Memory(reg) => format!("({})", format_register_quad(reg)),
+        Operand::MemoryOffset(reg, offset) => format!("{offset}({})", format_register_quad(reg)),
     }
 }
 
@@ -487,16 +498,16 @@ fn format_register_xmm(reg: &Reg) -> &'static str {
         Reg::XMM5 => "%xmm5",
         Reg::XMM6 => "%xmm6",
         Reg::XMM7 => "%xmm7",
+        Reg::XMM8 => "%xmm8",
+        Reg::XMM9 => "%xmm9",
+        Reg::XMM10 => "%xmm10",
+        Reg::XMM11 => "%xmm11",
+        Reg::XMM12 => "%xmm12",
+        Reg::XMM13 => "%xmm13",
         Reg::XMM14 => "%xmm14",
         Reg::XMM15 => "%xmm15",
         // GPR は64ビット名（cvtsi2sd/cvttsd2si で使う場合）
-        Reg::AX => "%rax",
-        Reg::CX => "%rcx",
-        Reg::DX => "%rdx",
-        Reg::DI => "%rdi",
-        Reg::SI => "%rsi",
-        Reg::R8 => "%r8",
-        Reg::R9 => "%r9",
+        _ => format_register_quad(reg),
     }
 }
 
@@ -504,14 +515,25 @@ fn format_register_xmm(reg: &Reg) -> &'static str {
 fn format_register_quad(reg: &Reg) -> &'static str {
     match reg {
         Reg::AX => "%rax",
+        Reg::BX => "%rbx",
         Reg::CX => "%rcx",
         Reg::DX => "%rdx",
         Reg::DI => "%rdi",
         Reg::SI => "%rsi",
         Reg::R8 => "%r8",
         Reg::R9 => "%r9",
+        Reg::R10 => "%r10",
+        Reg::R11 => "%r11",
+        Reg::R12 => "%r12",
+        Reg::R13 => "%r13",
+        Reg::R14 => "%r14",
+        Reg::R15 => "%r15",
+        Reg::SP => "%rsp",
+        Reg::BP => "%rbp",
         Reg::XMM0 | Reg::XMM1 | Reg::XMM2 | Reg::XMM3
         | Reg::XMM4 | Reg::XMM5 | Reg::XMM6 | Reg::XMM7
+        | Reg::XMM8 | Reg::XMM9 | Reg::XMM10 | Reg::XMM11
+        | Reg::XMM12 | Reg::XMM13
         | Reg::XMM14 | Reg::XMM15 => format_register_xmm(reg),
     }
 }
@@ -520,14 +542,25 @@ fn format_register_quad(reg: &Reg) -> &'static str {
 fn format_register(reg: &Reg) -> &'static str {
     match reg {
         Reg::AX => "%eax",
+        Reg::BX => "%ebx",
         Reg::CX => "%ecx",
         Reg::DX => "%edx",
         Reg::DI => "%edi",
         Reg::SI => "%esi",
         Reg::R8 => "%r8d",
         Reg::R9 => "%r9d",
+        Reg::R10 => "%r10d",
+        Reg::R11 => "%r11d",
+        Reg::R12 => "%r12d",
+        Reg::R13 => "%r13d",
+        Reg::R14 => "%r14d",
+        Reg::R15 => "%r15d",
+        Reg::SP => "%esp",
+        Reg::BP => "%ebp",
         Reg::XMM0 | Reg::XMM1 | Reg::XMM2 | Reg::XMM3
         | Reg::XMM4 | Reg::XMM5 | Reg::XMM6 | Reg::XMM7
+        | Reg::XMM8 | Reg::XMM9 | Reg::XMM10 | Reg::XMM11
+        | Reg::XMM12 | Reg::XMM13
         | Reg::XMM14 | Reg::XMM15 => format_register_xmm(reg),
     }
 }
@@ -536,14 +569,25 @@ fn format_register(reg: &Reg) -> &'static str {
 fn format_register_byte(reg: &Reg) -> &'static str {
     match reg {
         Reg::AX => "%al",
+        Reg::BX => "%bl",
         Reg::CX => "%cl",
         Reg::DX => "%dl",
         Reg::DI => "%dil",
         Reg::SI => "%sil",
         Reg::R8 => "%r8b",
         Reg::R9 => "%r9b",
+        Reg::R10 => "%r10b",
+        Reg::R11 => "%r11b",
+        Reg::R12 => "%r12b",
+        Reg::R13 => "%r13b",
+        Reg::R14 => "%r14b",
+        Reg::R15 => "%r15b",
+        Reg::SP => "%spl",
+        Reg::BP => "%bpl",
         Reg::XMM0 | Reg::XMM1 | Reg::XMM2 | Reg::XMM3
         | Reg::XMM4 | Reg::XMM5 | Reg::XMM6 | Reg::XMM7
+        | Reg::XMM8 | Reg::XMM9 | Reg::XMM10 | Reg::XMM11
+        | Reg::XMM12 | Reg::XMM13
         | Reg::XMM14 | Reg::XMM15 => format_register_xmm(reg),
     }
 }
@@ -552,6 +596,8 @@ fn format_register_byte(reg: &Reg) -> &'static str {
 fn is_xmm_register(reg: &Reg) -> bool {
     matches!(reg, Reg::XMM0 | Reg::XMM1 | Reg::XMM2 | Reg::XMM3
         | Reg::XMM4 | Reg::XMM5 | Reg::XMM6 | Reg::XMM7
+        | Reg::XMM8 | Reg::XMM9 | Reg::XMM10 | Reg::XMM11
+        | Reg::XMM12 | Reg::XMM13
         | Reg::XMM14 | Reg::XMM15)
 }
 
@@ -615,19 +661,26 @@ mod tests {
     // ── ヘルパー: Longword (32ビット int) のショートカット ──
     const LW: AsmType = AsmType::Longword;
 
-    /// Chapter 1: return 2 の出力確認（プロローグ/エピローグ付き）
+    /// Chapter 1/20: return 2 の出力確認（プロローグ/エピローグは fixup が生成するため emitter は出力しない）
     #[test]
     fn emit_return_constant() {
         let program = test_program(vec![
+            Instruction::Push(Operand::Register(Reg::BP)),
+            Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::SP),
+                dst: Operand::Register(Reg::BP),
+            },
             Instruction::Mov {
                 asm_type: LW,
                 src: Operand::Imm(2),
                 dst: Operand::Register(Reg::AX),
             },
+            Instruction::Pop(Operand::Register(Reg::BP)),
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
-        let expected = "    .globl main\nmain:\n    pushq %rbp\n    movq %rsp, %rbp\n    movl $2, %eax\n    movq %rbp, %rsp\n    popq %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
+        let expected = "    .globl main\nmain:\n    push %rbp\n    movq %rsp, %rbp\n    movl $2, %eax\n    pop %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
         assert_eq!(asm, expected);
     }
 
@@ -833,40 +886,48 @@ mod tests {
 
     // ── Chapter 5 テスト ──
 
-    /// Chapter 5: AllocateStack と Stack オペランドの出力
+    /// Chapter 5/20: AllocateStack と Stack オペランドの出力
+    /// プロローグ/エピローグは fixup パスが命令として挿入する。
     #[test]
     fn emit_allocate_stack_and_stack_operand() {
         let program = test_program(vec![
-            Instruction::AllocateStack(4),
+            Instruction::Push(Operand::Register(Reg::BP)),
+            Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::SP), dst: Operand::Register(Reg::BP) },
+            Instruction::AllocateStack(16),
             Instruction::Mov { asm_type: LW, src: Operand::Imm(5), dst: Operand::Register(Reg::AX) },
             Instruction::Mov { asm_type: LW, src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
             Instruction::Mov { asm_type: LW, src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
+            Instruction::DeallocateStack(16),
+            Instruction::Pop(Operand::Register(Reg::BP)),
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
-        assert!(asm.contains("subq $4, %rsp"));
+        assert!(asm.contains("subq $16, %rsp"));
         assert!(asm.contains("movl %eax, -4(%rbp)"));
         assert!(asm.contains("movl -4(%rbp), %eax"));
-        // プロローグ
-        assert!(asm.contains("pushq %rbp"));
+        assert!(asm.contains("push %rbp"));
         assert!(asm.contains("movq %rsp, %rbp"));
-        // エピローグ (ret 命令に含まれる)
-        assert!(asm.contains("movq %rbp, %rsp"));
-        assert!(asm.contains("popq %rbp"));
+        assert!(asm.contains("addq $16, %rsp"));
+        assert!(asm.contains("pop %rbp"));
     }
 
-    /// Chapter 5: int a = 5; return a; の完全な出力
+    /// Chapter 5/20: int a = 5; return a; の完全な出力
+    /// fixup パスが生成するプロローグ/エピローグも命令として含める。
     #[test]
     fn emit_var_declaration_full() {
         let program = test_program(vec![
-            Instruction::AllocateStack(4),
+            Instruction::Push(Operand::Register(Reg::BP)),
+            Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::SP), dst: Operand::Register(Reg::BP) },
+            Instruction::AllocateStack(16),
             Instruction::Mov { asm_type: LW, src: Operand::Imm(5), dst: Operand::Register(Reg::AX) },
             Instruction::Mov { asm_type: LW, src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
             Instruction::Mov { asm_type: LW, src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
+            Instruction::DeallocateStack(16),
+            Instruction::Pop(Operand::Register(Reg::BP)),
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
-        let expected = "    .globl main\nmain:\n    pushq %rbp\n    movq %rsp, %rbp\n    subq $4, %rsp\n    movl $5, %eax\n    movl %eax, -4(%rbp)\n    movl -4(%rbp), %eax\n    movq %rbp, %rsp\n    popq %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
+        let expected = "    .globl main\nmain:\n    push %rbp\n    movq %rsp, %rbp\n    subq $16, %rsp\n    movl $5, %eax\n    movl %eax, -4(%rbp)\n    movl -4(%rbp), %eax\n    addq $16, %rsp\n    pop %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
         assert_eq!(asm, expected);
     }
 

@@ -49,6 +49,94 @@ cargo test
 | 15 | 配列とポインタ算術 (`int arr[10]`, `arr[i]`, `ptr + n`, `sizeof`) | 完了 |
 | 16 | 文字と文字列 (`char`, `unsigned char`, 文字リテラル, 文字列リテラル) | 完了 |
 | 17 | void 型と void ポインタ (`void`, `void *`, `malloc`/`free`) | 完了 |
+| 18 | 構造体（`struct`、メンバアクセス、ポインタ経由アクセス） | 完了 |
+| 19 | TACKY IR（三番地コード中間表現、最適化パス基盤） | 完了 |
+| 20 | レジスタ割り当て（グラフ彩色、生存解析、Chaitin-Briggs） | 完了 |
+
+### Chapter 20 の詳細
+
+Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装した。
+それまで全変数をスタックに配置し、毎回 load→operate→store の3命令パターンだったのを、
+変数をレジスタに直接割り当てることで効率的なコードを生成する。
+
+- **Pseudo レジスタ**: コード生成で変数を `Operand::Pseudo(name)` として出力し、後段で解決する
+  ```
+  // 旧: 3命令パターン（全変数スタック経由）
+  movl -4(%rbp), %eax      // load left
+  addl -8(%rbp), %eax      // operate
+  movl %eax, -12(%rbp)     // store result
+
+  // 新: 2命令パターン（変数がレジスタに割り当てられる）
+  movl %ebx, %ecx          // left → dst
+  addl %edx, %ecx          // right + dst
+  ```
+- **生存解析（Liveness Analysis）**: 後方データフロー解析で各命令時点の生存変数集合を計算
+  - ラベル/ジャンプから CFG を構築し、不動点反復で `live_in`/`live_after` を求める
+  - 暗黙的な use/def を追跡（`idiv` → AX,DX、`call` → 全 caller-saved レジスタ等）
+- **干渉グラフ**: 同時に生存する変数間に辺を張る。整数グラフと XMM グラフを分離して独立に彩色
+  - Mov 命令の src-dst 間には辺を張らない（将来の coalescing 最適化のため）
+- **Chaitin-Briggs グラフ彩色**:
+  - Simplify: degree < k のノードをスタックに push して除去
+  - Potential Spill: degree が最大のノードを spill 候補としてマーク
+  - Select: スタックから pop して、隣接ノードが使っていない色（レジスタ）を割り当て
+  - 楽観的彩色: spill 候補でも色が見つかれば割り当て、見つからなければ実際に spill
+- **レジスタ分類（System V AMD64 ABI）**:
+  - 整数割り当て候補（12個）: AX, BX, CX, DX, SI, DI, R8, R9, R12, R13, R14, R15
+  - Callee-saved（5個）: BX, R12, R13, R14, R15（関数呼び出しをまたいで保存が必要）
+  - Scratch レジスタ: R10, R11（fixup 用）、XMM15（XMM の fixup 用）
+  - XMM 割り当て候補（15個）: XMM0〜XMM14
+- **Fixup パス**: レジスタ割り当て後に生じる無効なオペランド組み合わせを修正
+  - `movl Stack, Stack` → scratch レジスタ（R10 or XMM15）経由の2命令に展開
+  - `imul` のメモリ dst → R11 経由に展開
+  - `movslq $imm, reg` → `movq $imm, reg` に変換（即値の符号拡張は不要）
+  - 同一レジスタ間の `mov` を除去（noop 最適化）
+- **プロローグ/エピローグ自動生成**: 使用した callee-saved レジスタのみ push/pop する
+  ```asm
+  push %rbp              # フレームポインタ保存
+  movq %rsp, %rbp
+  push %rbx              # callee-saved（使用した場合のみ）
+  push %r12              # callee-saved（使用した場合のみ）
+  subq $N, %rsp          # spill スロット確保（16バイトアラインメント調整済み）
+  ```
+- **スタックアラインメント**: `callee_saved_count * 8 + alloc_size ≡ 0 (mod 16)` を保証
+  ```rust
+  let callee_bytes = callee_count * 8;
+  let total = callee_bytes + spill_bytes;
+  let aligned_total = (total + 15) & !15;
+  let alloc_size = aligned_total - callee_bytes;
+  ```
+- **アドレス取得対象の例外処理**: `&x` でアドレスを取られる変数、構造体、配列は
+  レジスタ割り当ての対象外とし、従来通りスタックに配置する
+
+### Chapter 19 の詳細
+
+Chapter 19 では TACKY IR（三番地コード中間表現）を導入した:
+
+- **TACKY IR**: C の AST と x86-64 アセンブリの中間に位置する三番地コード形式の IR
+  ```
+  // C: int r = a + b * c;
+  // TACKY:
+  tmp.0 = b * c
+  r = a + tmp.0
+  ```
+- **コンパイルパイプライン変更**: `C AST → TACKY IR → Assembly AST` の2段階に分離
+- **最適化パス基盤**: TACKY IR 上で定数畳み込み等の最適化を実行可能にする
+
+### Chapter 18 の詳細
+
+Chapter 18 では構造体を実装した:
+
+- **構造体型**: `struct` の定義とメンバアクセス
+  ```c
+  struct Point { int x; int y; };
+  struct Point p;
+  p.x = 10;
+  p.y = 20;
+  return p.x + p.y;  // 30
+  ```
+- **ポインタ経由のメンバアクセス**: `ptr->member`（`(*ptr).member` の糖衣構文）
+- **`MemoryOffset(Reg, i32)` オペランド**: レジスタ+オフセット間接アドレッシングで構造体メンバにアクセス
+- **`CopyToOffset`/`CopyFromOffset`**: 構造体コピーのための TACKY 命令
 
 ### Chapter 17 の詳細
 
@@ -471,27 +559,42 @@ Chapter 7 では以下の機能を追加した:
     │
     ▼
 ┌──────────┐
-│  Lexer    │  src/lex/        トークン列に分割
+│  Lexer    │  src/lex/           トークン列に分割
 └────┬─────┘
      ▼
 ┌──────────┐
-│  Parser   │  src/parse/      抽象構文木 (AST) を構築
+│  Parser   │  src/parse/         抽象構文木 (AST) を構築
 └────┬─────┘
      ▼
 ┌──────────┐
-│ Validate  │  src/typecheck/  型検査・暗黙的型変換の挿入
+│ Validate  │  src/typecheck/     型検査・暗黙的型変換の挿入
 └────┬─────┘
      ▼
 ┌──────────┐
-│ Codegen   │  src/codegen/    AST → アセンブリ AST に変換
+│ TACKY Gen │  src/tacky/         C AST → TACKY IR（三番地コード）に変換
 └────┬─────┘
      ▼
 ┌──────────┐
-│ Emitter   │  src/emit/       アセンブリ AST → .s テキスト出力
+│ Codegen   │  src/codegen/       TACKY IR → Asm(Pseudo) に変換
+│          │  generator.rs
 └────┬─────┘
      ▼
 ┌──────────┐
-│  Driver   │  src/driver.rs   gcc を呼び出し .s → 実行ファイル
+│ RegAlloc  │  src/codegen/       生存解析 → 干渉グラフ → グラフ彩色
+│          │  regalloc.rs         Pseudo → Register/Stack(spill) に置換
+└────┬─────┘
+     ▼
+┌──────────┐
+│ Fixup     │  src/codegen/       無効オペランド修正 + プロローグ/エピローグ生成
+│          │  regalloc.rs
+└────┬─────┘
+     ▼
+┌──────────┐
+│ Emitter   │  src/emit/          アセンブリ AST → .s テキスト出力
+└────┬─────┘
+     ▼
+┌──────────┐
+│  Driver   │  src/driver.rs      gcc を呼び出し .s → 実行ファイル
 └──────────┘
 ```
 

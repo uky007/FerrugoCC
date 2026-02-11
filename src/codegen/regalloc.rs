@@ -1,0 +1,1091 @@
+//! レジスタ割り当てパス（Chapter 20）
+//!
+//! Pseudo レジスタを含むアセンブリ命令列に対して、
+//! グラフ彩色によるレジスタ割り当てを行う。
+//!
+//! # パイプライン
+//! ```text
+//! Asm(Pseudo) → [liveness] → [interference graph] → [graph coloring] → [replace] → Asm(Reg+Stack)
+//!              → [fixup] → Asm(valid) → [emit]
+//! ```
+//!
+//! # アルゴリズム
+//! 1. 生存解析（後方データフロー解析）で各命令時点の生存変数集合を計算
+//! 2. 干渉グラフを構築（同時に生存する変数間に辺を張る）
+//! 3. Chaitin-Briggs アルゴリズムでグラフ彩色（レジスタ割り当て）
+//! 4. Pseudo オペランドを Register または Stack(spill) に置換
+//! 5. Fixup パスで無効なオペランド組み合わせを修正 + プロローグ/エピローグ生成
+
+use std::collections::{HashMap, HashSet};
+
+use crate::parse::ast::Type;
+use super::asm_ast::*;
+
+// ────────────────────────────────────────────
+// 公開インターフェース
+// ────────────────────────────────────────────
+
+/// レジスタ割り当て結果。
+///
+/// - `instructions`: Pseudo が全て解決された命令列
+/// - `spill_bytes`: spill スロットに必要なスタックサイズ（バイト）
+/// - `callee_saved_used`: 使用した callee-saved レジスタ（push/pop が必要）
+pub struct RegAllocResult {
+    pub instructions: Vec<Instruction>,
+    pub spill_bytes: usize,
+    pub callee_saved_used: Vec<Reg>,
+}
+
+/// レジスタ割り当てを実行する。
+///
+/// 整数 Pseudo と XMM Pseudo を分離し、それぞれ独立にグラフ彩色を行う。
+/// 整数は GP_ALLOCATABLE（12個）、XMM は XMM_ALLOCATABLE（15個）から割り当てる。
+/// 割り当てられなかった変数は spill（スタック退避）となる。
+pub fn allocate_registers(
+    instructions: Vec<Instruction>,
+    var_types: &HashMap<String, Type>,
+) -> RegAllocResult {
+    // 整数 Pseudo と XMM Pseudo を分類
+    let (gp_pseudos, xmm_pseudos) = classify_pseudos(&instructions, var_types);
+
+    // 生存解析
+    let liveness = analyze_liveness(&instructions);
+
+    // 整数グラフの彩色
+    let gp_coloring = if !gp_pseudos.is_empty() {
+        let graph = build_interference_graph(&instructions, &liveness, &gp_pseudos, false);
+        color_graph(graph, &GP_ALLOCATABLE, false)
+    } else {
+        ColoringResult { assignments: HashMap::new() }
+    };
+
+    // XMM グラフの彩色
+    let xmm_coloring = if !xmm_pseudos.is_empty() {
+        let graph = build_interference_graph(&instructions, &liveness, &xmm_pseudos, true);
+        color_graph(graph, &XMM_ALLOCATABLE, true)
+    } else {
+        ColoringResult { assignments: HashMap::new() }
+    };
+
+    // Pseudo 置換
+    let mut assignments: HashMap<String, Operand> = HashMap::new();
+    let mut callee_saved_set: HashSet<Reg> = HashSet::new();
+
+    // 整数割り当て結果をマージ
+    let mut next_spill_offset: i32 = 0;
+    for (name, assignment) in &gp_coloring.assignments {
+        match assignment {
+            Assignment::Register(reg) => {
+                assignments.insert(name.clone(), Operand::Register(*reg));
+                if GP_CALLEE_SAVED.contains(reg) {
+                    callee_saved_set.insert(*reg);
+                }
+            }
+            Assignment::Spill => {
+                next_spill_offset -= 8;
+                assignments.insert(name.clone(), Operand::Stack(next_spill_offset));
+            }
+        }
+    }
+
+    // XMM 割り当て結果をマージ
+    for (name, assignment) in &xmm_coloring.assignments {
+        match assignment {
+            Assignment::Register(reg) => {
+                assignments.insert(name.clone(), Operand::Register(*reg));
+                // XMM はすべて caller-saved なので callee-saved に追加しない
+            }
+            Assignment::Spill => {
+                next_spill_offset -= 8;
+                assignments.insert(name.clone(), Operand::Stack(next_spill_offset));
+            }
+        }
+    }
+
+    // 命令列の Pseudo を置換
+    let instructions = replace_pseudos(instructions, &assignments);
+
+    // callee-saved の順序を固定（push/pop の一貫性のため）
+    let mut callee_saved_used: Vec<Reg> = callee_saved_set.into_iter().collect();
+    callee_saved_used.sort_by_key(|r| {
+        GP_CALLEE_SAVED.iter().position(|x| x == r).unwrap_or(99)
+    });
+
+    RegAllocResult {
+        instructions,
+        spill_bytes: (-next_spill_offset) as usize,
+        callee_saved_used,
+    }
+}
+
+/// Fixup パス: 無効なオペランド組み合わせの修正 + プロローグ/エピローグ生成。
+///
+/// x86-64 では memory-memory 命令が不正なため、scratch レジスタ（R10/R11/XMM15）
+/// 経由に展開する。その後、spill サイズと使用した callee-saved レジスタに基づいて
+/// プロローグ（push + subq）とエピローグ（addq + pop）を挿入する。
+pub fn fixup_instructions(
+    instructions: Vec<Instruction>,
+    spill_bytes: usize,
+    callee_saved_used: &[Reg],
+) -> Vec<Instruction> {
+    // 1. 無効なオペランド組み合わせを修正
+    let mut fixed = Vec::new();
+    for instr in instructions {
+        fixup_instruction(instr, &mut fixed);
+    }
+
+    // 2. プロローグ/エピローグを挿入
+    insert_prologue_epilogue(fixed, spill_bytes, callee_saved_used)
+}
+
+// ────────────────────────────────────────────
+// 内部: Pseudo 分類
+// ────────────────────────────────────────────
+
+/// 命令列内の全 Pseudo を var_types に基づいて整数/XMM に分類する。
+/// Double 型の変数は XMM グラフ、それ以外は整数グラフで彩色される。
+fn classify_pseudos(
+    instructions: &[Instruction],
+    var_types: &HashMap<String, Type>,
+) -> (HashSet<String>, HashSet<String>) {
+    let mut gp = HashSet::new();
+    let mut xmm = HashSet::new();
+
+    for instr in instructions {
+        for_each_operand(instr, |op| {
+            if let Operand::Pseudo(name) = op {
+                let ty = var_types.get(name);
+                if ty.map_or(false, |t| t.is_double()) {
+                    xmm.insert(name.clone());
+                } else {
+                    gp.insert(name.clone());
+                }
+            }
+        });
+    }
+
+    (gp, xmm)
+}
+
+// ────────────────────────────────────────────
+// 内部: 生存解析
+// ────────────────────────────────────────────
+
+/// 干渉グラフのノード
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum GraphNode {
+    Pseudo(String),
+    HardReg(Reg),
+}
+
+/// 生存解析の結果
+struct LivenessInfo {
+    live_after: Vec<HashSet<GraphNode>>,
+}
+
+/// 命令が使用(use)するオペランドを収集
+fn instruction_uses(instr: &Instruction) -> Vec<GraphNode> {
+    let mut uses = Vec::new();
+
+    match instr {
+        Instruction::Mov { src, .. } => {
+            add_operand_nodes(src, &mut uses);
+        }
+        Instruction::Unary { operand, .. } => {
+            add_operand_nodes(operand, &mut uses);
+        }
+        Instruction::Cmp { src, dst, .. } => {
+            add_operand_nodes(src, &mut uses);
+            add_operand_nodes(dst, &mut uses);
+        }
+        Instruction::SetCC { .. } => {}
+        Instruction::Binary { src, dst, .. } => {
+            add_operand_nodes(src, &mut uses);
+            add_operand_nodes(dst, &mut uses);
+        }
+        Instruction::Idiv { operand, .. } => {
+            add_operand_nodes(operand, &mut uses);
+            uses.push(GraphNode::HardReg(Reg::AX));
+            uses.push(GraphNode::HardReg(Reg::DX));
+        }
+        Instruction::Div { operand, .. } => {
+            add_operand_nodes(operand, &mut uses);
+            uses.push(GraphNode::HardReg(Reg::AX));
+            uses.push(GraphNode::HardReg(Reg::DX));
+        }
+        Instruction::SignExtend(_) => {
+            uses.push(GraphNode::HardReg(Reg::AX));
+        }
+        Instruction::Movsx { src, .. } => {
+            add_operand_nodes(src, &mut uses);
+        }
+        Instruction::MovsxByte { src, .. } => {
+            add_operand_nodes(src, &mut uses);
+        }
+        Instruction::MovZeroExtend { src, .. } => {
+            add_operand_nodes(src, &mut uses);
+        }
+        Instruction::MovZeroExtendByte { src, .. } => {
+            add_operand_nodes(src, &mut uses);
+        }
+        Instruction::Truncate { src, .. } => {
+            add_operand_nodes(src, &mut uses);
+        }
+        Instruction::Push(op) => {
+            add_operand_nodes(op, &mut uses);
+        }
+        Instruction::Pop(_) => {}
+        Instruction::Jmp(_) | Instruction::JmpCC(_, _) | Instruction::Label(_) => {}
+        Instruction::AllocateStack(_) | Instruction::DeallocateStack(_) => {}
+        Instruction::Call(_) => {}
+        Instruction::Ret => {
+            uses.push(GraphNode::HardReg(Reg::AX));
+        }
+        Instruction::Cvtsi2sd { src, .. } => {
+            add_operand_nodes(src, &mut uses);
+        }
+        Instruction::Cvttsd2si { src, .. } => {
+            add_operand_nodes(src, &mut uses);
+        }
+        Instruction::Lea { src, .. } => {
+            add_operand_nodes(src, &mut uses);
+        }
+    }
+
+    uses
+}
+
+/// 命令が定義(def)するオペランドを収集
+fn instruction_defs(instr: &Instruction) -> Vec<GraphNode> {
+    let mut defs = Vec::new();
+
+    match instr {
+        Instruction::Mov { dst, .. } => {
+            add_operand_nodes(dst, &mut defs);
+        }
+        Instruction::Unary { operand, .. } => {
+            add_operand_nodes(operand, &mut defs);
+        }
+        Instruction::Cmp { .. } => {}
+        Instruction::SetCC { operand, .. } => {
+            add_operand_nodes(operand, &mut defs);
+        }
+        Instruction::Binary { dst, .. } => {
+            add_operand_nodes(dst, &mut defs);
+        }
+        Instruction::Idiv { .. } => {
+            defs.push(GraphNode::HardReg(Reg::AX));
+            defs.push(GraphNode::HardReg(Reg::DX));
+        }
+        Instruction::Div { .. } => {
+            defs.push(GraphNode::HardReg(Reg::AX));
+            defs.push(GraphNode::HardReg(Reg::DX));
+        }
+        Instruction::SignExtend(_) => {
+            defs.push(GraphNode::HardReg(Reg::DX));
+        }
+        Instruction::Movsx { dst, .. } => {
+            add_operand_nodes(dst, &mut defs);
+        }
+        Instruction::MovsxByte { dst, .. } => {
+            add_operand_nodes(dst, &mut defs);
+        }
+        Instruction::MovZeroExtend { dst, .. } => {
+            add_operand_nodes(dst, &mut defs);
+        }
+        Instruction::MovZeroExtendByte { dst, .. } => {
+            add_operand_nodes(dst, &mut defs);
+        }
+        Instruction::Truncate { dst, .. } => {
+            add_operand_nodes(dst, &mut defs);
+        }
+        Instruction::Push(_) => {}
+        Instruction::Pop(op) => {
+            add_operand_nodes(op, &mut defs);
+        }
+        Instruction::Jmp(_) | Instruction::JmpCC(_, _) | Instruction::Label(_) => {}
+        Instruction::AllocateStack(_) | Instruction::DeallocateStack(_) => {}
+        Instruction::Call(_) => {
+            // Call destroys all caller-saved registers
+            for &reg in &GP_CALLER_SAVED {
+                defs.push(GraphNode::HardReg(reg));
+            }
+            for &reg in &XMM_ALL {
+                defs.push(GraphNode::HardReg(reg));
+            }
+        }
+        Instruction::Ret => {}
+        Instruction::Cvtsi2sd { dst, .. } => {
+            add_operand_nodes(dst, &mut defs);
+        }
+        Instruction::Cvttsd2si { dst, .. } => {
+            add_operand_nodes(dst, &mut defs);
+        }
+        Instruction::Lea { dst, .. } => {
+            add_operand_nodes(dst, &mut defs);
+        }
+    }
+
+    defs
+}
+
+fn add_operand_nodes(op: &Operand, nodes: &mut Vec<GraphNode>) {
+    match op {
+        Operand::Register(reg) => nodes.push(GraphNode::HardReg(*reg)),
+        Operand::Pseudo(name) => nodes.push(GraphNode::Pseudo(name.clone())),
+        Operand::Memory(reg) => nodes.push(GraphNode::HardReg(*reg)),
+        Operand::MemoryOffset(reg, _) => nodes.push(GraphNode::HardReg(*reg)),
+        Operand::Imm(_) | Operand::Stack(_) | Operand::Data(_) => {}
+    }
+}
+
+/// 命令がジャンプ先を持つ場合、そのラベルを返す
+fn jump_targets(instr: &Instruction) -> Vec<String> {
+    match instr {
+        Instruction::Jmp(label) => vec![label.clone()],
+        Instruction::JmpCC(_, label) => vec![label.clone()],
+        _ => vec![],
+    }
+}
+
+/// 後方データフロー解析で各命令の直後の生存集合を計算する。
+///
+/// ラベル/ジャンプから CFG（制御フロー・グラフ）を構築し、
+/// 不動点反復で各命令時点の `live_in`/`live_after` を求める。
+///
+/// ```text
+/// live_after[i] = ∪ { live_in[s] | s は i の後続命令 }
+/// live_in[i]    = uses[i] ∪ (live_after[i] - defs[i])
+/// ```
+fn analyze_liveness(instructions: &[Instruction]) -> LivenessInfo {
+    let n = instructions.len();
+    if n == 0 {
+        return LivenessInfo { live_after: vec![] };
+    }
+
+    // ラベル→命令インデックスのマッピング
+    let mut label_to_idx: HashMap<String, usize> = HashMap::new();
+    for (i, instr) in instructions.iter().enumerate() {
+        if let Instruction::Label(label) = instr {
+            label_to_idx.insert(label.clone(), i);
+        }
+    }
+
+    // 各命令の後続命令インデックス
+    let mut successors: Vec<Vec<usize>> = vec![vec![]; n];
+    for i in 0..n {
+        let targets = jump_targets(&instructions[i]);
+        for target in &targets {
+            if let Some(&idx) = label_to_idx.get(target) {
+                successors[i].push(idx);
+            }
+        }
+        // フォールスルー（Jmp と Ret 以外）
+        if !matches!(instructions[i], Instruction::Jmp(_) | Instruction::Ret) {
+            if i + 1 < n {
+                successors[i].push(i + 1);
+            }
+        }
+    }
+
+    // 各命令の use/def を事前計算
+    let uses: Vec<HashSet<GraphNode>> = instructions.iter()
+        .map(|instr| instruction_uses(instr).into_iter().collect())
+        .collect();
+    let defs: Vec<HashSet<GraphNode>> = instructions.iter()
+        .map(|instr| instruction_defs(instr).into_iter().collect())
+        .collect();
+
+    // live_in[i], live_after[i]
+    let mut live_in: Vec<HashSet<GraphNode>> = vec![HashSet::new(); n];
+    let mut live_after: Vec<HashSet<GraphNode>> = vec![HashSet::new(); n];
+
+    // 不動点反復（後方から）
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in (0..n).rev() {
+            // live_after[i] = union of live_in[s] for s in successors[i]
+            let mut new_after: HashSet<GraphNode> = HashSet::new();
+            for &s in &successors[i] {
+                for node in &live_in[s] {
+                    new_after.insert(node.clone());
+                }
+            }
+
+            // live_in[i] = uses[i] ∪ (live_after[i] - defs[i])
+            let mut new_in: HashSet<GraphNode> = uses[i].clone();
+            for node in &new_after {
+                if !defs[i].contains(node) {
+                    new_in.insert(node.clone());
+                }
+            }
+
+            if new_in != live_in[i] || new_after != live_after[i] {
+                changed = true;
+                live_in[i] = new_in;
+                live_after[i] = new_after;
+            }
+        }
+    }
+
+    LivenessInfo { live_after }
+}
+
+// ────────────────────────────────────────────
+// 内部: 干渉グラフ
+// ────────────────────────────────────────────
+
+struct InterferenceGraph {
+    /// 隣接リスト
+    adj: HashMap<GraphNode, HashSet<GraphNode>>,
+}
+
+impl InterferenceGraph {
+    fn new() -> Self {
+        InterferenceGraph {
+            adj: HashMap::new(),
+        }
+    }
+
+    fn add_node(&mut self, node: GraphNode) {
+        self.adj.entry(node).or_insert_with(HashSet::new);
+    }
+
+    fn add_edge(&mut self, a: &GraphNode, b: &GraphNode) {
+        if a == b { return; }
+        self.adj.entry(a.clone()).or_insert_with(HashSet::new).insert(b.clone());
+        self.adj.entry(b.clone()).or_insert_with(HashSet::new).insert(a.clone());
+    }
+}
+
+/// 干渉グラフを構築する。
+///
+/// 各命令の定義変数と、その命令直後に生存している変数の間に干渉辺を張る。
+/// Mov 系命令では src-dst 間に辺を張らない（将来の coalescing 最適化のため）。
+///
+/// - `relevant_pseudos`: このグラフに含める Pseudo 集合（整数 or XMM）
+/// - `is_xmm`: true なら XMM レジスタのみ追跡、false なら整数レジスタのみ追跡
+fn build_interference_graph(
+    instructions: &[Instruction],
+    liveness: &LivenessInfo,
+    relevant_pseudos: &HashSet<String>,
+    is_xmm: bool,
+) -> InterferenceGraph {
+    let mut graph = InterferenceGraph::new();
+
+    // 関連するハードレジスタ集合
+    let relevant_hard_regs: HashSet<Reg> = if is_xmm {
+        XMM_ALL.iter().copied().collect()
+    } else {
+        let mut s: HashSet<Reg> = GP_ALLOCATABLE.iter().copied().collect();
+        s.insert(Reg::R10);
+        s.insert(Reg::R11);
+        s
+    };
+
+    // フィルター関数: このグラフに含めるべきノードかどうか
+    let is_relevant = |node: &GraphNode| -> bool {
+        match node {
+            GraphNode::Pseudo(name) => relevant_pseudos.contains(name),
+            GraphNode::HardReg(reg) => relevant_hard_regs.contains(reg),
+        }
+    };
+
+    // 全 Pseudo をノードとして追加
+    for name in relevant_pseudos {
+        graph.add_node(GraphNode::Pseudo(name.clone()));
+    }
+
+    // 各命令について干渉辺を追加
+    for (i, instr) in instructions.iter().enumerate() {
+        let defined = instruction_defs(instr);
+        let live_after = &liveness.live_after[i];
+
+        let is_mov = matches!(instr,
+            Instruction::Mov { .. } | Instruction::Movsx { .. }
+            | Instruction::MovsxByte { .. } | Instruction::MovZeroExtend { .. }
+            | Instruction::MovZeroExtendByte { .. } | Instruction::Truncate { .. }
+        );
+
+        // Mov のソースを取得（coalescing のため干渉辺を張らない）
+        let mov_src: Option<GraphNode> = if is_mov {
+            let uses = instruction_uses(instr);
+            uses.into_iter().next()
+        } else {
+            None
+        };
+
+        for d in &defined {
+            if !is_relevant(d) { continue; }
+            graph.add_node(d.clone());
+
+            for v in live_after {
+                if !is_relevant(v) { continue; }
+                if v == d { continue; }
+                // Mov の場合、src と dst の間には辺を張らない
+                if is_mov {
+                    if let Some(ref src_node) = mov_src {
+                        if v == src_node { continue; }
+                    }
+                }
+                graph.add_edge(d, v);
+            }
+        }
+    }
+
+    graph
+}
+
+// ────────────────────────────────────────────
+// 内部: グラフ彩色（Chaitin-Briggs）
+// ────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+enum Assignment {
+    Register(Reg),
+    Spill,
+}
+
+struct ColoringResult {
+    assignments: HashMap<String, Assignment>,
+}
+
+/// Chaitin-Briggs アルゴリズムでグラフ彩色を行う。
+///
+/// 1. **Simplify**: degree < k のノードをスタックに push して除去
+/// 2. **Potential Spill**: 全ノードが degree >= k なら、最大 degree のノードを
+///    spill 候補としてマークし push
+/// 3. **Select**: スタックから pop し、隣接ノードが使っていない色を割り当て。
+///    spill 候補でも色が見つかれば割り当てる（楽観的彩色）。
+///    色が見つからなければ実際に spill（スタック退避）。
+fn color_graph(
+    graph: InterferenceGraph,
+    allocatable: &[Reg],
+    _is_xmm: bool,
+) -> ColoringResult {
+    let k = allocatable.len();
+
+    // オリジナルの隣接リストを保存
+    let original_adj = graph.adj.clone();
+
+    // Pseudo ノードだけをリストアップ
+    let pseudo_nodes: Vec<String> = graph.adj.keys()
+        .filter_map(|node| {
+            if let GraphNode::Pseudo(name) = node {
+                Some(name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if pseudo_nodes.is_empty() {
+        return ColoringResult { assignments: HashMap::new() };
+    }
+
+    // Simplify + Potential Spill（working copy で）
+    let mut working_adj: HashMap<GraphNode, HashSet<GraphNode>> = graph.adj;
+    let mut stack: Vec<(String, bool)> = Vec::new();
+    let mut remaining: HashSet<String> = pseudo_nodes.into_iter().collect();
+
+    let working_degree = |adj: &HashMap<GraphNode, HashSet<GraphNode>>, name: &str| -> usize {
+        let node = GraphNode::Pseudo(name.to_string());
+        adj.get(&node).map_or(0, |s| s.len())
+    };
+
+    let remove_from_working = |adj: &mut HashMap<GraphNode, HashSet<GraphNode>>, name: &str| {
+        let node = GraphNode::Pseudo(name.to_string());
+        if let Some(neighbors) = adj.remove(&node) {
+            for n in &neighbors {
+                if let Some(s) = adj.get_mut(n) {
+                    s.remove(&node);
+                }
+            }
+        }
+    };
+
+    while !remaining.is_empty() {
+        // Phase 1: degree < k のノードを除去
+        let mut progress = true;
+        while progress {
+            progress = false;
+            let candidates: Vec<String> = remaining.iter()
+                .filter(|name| working_degree(&working_adj, name) < k)
+                .cloned()
+                .collect();
+
+            for name in candidates {
+                remove_from_working(&mut working_adj, &name);
+                stack.push((name.clone(), false));
+                remaining.remove(&name);
+                progress = true;
+            }
+        }
+
+        // Phase 2: spill 候補
+        if !remaining.is_empty() {
+            let spill_name = remaining.iter()
+                .max_by_key(|name| working_degree(&working_adj, name))
+                .cloned()
+                .unwrap();
+
+            remove_from_working(&mut working_adj, &spill_name);
+            stack.push((spill_name.clone(), true));
+            remaining.remove(&spill_name);
+        }
+    }
+
+    // Select: スタックから pop して色を割り当て
+    let mut assignments: HashMap<String, Assignment> = HashMap::new();
+    // HardReg の「色」は自分自身
+    let reg_to_color: HashMap<Reg, usize> = allocatable.iter()
+        .enumerate()
+        .map(|(i, &reg)| (reg, i))
+        .collect();
+
+    while let Some((name, _is_spill_candidate)) = stack.pop() {
+        let node = GraphNode::Pseudo(name.clone());
+        let original_neighbors = original_adj.get(&node).cloned().unwrap_or_default();
+
+        // 隣接ノードが使っている色を収集
+        let mut used_colors: HashSet<usize> = HashSet::new();
+        for neighbor in &original_neighbors {
+            match neighbor {
+                GraphNode::HardReg(reg) => {
+                    if let Some(&color) = reg_to_color.get(reg) {
+                        used_colors.insert(color);
+                    }
+                }
+                GraphNode::Pseudo(n) => {
+                    if let Some(Assignment::Register(reg)) = assignments.get(n) {
+                        if let Some(&color) = reg_to_color.get(reg) {
+                            used_colors.insert(color);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 空いている色を探す
+        let mut assigned = false;
+        for (color, &reg) in allocatable.iter().enumerate() {
+            if !used_colors.contains(&color) {
+                assignments.insert(name.clone(), Assignment::Register(reg));
+                assigned = true;
+                break;
+            }
+        }
+
+        if !assigned {
+            // Spill
+            assignments.insert(name.clone(), Assignment::Spill);
+        }
+    }
+
+    ColoringResult { assignments }
+}
+
+// ────────────────────────────────────────────
+// 内部: Pseudo 置換
+// ────────────────────────────────────────────
+
+/// 全命令の Pseudo オペランドを彩色結果に基づいて置換する。
+/// Register が割り当てられた Pseudo → `Operand::Register(reg)`
+/// Spill された Pseudo → `Operand::Stack(offset)`
+fn replace_pseudos(
+    instructions: Vec<Instruction>,
+    assignments: &HashMap<String, Operand>,
+) -> Vec<Instruction> {
+    instructions.into_iter().map(|instr| replace_in_instruction(instr, assignments)).collect()
+}
+
+fn replace_operand(op: Operand, assignments: &HashMap<String, Operand>) -> Operand {
+    match op {
+        Operand::Pseudo(ref name) => {
+            assignments.get(name).cloned().unwrap_or(op)
+        }
+        _ => op,
+    }
+}
+
+fn replace_in_instruction(instr: Instruction, assignments: &HashMap<String, Operand>) -> Instruction {
+    match instr {
+        Instruction::Mov { asm_type, src, dst } => Instruction::Mov {
+            asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::Unary { asm_type, op, operand } => Instruction::Unary {
+            asm_type, op,
+            operand: replace_operand(operand, assignments),
+        },
+        Instruction::Cmp { asm_type, src, dst } => Instruction::Cmp {
+            asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::SetCC { condition, operand } => Instruction::SetCC {
+            condition,
+            operand: replace_operand(operand, assignments),
+        },
+        Instruction::Binary { asm_type, op, src, dst } => Instruction::Binary {
+            asm_type, op,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::Idiv { asm_type, operand } => Instruction::Idiv {
+            asm_type,
+            operand: replace_operand(operand, assignments),
+        },
+        Instruction::Div { asm_type, operand } => Instruction::Div {
+            asm_type,
+            operand: replace_operand(operand, assignments),
+        },
+        Instruction::Movsx { src, dst } => Instruction::Movsx {
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::MovsxByte { asm_type, src, dst } => Instruction::MovsxByte {
+            asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::MovZeroExtend { src, dst } => Instruction::MovZeroExtend {
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::MovZeroExtendByte { asm_type, src, dst } => Instruction::MovZeroExtendByte {
+            asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::Truncate { src, dst } => Instruction::Truncate {
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::Push(op) => Instruction::Push(replace_operand(op, assignments)),
+        Instruction::Pop(op) => Instruction::Pop(replace_operand(op, assignments)),
+        Instruction::Cvtsi2sd { asm_type, src, dst } => Instruction::Cvtsi2sd {
+            asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::Cvttsd2si { asm_type, src, dst } => Instruction::Cvttsd2si {
+            asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::Lea { src, dst } => Instruction::Lea {
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        // These don't have operands to replace
+        instr @ (Instruction::SignExtend(_)
+            | Instruction::Jmp(_)
+            | Instruction::JmpCC(_, _)
+            | Instruction::Label(_)
+            | Instruction::AllocateStack(_)
+            | Instruction::DeallocateStack(_)
+            | Instruction::Call(_)
+            | Instruction::Ret) => instr,
+    }
+}
+
+// ────────────────────────────────────────────
+// 内部: Fixup パス
+// ────────────────────────────────────────────
+
+fn is_memory_operand(op: &Operand) -> bool {
+    matches!(op, Operand::Stack(_) | Operand::Data(_) | Operand::Memory(_) | Operand::MemoryOffset(_, _))
+}
+
+fn is_imm(op: &Operand) -> bool {
+    matches!(op, Operand::Imm(_))
+}
+
+fn is_large_imm(op: &Operand) -> bool {
+    if let Operand::Imm(v) = op {
+        *v > i32::MAX as i64 || *v < i32::MIN as i64
+    } else {
+        false
+    }
+}
+
+fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
+    match instr {
+        // Mov: memory,memory → via scratch
+        Instruction::Mov { asm_type, ref src, ref dst }
+            if is_memory_operand(src) && is_memory_operand(dst) =>
+        {
+            if asm_type == AsmType::Double {
+                out.push(Instruction::Mov { asm_type, src: src.clone(), dst: Operand::Register(Reg::XMM15) });
+                out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::XMM15), dst: dst.clone() });
+            } else {
+                out.push(Instruction::Mov { asm_type, src: src.clone(), dst: Operand::Register(Reg::R10) });
+                out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R10), dst: dst.clone() });
+            }
+        }
+
+        // Mov: large immediate to memory → via R10
+        Instruction::Mov { asm_type, ref src, ref dst }
+            if is_large_imm(src) && is_memory_operand(dst) =>
+        {
+            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: src.clone(), dst: Operand::Register(Reg::R10) });
+            out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        }
+
+        // Mov src,src (same register) → remove noop
+        Instruction::Mov { ref src, ref dst, .. } if src == dst => {
+            // Skip noop moves
+        }
+
+        // Binary: memory,memory → via scratch (non-double)
+        Instruction::Binary { asm_type, op, ref src, ref dst }
+            if asm_type != AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) =>
+        {
+            // imul cannot have memory dst, so load dst into R11
+            if matches!(op, AsmBinaryOp::Mult) {
+                out.push(Instruction::Mov { asm_type, src: dst.clone(), dst: Operand::Register(Reg::R11) });
+                out.push(Instruction::Binary { asm_type, op, src: src.clone(), dst: Operand::Register(Reg::R11) });
+                out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
+            } else {
+                out.push(Instruction::Mov { asm_type, src: src.clone(), dst: Operand::Register(Reg::R10) });
+                out.push(Instruction::Binary { asm_type, op, src: Operand::Register(Reg::R10), dst: dst.clone() });
+            }
+        }
+
+        // Binary: double memory,memory → via XMM15
+        Instruction::Binary { asm_type, op, ref src, ref dst }
+            if asm_type == AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) =>
+        {
+            out.push(Instruction::Mov { asm_type: AsmType::Double, src: src.clone(), dst: Operand::Register(Reg::XMM15) });
+            out.push(Instruction::Binary { asm_type, op, src: Operand::Register(Reg::XMM15), dst: dst.clone() });
+        }
+
+        // Binary: imul with memory dst → via R11
+        Instruction::Binary { asm_type, op: AsmBinaryOp::Mult, ref src, ref dst }
+            if asm_type != AsmType::Double && is_memory_operand(dst) =>
+        {
+            out.push(Instruction::Mov { asm_type, src: dst.clone(), dst: Operand::Register(Reg::R11) });
+            out.push(Instruction::Binary { asm_type, op: AsmBinaryOp::Mult, src: src.clone(), dst: Operand::Register(Reg::R11) });
+            out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        }
+
+        // Cmp: memory,memory → via R10
+        Instruction::Cmp { asm_type, ref src, ref dst }
+            if asm_type != AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) =>
+        {
+            out.push(Instruction::Mov { asm_type, src: dst.clone(), dst: Operand::Register(Reg::R10) });
+            out.push(Instruction::Cmp { asm_type, src: src.clone(), dst: Operand::Register(Reg::R10) });
+        }
+
+        // Cmp: large immediate → via R10
+        Instruction::Cmp { asm_type, ref src, ref dst }
+            if is_large_imm(src) =>
+        {
+            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: src.clone(), dst: Operand::Register(Reg::R10) });
+            out.push(Instruction::Cmp { asm_type, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        }
+
+        // Idiv/Div: immediate operand → via R10
+        Instruction::Idiv { asm_type, ref operand } if is_imm(operand) => {
+            out.push(Instruction::Mov { asm_type, src: operand.clone(), dst: Operand::Register(Reg::R10) });
+            out.push(Instruction::Idiv { asm_type, operand: Operand::Register(Reg::R10) });
+        }
+        Instruction::Div { asm_type, ref operand } if is_imm(operand) => {
+            out.push(Instruction::Mov { asm_type, src: operand.clone(), dst: Operand::Register(Reg::R10) });
+            out.push(Instruction::Div { asm_type, operand: Operand::Register(Reg::R10) });
+        }
+
+        // Movsx: immediate → just a regular quadword mov (sign extension of a constant is a no-op)
+        Instruction::Movsx { ref src, ref dst } if is_imm(src) => {
+            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: src.clone(), dst: dst.clone() });
+        }
+
+        // Movsx: memory,memory → via R11
+        Instruction::Movsx { ref src, ref dst }
+            if is_memory_operand(src) && is_memory_operand(dst) =>
+        {
+            out.push(Instruction::Movsx { src: src.clone(), dst: Operand::Register(Reg::R11) });
+            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        }
+
+        // MovsxByte: immediate → just a regular mov
+        Instruction::MovsxByte { asm_type, ref src, ref dst } if is_imm(src) => {
+            out.push(Instruction::Mov { asm_type, src: src.clone(), dst: dst.clone() });
+        }
+
+        // MovsxByte: memory,memory → via R11
+        Instruction::MovsxByte { asm_type, ref src, ref dst }
+            if is_memory_operand(src) && is_memory_operand(dst) =>
+        {
+            out.push(Instruction::MovsxByte { asm_type, src: src.clone(), dst: Operand::Register(Reg::R11) });
+            out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        }
+
+        // MovZeroExtend: immediate → just a regular mov
+        Instruction::MovZeroExtend { ref src, ref dst } if is_imm(src) => {
+            out.push(Instruction::Mov { asm_type: AsmType::Longword, src: src.clone(), dst: dst.clone() });
+        }
+
+        // MovZeroExtend: memory,memory → via R11
+        Instruction::MovZeroExtend { ref src, ref dst }
+            if is_memory_operand(src) && is_memory_operand(dst) =>
+        {
+            out.push(Instruction::MovZeroExtend { src: src.clone(), dst: Operand::Register(Reg::R11) });
+            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        }
+
+        // MovZeroExtendByte: immediate → just a regular mov
+        Instruction::MovZeroExtendByte { asm_type, ref src, ref dst } if is_imm(src) => {
+            out.push(Instruction::Mov { asm_type, src: src.clone(), dst: dst.clone() });
+        }
+
+        // MovZeroExtendByte: memory,memory → via R11
+        Instruction::MovZeroExtendByte { asm_type, ref src, ref dst }
+            if is_memory_operand(src) && is_memory_operand(dst) =>
+        {
+            out.push(Instruction::MovZeroExtendByte { asm_type, src: src.clone(), dst: Operand::Register(Reg::R11) });
+            out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        }
+
+        // Lea: memory,memory → via R10
+        Instruction::Lea { ref src, ref dst }
+            if is_memory_operand(dst) =>
+        {
+            out.push(Instruction::Lea { src: src.clone(), dst: Operand::Register(Reg::R10) });
+            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        }
+
+        // Cvtsi2sd: immediate src → load to R10 first
+        Instruction::Cvtsi2sd { asm_type, ref src, ref dst } if is_imm(src) => {
+            out.push(Instruction::Mov { asm_type, src: src.clone(), dst: Operand::Register(Reg::R10) });
+            out.push(Instruction::Cvtsi2sd { asm_type, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        }
+
+        // Cvtsi2sd: memory dst → via XMM15
+        Instruction::Cvtsi2sd { asm_type, ref src, ref dst }
+            if is_memory_operand(dst) =>
+        {
+            out.push(Instruction::Cvtsi2sd { asm_type, src: src.clone(), dst: Operand::Register(Reg::XMM15) });
+            out.push(Instruction::Mov { asm_type: AsmType::Double, src: Operand::Register(Reg::XMM15), dst: dst.clone() });
+        }
+
+        // Cvttsd2si: memory dst → via R11
+        Instruction::Cvttsd2si { asm_type, ref src, ref dst }
+            if is_memory_operand(dst) =>
+        {
+            out.push(Instruction::Cvttsd2si { asm_type, src: src.clone(), dst: Operand::Register(Reg::R11) });
+            out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        }
+
+        // Default: no fixup needed
+        other => out.push(other),
+    }
+}
+
+// ────────────────────────────────────────────
+// 内部: プロローグ/エピローグ
+// ────────────────────────────────────────────
+
+/// プロローグとエピローグを命令列に挿入する。
+///
+/// **プロローグ**（命令列の先頭に挿入）:
+/// ```text
+/// push %rbp
+/// movq %rsp, %rbp
+/// push <callee-saved>...     // 使用した callee-saved のみ
+/// subq $N, %rsp              // spill スロット確保（16B アラインメント調整済み）
+/// ```
+///
+/// **エピローグ**（各 `Ret` の前に挿入）:
+/// ```text
+/// addq $N, %rsp
+/// pop <callee-saved>...      // push の逆順
+/// pop %rbp
+/// ret
+/// ```
+///
+/// アラインメント: `call` の return address (8B) + `push %rbp` (8B) = 16B で整列。
+/// その後 `callee_count * 8 + alloc_size` が 16 の倍数になるよう調整する。
+fn insert_prologue_epilogue(
+    instructions: Vec<Instruction>,
+    spill_bytes: usize,
+    callee_saved_used: &[Reg],
+) -> Vec<Instruction> {
+    let callee_count = callee_saved_used.len();
+
+    // アラインメント計算
+    // call main の return address (8B) + pushq %rbp (8B) で 16B（0 mod 16 に戻る）。
+    // その後 callee-saved push が callee_count * 8 バイト。
+    // RSP を 0 mod 16 に保つには callee_count * 8 + alloc_size が 16 の倍数である必要がある。
+    let callee_bytes = callee_count * 8;
+    let total = callee_bytes + spill_bytes;
+    let aligned_total = (total + 15) & !15;
+    let alloc_size = aligned_total - callee_bytes;
+
+    let mut result = Vec::new();
+
+    // プロローグ
+    result.push(Instruction::Push(Operand::Register(Reg::BP)));
+    result.push(Instruction::Mov {
+        asm_type: AsmType::Quadword,
+        src: Operand::Register(Reg::SP),
+        dst: Operand::Register(Reg::BP),
+    });
+    for &reg in callee_saved_used {
+        result.push(Instruction::Push(Operand::Register(reg)));
+    }
+    if alloc_size > 0 {
+        result.push(Instruction::AllocateStack(alloc_size));
+    }
+
+    // 命令列（Ret をエピローグに置換）
+    for instr in instructions {
+        if matches!(instr, Instruction::Ret) {
+            // エピローグ
+            if alloc_size > 0 {
+                result.push(Instruction::DeallocateStack(alloc_size));
+            }
+            for &reg in callee_saved_used.iter().rev() {
+                result.push(Instruction::Pop(Operand::Register(reg)));
+            }
+            result.push(Instruction::Pop(Operand::Register(Reg::BP)));
+            result.push(Instruction::Ret);
+        } else {
+            result.push(instr);
+        }
+    }
+
+    result
+}
+
+// ────────────────────────────────────────────
+// ユーティリティ
+// ────────────────────────────────────────────
+
+/// 命令の全オペランドに対してクロージャを適用
+fn for_each_operand<F: FnMut(&Operand)>(instr: &Instruction, mut f: F) {
+    match instr {
+        Instruction::Mov { src, dst, .. } => { f(src); f(dst); }
+        Instruction::Unary { operand, .. } => { f(operand); }
+        Instruction::Cmp { src, dst, .. } => { f(src); f(dst); }
+        Instruction::SetCC { operand, .. } => { f(operand); }
+        Instruction::Binary { src, dst, .. } => { f(src); f(dst); }
+        Instruction::Idiv { operand, .. } => { f(operand); }
+        Instruction::Div { operand, .. } => { f(operand); }
+        Instruction::Movsx { src, dst } => { f(src); f(dst); }
+        Instruction::MovsxByte { src, dst, .. } => { f(src); f(dst); }
+        Instruction::MovZeroExtend { src, dst } => { f(src); f(dst); }
+        Instruction::MovZeroExtendByte { src, dst, .. } => { f(src); f(dst); }
+        Instruction::Truncate { src, dst } => { f(src); f(dst); }
+        Instruction::Push(op) | Instruction::Pop(op) => { f(op); }
+        Instruction::Cvtsi2sd { src, dst, .. } => { f(src); f(dst); }
+        Instruction::Cvttsd2si { src, dst, .. } => { f(src); f(dst); }
+        Instruction::Lea { src, dst } => { f(src); f(dst); }
+        Instruction::SignExtend(_) | Instruction::Jmp(_) | Instruction::JmpCC(_, _)
+        | Instruction::Label(_) | Instruction::AllocateStack(_) | Instruction::DeallocateStack(_)
+        | Instruction::Call(_) | Instruction::Ret => {}
+    }
+}

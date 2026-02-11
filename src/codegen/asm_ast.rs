@@ -1,12 +1,12 @@
 //! x86-64 アセンブリの抽象構文木（Assembly AST）
 //!
-//! C の AST から変換されるアセンブリレベルの中間表現。
+//! TACKY IR から変換されるアセンブリレベルの中間表現。
 //! 実際のアセンブリテキスト（AT&T 構文）に変換する前段として使う。
 //!
 //! # なぜアセンブリ AST を挟むのか
-//! C の AST から直接テキストを生成することもできるが、
+//! TACKY IR から直接テキストを生成することもできるが、
 //! 中間表現を挟むことで以下のメリットがある:
-//! - コード生成ロジック（意味変換）と出力フォーマット（テキスト変換）を分離
+//! - コード生成ロジック（TACKY → Asm）と出力フォーマット（テキスト変換）を分離
 //! - 後段の最適化パスを挿入しやすい
 //! - テストしやすい（構造体の比較で検証できる）
 //!
@@ -19,6 +19,24 @@
 //!
 //! # Chapter 15: 配列とポインタ算術
 //! - `StaticInit::ZeroInit(usize)`: 配列のゼロ初期化（`.bss` セクションに `.zero N` で配置）。
+//!
+//! # Chapter 18: 構造体
+//! - `Operand::MemoryOffset(Reg, i32)`: レジスタ+オフセット間接アドレッシング（`N(%rax)` 等）。
+//!   構造体メンバへのアクセスで、ベースアドレスからメンバオフセット分ずらしてアクセスする。
+//! - グローバル構造体変数は `ZeroInit(struct_size)` で `.bss` セクションに配置。
+//!
+//! # Chapter 19: TACKY IR 導入
+//! コード生成の入力が C AST から TACKY IR に変更された。
+//! アセンブリ AST 自体は変更なし（TACKY 命令を機械的にマッピングする）。
+//!
+//! # Chapter 20: レジスタ割り当て
+//! - `Operand::Pseudo(String)`: 割り当て前の疑似レジスタ。コード生成で変数に使用され、
+//!   レジスタ割り当てパス (`regalloc`) で `Register` または `Stack(spill)` に置換される。
+//! - `Reg` に `Hash` derive を追加（干渉グラフのノードとして使用するため）。
+//! - `BX`, `R10`-`R15`, `SP`, `BP`, `XMM8`-`XMM13` を追加。
+//! - レジスタ分類定数: `GP_ALLOCATABLE`（12個）, `GP_CALLEE_SAVED`（5個）,
+//!   `GP_CALLER_SAVED`（9個）, `XMM_ALLOCATABLE`（15個）, `XMM_ALL`（16個）。
+//! - `R10`/`R11` は fixup パスの scratch レジスタ、`XMM15` は XMM の scratch として予約。
 
 /// アセンブリ命令のサイズ（Chapter 11, 13, 16）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,19 +226,61 @@ pub enum Operand {
     Imm(i64),
     /// レジスタ。例: `%eax`
     Register(Reg),
+    /// 割り当て前の疑似レジスタ（Chapter 20）。レジスタ割り当てパスで解決される。
+    Pseudo(String),
     /// スタック上の変数。例: `-4(%rbp)`
     Stack(i32),
     /// グローバル/静的変数。例: `x(%rip)`
     Data(String),
     /// レジスタ間接アドレッシング（Chapter 14）。例: `(%rax)`
     Memory(Reg),
+    /// レジスタ + オフセット間接アドレッシング（Chapter 18）。例: `8(%rax)`
+    MemoryOffset(Reg, i32),
 }
 
 /// レジスタ名
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Chapter 20: Hash derive 追加（干渉グラフのノードとして使用）。
+/// BX, R10-R15, SP, BP, XMM8-13 追加（レジスタ割り当て用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Reg {
-    AX, CX, DX, DI, SI, R8, R9,
+    AX, BX, CX, DX, DI, SI,
+    R8, R9, R10, R11,
+    R12, R13, R14, R15,
+    SP, BP,
     /// XMM レジスタ（Chapter 13: SSE 浮動小数点演算）
     XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
+    XMM8, XMM9, XMM10, XMM11, XMM12, XMM13,
     XMM14, XMM15,
 }
+
+/// 整数レジスタ割り当て候補（12個）。R10/R11 は fixup 用 scratch として予約。
+pub const GP_ALLOCATABLE: [Reg; 12] = [
+    Reg::AX, Reg::BX, Reg::CX, Reg::DX, Reg::SI, Reg::DI,
+    Reg::R8, Reg::R9, Reg::R12, Reg::R13, Reg::R14, Reg::R15,
+];
+
+/// Callee-saved 整数レジスタ（関数呼び出しをまたいで保存が必要）
+pub const GP_CALLEE_SAVED: [Reg; 5] = [Reg::BX, Reg::R12, Reg::R13, Reg::R14, Reg::R15];
+
+/// Caller-saved 整数レジスタ（Call 命令で破壊される）
+pub const GP_CALLER_SAVED: [Reg; 9] = [
+    Reg::AX, Reg::CX, Reg::DX, Reg::SI, Reg::DI,
+    Reg::R8, Reg::R9, Reg::R10, Reg::R11,
+];
+
+/// XMM 割り当て候補（15個）。XMM15 は fixup 用 scratch として予約。
+pub const XMM_ALLOCATABLE: [Reg; 15] = [
+    Reg::XMM0, Reg::XMM1, Reg::XMM2, Reg::XMM3,
+    Reg::XMM4, Reg::XMM5, Reg::XMM6, Reg::XMM7,
+    Reg::XMM8, Reg::XMM9, Reg::XMM10, Reg::XMM11,
+    Reg::XMM12, Reg::XMM13, Reg::XMM14,
+];
+
+/// 全 XMM レジスタ（Call 命令で破壊される caller-saved）
+pub const XMM_ALL: [Reg; 16] = [
+    Reg::XMM0, Reg::XMM1, Reg::XMM2, Reg::XMM3,
+    Reg::XMM4, Reg::XMM5, Reg::XMM6, Reg::XMM7,
+    Reg::XMM8, Reg::XMM9, Reg::XMM10, Reg::XMM11,
+    Reg::XMM12, Reg::XMM13, Reg::XMM14, Reg::XMM15,
+];
