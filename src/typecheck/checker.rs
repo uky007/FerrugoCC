@@ -1,4 +1,4 @@
-//! 型検査ロジック（Chapter 11, 12, 13, 14, 15）
+//! 型検査ロジック（Chapter 11, 12, 13, 14, 15, 16, 17）
 //!
 //! AST を in-place で変換し、以下を行う:
 //! 1. シンボルテーブル構築: 変数と関数の型情報を記録
@@ -32,6 +32,19 @@
 //! - `sizeof` 解決: `SizeOfType`/`SizeOfExpr` を `ConstantULong(size)` に置換
 //! - 配列への代入・初期化禁止
 //! - `AddrOf` 配列特別処理: `&arr` → 先頭要素へのポインタ
+//!
+//! # Chapter 17: void 型と void ポインタ
+//! - `void` 変数宣言の禁止（不完全型）
+//! - `sizeof(void)` / `sizeof(void式)` の禁止
+//! - void 関数の return チェック: `return;` のみ許可、`return expr;` はエラー
+//! - 非 void 関数の `return;` はエラー
+//! - `void *` ↔ 任意のポインタ型の暗黙変換（代入・引数・return・ternary）
+//! - `void *` と他ポインタの `==`/`!=` 比較を許可
+//! - void 式の制約: 条件式・算術・論理演算のオペランドに使用禁止
+//! - void ポインタ算術の禁止（`void *p + 1` 等）
+//! - void ポインタの間接参照禁止（`*void_ptr`）
+//! - `(void)expr` キャスト: 式の値を捨てる
+//! - ternary: 両辺 void → void、片方のみ void → エラー
 
 use std::collections::HashMap;
 
@@ -71,6 +84,13 @@ fn typecheck_file_scope_var(
     decl: &mut Declaration,
     symbols: &mut HashMap<String, SymbolType>,
 ) -> Result<()> {
+    // void 型の変数宣言は禁止（不完全型）
+    if decl.var_type.is_void() {
+        return Err(CompileError::TypeError(format!(
+            "variable '{}' declared void", decl.name
+        )));
+    }
+
     symbols.insert(decl.name.clone(), SymbolType::Variable(decl.var_type.clone()));
 
     if let Some(init) = &mut decl.init {
@@ -135,6 +155,13 @@ fn typecheck_local_declaration(
     decl: &mut Declaration,
     symbols: &mut HashMap<String, SymbolType>,
 ) -> Result<()> {
+    // void 型の変数宣言は禁止（不完全型）
+    if decl.var_type.is_void() {
+        return Err(CompileError::TypeError(format!(
+            "variable '{}' declared void", decl.name
+        )));
+    }
+
     symbols.insert(decl.name.clone(), SymbolType::Variable(decl.var_type.clone()));
 
     // 配列型への初期化子は禁止（初期化子リストは未対応）
@@ -148,11 +175,20 @@ fn typecheck_local_declaration(
         let init_type = typecheck_expr(init, symbols)?;
         // 右辺の型が左辺と異なる場合、キャストを挿入
         if init_type != decl.var_type {
-            // ポインタ型への null ポインタ定数の代入は許可
+            // void ポインタの暗黙変換: void* ↔ 任意のポインタ型
             if decl.var_type.is_pointer() && !init_type.is_pointer() && !is_null_pointer_constant(init) {
                 return Err(CompileError::TypeError(format!(
                     "cannot initialize pointer with non-pointer non-null value"
                 )));
+            }
+            // ポインタ同士だが型が異なる場合: void* が関与する場合のみ許可
+            if decl.var_type.is_pointer() && init_type.is_pointer()
+                && decl.var_type != init_type
+                && !is_void_pointer(&decl.var_type) && !is_void_pointer(&init_type)
+            {
+                return Err(CompileError::TypeError(
+                    "incompatible pointer types in initialization".to_string()
+                ));
             }
             let old_init = std::mem::replace(init, Expr::Constant(0)); // placeholder
             *init = Expr::Cast {
@@ -173,17 +209,45 @@ fn typecheck_statement(
     return_type: &Type,
 ) -> Result<()> {
     match stmt {
-        Statement::Return(expr) => {
-            let expr_type = typecheck_expr(expr, symbols)?;
-            if expr_type != *return_type {
-                let old_expr = std::mem::replace(expr, Expr::Constant(0));
-                *expr = Expr::Cast {
-                    target_type: return_type.clone(),
-                    source_type: expr_type,
-                    expr: Box::new(old_expr),
-                };
+        Statement::Return(opt_expr) => {
+            match opt_expr {
+                None => {
+                    // `return;` — only allowed in void functions
+                    if !return_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "return with no value in non-void function".to_string()
+                        ));
+                    }
+                    Ok(())
+                }
+                Some(expr) => {
+                    // `return expr;` — not allowed in void functions
+                    if return_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "return with a value in void function".to_string()
+                        ));
+                    }
+                    let expr_type = typecheck_expr(expr, symbols)?;
+                    if expr_type != *return_type {
+                        // void ポインタ暗黙変換チェック
+                        if return_type.is_pointer() && expr_type.is_pointer()
+                            && *return_type != expr_type
+                            && !is_void_pointer(return_type) && !is_void_pointer(&expr_type)
+                        {
+                            return Err(CompileError::TypeError(
+                                "incompatible pointer types in return".to_string()
+                            ));
+                        }
+                        let old_expr = std::mem::replace(expr, Expr::Constant(0));
+                        *expr = Expr::Cast {
+                            target_type: return_type.clone(),
+                            source_type: expr_type,
+                            expr: Box::new(old_expr),
+                        };
+                    }
+                    Ok(())
+                }
             }
-            Ok(())
         }
         Statement::Expression(expr) => {
             typecheck_expr(expr, symbols)?;
@@ -191,7 +255,12 @@ fn typecheck_statement(
         }
         Statement::Null => Ok(()),
         Statement::If { condition, then_branch, else_branch } => {
-            typecheck_expr(condition, symbols)?;
+            let cond_type = typecheck_expr(condition, symbols)?;
+            if cond_type.is_void() {
+                return Err(CompileError::TypeError(
+                    "void expression used as condition".to_string()
+                ));
+            }
             typecheck_statement(then_branch, symbols, return_type)?;
             if let Some(else_stmt) = else_branch {
                 typecheck_statement(else_stmt, symbols, return_type)?;
@@ -206,12 +275,22 @@ fn typecheck_statement(
             Ok(())
         }
         Statement::While { condition, body } => {
-            typecheck_expr(condition, symbols)?;
+            let cond_type = typecheck_expr(condition, symbols)?;
+            if cond_type.is_void() {
+                return Err(CompileError::TypeError(
+                    "void expression used as condition".to_string()
+                ));
+            }
             typecheck_statement(body, symbols, return_type)
         }
         Statement::DoWhile { body, condition } => {
             typecheck_statement(body, symbols, return_type)?;
-            typecheck_expr(condition, symbols)?;
+            let cond_type = typecheck_expr(condition, symbols)?;
+            if cond_type.is_void() {
+                return Err(CompileError::TypeError(
+                    "void expression used as condition".to_string()
+                ));
+            }
             Ok(())
         }
         Statement::For { init, condition, post, body } => {
@@ -226,7 +305,12 @@ fn typecheck_statement(
                 ForInit::Expression(None) => {}
             }
             if let Some(cond) = condition {
-                typecheck_expr(cond, &inner_symbols)?;
+                let cond_type = typecheck_expr(cond, &inner_symbols)?;
+                if cond_type.is_void() {
+                    return Err(CompileError::TypeError(
+                        "void expression used as condition".to_string()
+                    ));
+                }
             }
             if let Some(post_expr) = post {
                 typecheck_expr(post_expr, &inner_symbols)?;
@@ -270,6 +354,16 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         Expr::Cast { target_type, source_type, expr: inner } => {
             let actual_source = typecheck_expr(inner, symbols)?;
             *source_type = actual_source.clone();
+            // (void)expr — 値を捨てるキャスト（常に許可）
+            if target_type.is_void() {
+                return Ok(Type::Void);
+            }
+            // void 式からのキャストは禁止（void → int 等）
+            if actual_source.is_void() {
+                return Err(CompileError::TypeError(
+                    "cannot cast void expression to non-void type".to_string()
+                ));
+            }
             // ポインタ ↔ double のキャストは禁止
             if target_type.is_pointer() && actual_source == Type::Double {
                 return Err(CompileError::TypeError(
@@ -317,7 +411,22 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 ));
             }
             let rhs_type = typecheck_expr(rhs, symbols)?;
+            // void 式を代入の右辺に使用禁止
+            if rhs_type.is_void() {
+                return Err(CompileError::TypeError(
+                    "void expression used as right-hand side of assignment".to_string()
+                ));
+            }
             if rhs_type != lhs_type {
+                // void ポインタ暗黙変換チェック
+                if lhs_type.is_pointer() && rhs_type.is_pointer()
+                    && lhs_type != rhs_type
+                    && !is_void_pointer(&lhs_type) && !is_void_pointer(&rhs_type)
+                {
+                    return Err(CompileError::TypeError(
+                        "incompatible pointer types in assignment".to_string()
+                    ));
+                }
                 let old_rhs = std::mem::replace(rhs.as_mut(), Expr::Constant(0));
                 **rhs = Expr::Cast {
                     target_type: lhs_type.clone(),
@@ -343,6 +452,12 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
             }
             let rhs_type = typecheck_expr(rhs, symbols)?;
             // ポインタ算術の複合代入: ptr += int, ptr -= int（Chapter 15）
+            // void ポインタ算術は禁止
+            if lhs_type.is_pointer() && is_void_pointer(&lhs_type) && matches!(op, BinaryOp::Add | BinaryOp::Subtract) {
+                return Err(CompileError::TypeError(
+                    "pointer arithmetic on void pointer".to_string()
+                ));
+            }
             if lhs_type.is_pointer() && matches!(op, BinaryOp::Add | BinaryOp::Subtract) {
                 // 右辺を Long にキャスト
                 if rhs_type != Type::Long {
@@ -384,10 +499,21 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
             let inner_type = typecheck_expr(inner, symbols)?;
             match op {
                 UnaryOp::Not => {
+                    // void 式に `!` は禁止
+                    if inner_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "logical not '!' cannot be applied to void expression".to_string()
+                        ));
+                    }
                     // `!` は常に Int を返す（ポインタも許可: null なら 1、非 null なら 0）
                     Ok(Type::Int)
                 }
                 UnaryOp::Complement => {
+                    if inner_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "bitwise complement '~' cannot be applied to void expression".to_string()
+                        ));
+                    }
                     if inner_type == Type::Double {
                         return Err(CompileError::TypeError(
                             "bitwise complement '~' cannot be applied to double".to_string()
@@ -412,6 +538,11 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     }
                 }
                 UnaryOp::Negate => {
+                    if inner_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "unary negation '-' cannot be applied to void expression".to_string()
+                        ));
+                    }
                     if inner_type.is_pointer() {
                         return Err(CompileError::TypeError(
                             "unary negation '-' cannot be applied to pointer type".to_string()
@@ -454,7 +585,13 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
             match op {
                 // 論理演算子: オペランドは共通型に昇格するが結果は Int
                 // ポインタも使用可能（非 null = 真）
+                // void 式は禁止
                 BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
+                    if left_type.is_void() || right_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "void expression used as operand of logical operator".to_string()
+                        ));
+                    }
                     Ok(Type::Int)
                 }
 
@@ -462,14 +599,36 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 BinaryOp::LessThan | BinaryOp::LessEqual
                 | BinaryOp::GreaterThan | BinaryOp::GreaterEqual
                 | BinaryOp::Equal | BinaryOp::NotEqual => {
+                    if left_type.is_void() || right_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "void expression used as operand of comparison".to_string()
+                        ));
+                    }
                     if left_type.is_pointer() || right_type.is_pointer() {
                         // 両方とも同じポインタ型であること
                         // ただし null ポインタ定数（整数 0）は任意のポインタ型と比較可能
+                        // void* と他のポインタ型の == / != 比較も許可
                         if left_type.is_pointer() && right_type.is_pointer() {
                             if left_type != right_type {
-                                return Err(CompileError::TypeError(
-                                    "comparison between incompatible pointer types".to_string()
-                                ));
+                                // void* が関与する場合は == / != のみ許可
+                                if is_void_pointer(&left_type) || is_void_pointer(&right_type) {
+                                    if !matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
+                                        return Err(CompileError::TypeError(
+                                            "ordered comparison of void pointer with other pointer type".to_string()
+                                        ));
+                                    }
+                                    // void* 比較 OK — キャストして揃える
+                                    // 共通型は void*
+                                    if !is_void_pointer(&left_type) {
+                                        convert_operand(left, &left_type, &right_type);
+                                    } else if !is_void_pointer(&right_type) {
+                                        convert_operand(right, &right_type, &left_type);
+                                    }
+                                } else {
+                                    return Err(CompileError::TypeError(
+                                        "comparison between incompatible pointer types".to_string()
+                                    ));
+                                }
                             }
                         } else if left_type.is_pointer() && !right_type.is_pointer() {
                             // null ポインタ定数 (0) を許可
@@ -500,18 +659,35 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
 
                 // 加算: ポインタ算術対応（Chapter 15）
                 BinaryOp::Add => {
+                    if left_type.is_void() || right_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "void expression used as operand of addition".to_string()
+                        ));
+                    }
                     if left_type.is_pointer() && right_type.is_pointer() {
                         return Err(CompileError::TypeError(
                             "cannot add two pointers".to_string()
                         ));
                     }
                     if left_type.is_pointer() && !right_type.is_pointer() {
+                        // void ポインタ算術は禁止
+                        if is_void_pointer(&left_type) {
+                            return Err(CompileError::TypeError(
+                                "pointer arithmetic on void pointer".to_string()
+                            ));
+                        }
                         // ptr + int: 右辺を Long にキャスト
                         if right_type != Type::Long {
                             convert_operand(right, &right_type, &Type::Long);
                         }
                         Ok(left_type)
                     } else if !left_type.is_pointer() && right_type.is_pointer() {
+                        // void ポインタ算術は禁止
+                        if is_void_pointer(&right_type) {
+                            return Err(CompileError::TypeError(
+                                "pointer arithmetic on void pointer".to_string()
+                            ));
+                        }
                         // int + ptr: operand をスワップして正規化
                         // AST ノードを入れ替え: left と right をスワップ
                         std::mem::swap(left, right);
@@ -532,7 +708,18 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
 
                 // 減算: ポインタ算術対応（Chapter 15）
                 BinaryOp::Subtract => {
+                    if left_type.is_void() || right_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "void expression used as operand of subtraction".to_string()
+                        ));
+                    }
                     if left_type.is_pointer() && right_type.is_pointer() {
+                        // void ポインタ同士の減算は禁止
+                        if is_void_pointer(&left_type) || is_void_pointer(&right_type) {
+                            return Err(CompileError::TypeError(
+                                "pointer arithmetic on void pointer".to_string()
+                            ));
+                        }
                         // ptr - ptr: 同じポインタ型でなければエラー
                         if left_type != right_type {
                             return Err(CompileError::TypeError(
@@ -541,6 +728,12 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                         }
                         Ok(Type::Long) // 結果は要素数差分（Long）
                     } else if left_type.is_pointer() && !right_type.is_pointer() {
+                        // void ポインタ算術は禁止
+                        if is_void_pointer(&left_type) {
+                            return Err(CompileError::TypeError(
+                                "pointer arithmetic on void pointer".to_string()
+                            ));
+                        }
                         // ptr - int: 右辺を Long にキャスト
                         if right_type != Type::Long {
                             convert_operand(right, &right_type, &Type::Long);
@@ -560,8 +753,13 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     }
                 }
 
-                // 乗算・除算・剰余: ポインタ禁止
+                // 乗算・除算・剰余: ポインタ禁止、void 禁止
                 BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Remainder => {
+                    if left_type.is_void() || right_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "void expression used as operand of arithmetic".to_string()
+                        ));
+                    }
                     if left_type.is_pointer() || right_type.is_pointer() {
                         return Err(CompileError::TypeError(format!(
                             "arithmetic operator '{:?}' cannot be applied to pointer types", op
@@ -586,9 +784,25 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         }
 
         Expr::Conditional { condition, then_expr, else_expr } => {
-            typecheck_expr(condition, symbols)?;
+            let cond_type = typecheck_expr(condition, symbols)?;
+            // 条件式に void は使用禁止
+            if cond_type.is_void() {
+                return Err(CompileError::TypeError(
+                    "void expression used as condition".to_string()
+                ));
+            }
             let then_type = typecheck_expr(then_expr, symbols)?;
             let else_type = typecheck_expr(else_expr, symbols)?;
+            // 両方 void の場合は void を返す
+            if then_type.is_void() && else_type.is_void() {
+                return Ok(Type::Void);
+            }
+            // 片方だけ void はエラー
+            if then_type.is_void() || else_type.is_void() {
+                return Err(CompileError::TypeError(
+                    "incompatible types in conditional expression (void and non-void)".to_string()
+                ));
+            }
             // ポインタ型の場合は特別な処理
             if then_type.is_pointer() || else_type.is_pointer() {
                 if then_type == else_type {
@@ -599,6 +813,19 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 } else if else_type.is_pointer() && is_null_pointer_constant(then_expr) {
                     convert_operand(then_expr, &then_type, &else_type);
                     Ok(else_type)
+                } else if then_type.is_pointer() && else_type.is_pointer() {
+                    // void* と他のポインタ型 → 共通型は void*
+                    if is_void_pointer(&then_type) && !is_void_pointer(&else_type) {
+                        convert_operand(else_expr, &else_type, &then_type);
+                        Ok(then_type)
+                    } else if is_void_pointer(&else_type) && !is_void_pointer(&then_type) {
+                        convert_operand(then_expr, &then_type, &else_type);
+                        Ok(else_type)
+                    } else {
+                        Err(CompileError::TypeError(
+                            "incompatible types in conditional expression".to_string()
+                        ))
+                    }
                 } else {
                     Err(CompileError::TypeError(
                         "incompatible types in conditional expression".to_string()
@@ -632,6 +859,15 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
             for (arg, expected_type) in args.iter_mut().zip(param_types.iter()) {
                 let arg_type = typecheck_expr(arg, symbols)?;
                 if arg_type != *expected_type {
+                    // void ポインタ暗黙変換チェック: 一方が void* なら許可
+                    if expected_type.is_pointer() && arg_type.is_pointer()
+                        && *expected_type != arg_type
+                        && !is_void_pointer(expected_type) && !is_void_pointer(&arg_type)
+                    {
+                        return Err(CompileError::TypeError(format!(
+                            "incompatible pointer types in argument to function '{}'", name
+                        )));
+                    }
                     let old_arg = std::mem::replace(arg, Expr::Constant(0));
                     *arg = Expr::Cast {
                         target_type: expected_type.clone(),
@@ -647,6 +883,11 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         Expr::Dereref(inner) => {
             let inner_type = typecheck_expr(inner, symbols)?;
             match inner_type {
+                Type::Pointer(ref target) if target.is_void() => {
+                    Err(CompileError::TypeError(
+                        "dereference of void pointer".to_string()
+                    ))
+                }
                 Type::Pointer(target) => Ok(*target),
                 _ => Err(CompileError::TypeError(
                     "dereference of non-pointer type".to_string()
@@ -681,6 +922,11 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
 
         // sizeof（Chapter 15）: 型チェック時に定数に解決
         Expr::SizeOfType(ty) => {
+            if ty.is_void() {
+                return Err(CompileError::TypeError(
+                    "sizeof applied to incomplete type 'void'".to_string()
+                ));
+            }
             let size = ty.size() as u64;
             *expr = Expr::ConstantULong(size);
             Ok(Type::ULong)
@@ -696,6 +942,11 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
             } else {
                 typecheck_expr(inner, symbols)?
             };
+            if actual_type.is_void() {
+                return Err(CompileError::TypeError(
+                    "sizeof applied to expression of incomplete type 'void'".to_string()
+                ));
+            }
             let size = actual_type.size() as u64;
             *expr = Expr::ConstantULong(size);
             Ok(Type::ULong)
@@ -753,6 +1004,11 @@ fn is_array_var(expr: &Expr, symbols: &HashMap<String, SymbolType>) -> bool {
 /// 左辺値は代入の左辺に置ける式。変数参照とポインタ間接参照が該当する。
 fn is_lvalue(expr: &Expr) -> bool {
     matches!(expr, Expr::Var(_) | Expr::Dereref(_))
+}
+
+/// void ポインタの判定。
+fn is_void_pointer(ty: &Type) -> bool {
+    matches!(ty, Type::Pointer(inner) if inner.is_void())
 }
 
 /// null ポインタ定数の判定（Chapter 14）。
@@ -827,7 +1083,7 @@ mod tests {
                 return_type: Type::Int,
                 params: vec![],
                 body: Some(vec![
-                    BlockItem::Statement(Statement::Return(Expr::Constant(42))),
+                    BlockItem::Statement(Statement::Return(Some(Expr::Constant(42)))),
                 ]),
                 storage_class: None,
             })],
@@ -835,7 +1091,7 @@ mod tests {
         typecheck(&mut program).unwrap();
         // 42 fits in i32, should remain Constant
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
-        if let BlockItem::Statement(Statement::Return(expr)) = &func.body.as_ref().unwrap()[0] {
+        if let BlockItem::Statement(Statement::Return(Some(expr))) = &func.body.as_ref().unwrap()[0] {
             assert!(matches!(expr, Expr::Constant(42)));
         } else {
             panic!("expected return");
@@ -850,14 +1106,14 @@ mod tests {
                 return_type: Type::Long,
                 params: vec![],
                 body: Some(vec![
-                    BlockItem::Statement(Statement::Return(Expr::Constant(8589934592))), // 2^33
+                    BlockItem::Statement(Statement::Return(Some(Expr::Constant(8589934592)))), // 2^33
                 ]),
                 storage_class: None,
             })],
         };
         typecheck(&mut program).unwrap();
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
-        if let BlockItem::Statement(Statement::Return(expr)) = &func.body.as_ref().unwrap()[0] {
+        if let BlockItem::Statement(Statement::Return(Some(expr))) = &func.body.as_ref().unwrap()[0] {
             assert!(matches!(expr, Expr::ConstantLong(8589934592)));
         } else {
             panic!("expected return");
@@ -872,14 +1128,14 @@ mod tests {
                 return_type: Type::Int,
                 params: vec![],
                 body: Some(vec![
-                    BlockItem::Statement(Statement::Return(Expr::ConstantLong(42))),
+                    BlockItem::Statement(Statement::Return(Some(Expr::ConstantLong(42)))),
                 ]),
                 storage_class: None,
             })],
         };
         typecheck(&mut program).unwrap();
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
-        if let BlockItem::Statement(Statement::Return(expr)) = &func.body.as_ref().unwrap()[0] {
+        if let BlockItem::Statement(Statement::Return(Some(expr))) = &func.body.as_ref().unwrap()[0] {
             assert!(matches!(expr, Expr::Cast { target_type: Type::Int, .. }));
         } else {
             panic!("expected return with cast");
@@ -907,18 +1163,18 @@ mod tests {
                         init: Some(Expr::ConstantLong(2)),
                         storage_class: None,
                     }),
-                    BlockItem::Statement(Statement::Return(Expr::Binary(
+                    BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                         BinaryOp::Add,
                         Box::new(Expr::Var("a".to_string())),
                         Box::new(Expr::Var("b".to_string())),
-                    ))),
+                    )))),
                 ]),
                 storage_class: None,
             })],
         };
         typecheck(&mut program).unwrap();
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
-        if let BlockItem::Statement(Statement::Return(Expr::Binary(_, left, _))) = &func.body.as_ref().unwrap()[2] {
+        if let BlockItem::Statement(Statement::Return(Some(Expr::Binary(_, left, _)))) = &func.body.as_ref().unwrap()[2] {
             // left (int) should be cast to long
             assert!(matches!(left.as_ref(), Expr::Cast { target_type: Type::Long, .. }));
         } else {

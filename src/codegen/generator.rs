@@ -35,6 +35,14 @@
 //! - ポインタ減算 (`ptr - ptr`): バイト差分を `idivq elem_size` で要素数に変換
 //! - ポインタ増減 (`++`/`--`/`+=`/`-=`): 増分を `sizeof(*ptr)` にスケーリング
 //! - `sizeof`: 型チェッカーで `ConstantULong` に解決済み（コード生成では到達しない）
+//!
+//! # Chapter 17: void 型と void ポインタ
+//! - `Type::Void` → `unreachable!`（void 値のコード生成は型チェッカーが防止）
+//! - void 関数の `return;`: `Ret` のみ（式の評価なし）
+//! - void 関数の暗黙 return: 値を返さず `Ret` のみ
+//! - `(void)expr` キャスト: 内部式を評価し結果を破棄
+//! - `void *` ↔ 他のポインタ型: 同サイズ (8 バイト) で no-op
+//! - `expr_type()`: void 関数呼び出し → `Type::Void`、void キャスト → `Type::Void`
 
 use std::collections::{HashMap, HashSet};
 use crate::error::{CompileError, Result};
@@ -82,6 +90,7 @@ const XMM_ARG_REGISTERS: [Reg; 8] = [
 /// Type → AsmType 変換。
 fn type_to_asm(t: &Type) -> AsmType {
     match t {
+        Type::Void => unreachable!("void has no assembly representation"),
         Type::Char | Type::UChar => AsmType::Byte,
         Type::Int | Type::UInt => AsmType::Longword,
         Type::Long | Type::ULong => AsmType::Quadword,
@@ -417,8 +426,10 @@ fn generate_function(
         instructions.extend(instrs);
     }
 
-    // 暗黙の return 0
-    if func.return_type == Type::Double {
+    // 暗黙の return (void 関数は値なし、non-void は return 0)
+    if func.return_type.is_void() {
+        // void 関数: 値を返さない
+    } else if func.return_type == Type::Double {
         // xorpd %xmm0, %xmm0 で 0.0 を返す
         instructions.push(Instruction::Binary {
             asm_type: AsmType::Double,
@@ -633,14 +644,22 @@ fn generate_statement(
     string_label_counter: &mut usize,
 ) -> Result<Vec<Instruction>> {
     match stmt {
-        Statement::Return(expr) => {
-            let mut instrs = generate_expr(
-                expr, var_map, label_counter, func_table, global_var_map,
-                double_constants, const_label_counter,
-                string_constants, string_label_counter,
-            )?;
-            instrs.push(Instruction::Ret);
-            Ok(instrs)
+        Statement::Return(opt_expr) => {
+            match opt_expr {
+                Some(expr) => {
+                    let mut instrs = generate_expr(
+                        expr, var_map, label_counter, func_table, global_var_map,
+                        double_constants, const_label_counter,
+                        string_constants, string_label_counter,
+                    )?;
+                    instrs.push(Instruction::Ret);
+                    Ok(instrs)
+                }
+                None => {
+                    // `return;` — void function, no value to return
+                    Ok(vec![Instruction::Ret])
+                }
+            }
         }
         Statement::Expression(expr) => {
             generate_expr(
@@ -1089,6 +1108,11 @@ fn generate_expr(
                 string_constants, string_label_counter,
             )?;
 
+            // Chapter 17: (void)expr — evaluate and discard
+            if target_type.is_void() {
+                return Ok(instrs);
+            }
+
             // Double ↔ Integer conversions
             if source_type.is_double() && !target_type.is_double() {
                 // Double → Integer
@@ -1180,7 +1204,7 @@ fn generate_expr(
                         });
                         // Truncate handled: value already in AL
                     }
-                    Type::Double | Type::Pointer(_) | Type::Array(_, _) => unreachable!(),
+                    Type::Void | Type::Double | Type::Pointer(_) | Type::Array(_, _) => unreachable!(),
                 }
             } else if !source_type.is_double() && target_type.is_double() {
                 // Integer → Double
@@ -1317,7 +1341,7 @@ fn generate_expr(
                         });
                         instrs.push(Instruction::Label(end_label));
                     }
-                    Type::Double | Type::Pointer(_) | Type::Array(_, _) => unreachable!(),
+                    Type::Void | Type::Double | Type::Pointer(_) | Type::Array(_, _) => unreachable!(),
                 }
             } else if !source_type.is_double() && !target_type.is_double() {
                 // Integer ↔ Integer (existing logic + Chapter 16: Byte)
@@ -2712,7 +2736,7 @@ mod tests {
     fn generate_return_constant() {
         let program = Program {
             declarations: vec![func_decl("main", vec![], Some(vec![
-                BlockItem::Statement(Statement::Return(Expr::Constant(2))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Constant(2)))),
             ]))],
         };
         let asm = generate(&program).unwrap();
@@ -2727,7 +2751,7 @@ mod tests {
     fn generate_negation() {
         let program = Program {
             declarations: vec![func_decl("main", vec![], Some(vec![
-                BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(5))))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(5)))))),
             ]))],
         };
         let asm = generate(&program).unwrap();
@@ -2740,7 +2764,7 @@ mod tests {
     fn generate_complement() {
         let program = Program {
             declarations: vec![func_decl("main", vec![], Some(vec![
-                BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Complement, Box::new(Expr::Constant(0))))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Unary(UnaryOp::Complement, Box::new(Expr::Constant(0)))))),
             ]))],
         };
         let asm = generate(&program).unwrap();
@@ -2753,7 +2777,7 @@ mod tests {
     fn generate_logical_not() {
         let program = Program {
             declarations: vec![func_decl("main", vec![], Some(vec![
-                BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Not, Box::new(Expr::Constant(1))))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Unary(UnaryOp::Not, Box::new(Expr::Constant(1)))))),
             ]))],
         };
         let asm = generate(&program).unwrap();
@@ -2766,9 +2790,9 @@ mod tests {
     fn generate_addition() {
         let program = Program {
             declarations: vec![func_decl("main", vec![], Some(vec![
-                BlockItem::Statement(Statement::Return(Expr::Binary(
+                BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                     BinaryOp::Add, Box::new(Expr::Constant(1)), Box::new(Expr::Constant(2)),
-                ))),
+                )))),
             ]))],
         };
         let asm = generate(&program).unwrap();
@@ -2781,9 +2805,9 @@ mod tests {
     fn generate_division() {
         let program = Program {
             declarations: vec![func_decl("main", vec![], Some(vec![
-                BlockItem::Statement(Statement::Return(Expr::Binary(
+                BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                     BinaryOp::Divide, Box::new(Expr::Constant(7)), Box::new(Expr::Constant(2)),
-                ))),
+                )))),
             ]))],
         };
         let asm = generate(&program).unwrap();
@@ -2796,9 +2820,9 @@ mod tests {
     fn generate_less_than() {
         let program = Program {
             declarations: vec![func_decl("main", vec![], Some(vec![
-                BlockItem::Statement(Statement::Return(Expr::Binary(
+                BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                     BinaryOp::LessThan, Box::new(Expr::Constant(1)), Box::new(Expr::Constant(2)),
-                ))),
+                )))),
             ]))],
         };
         let asm = generate(&program).unwrap();
@@ -2812,7 +2836,7 @@ mod tests {
         let program = Program {
             declarations: vec![func_decl("main", vec![], Some(vec![
                 BlockItem::Declaration(var_decl("a", Some(Expr::Constant(5)))),
-                BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Var("a".to_string())))),
             ]))],
         };
         let asm = generate(&program).unwrap();
@@ -2834,7 +2858,7 @@ mod tests {
     fn generate_undeclared_variable_error() {
         let program = Program {
             declarations: vec![func_decl("main", vec![], Some(vec![
-                BlockItem::Statement(Statement::Return(Expr::Var("x".to_string()))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Var("x".to_string())))),
             ]))],
         };
         assert!(generate(&program).is_err());
@@ -2871,7 +2895,7 @@ mod tests {
                         Expr::Assign(Box::new(Expr::Var("a".to_string())), Box::new(Expr::Binary(BinaryOp::Add, Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(1)))))
                     )),
                 }),
-                BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Var("a".to_string())))),
             ]))],
         };
         let asm = generate(&program).unwrap();
@@ -2885,7 +2909,7 @@ mod tests {
             declarations: vec![
                 TopLevelDecl::Variable(var_decl("x", Some(Expr::Constant(5)))),
                 func_decl("main", vec![], Some(vec![
-                    BlockItem::Statement(Statement::Return(Expr::Var("x".to_string()))),
+                    BlockItem::Statement(Statement::Return(Some(Expr::Var("x".to_string())))),
                 ])),
             ],
         };
@@ -2901,7 +2925,7 @@ mod tests {
         let program = Program {
             declarations: vec![func_decl("main", vec![], Some(vec![
                 BlockItem::Declaration(var_decl_with_sc("c", Some(Expr::Constant(0)), Some(StorageClass::Static))),
-                BlockItem::Statement(Statement::Return(Expr::Var("c".to_string()))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Var("c".to_string())))),
             ]))],
         };
         let asm = generate(&program).unwrap();
@@ -2925,10 +2949,10 @@ mod tests {
         let program = Program {
             declarations: vec![
                 func_decl_with_sc("helper", vec![], Some(vec![
-                    BlockItem::Statement(Statement::Return(Expr::Constant(42))),
+                    BlockItem::Statement(Statement::Return(Some(Expr::Constant(42)))),
                 ]), Some(StorageClass::Static)),
                 func_decl("main", vec![], Some(vec![
-                    BlockItem::Statement(Statement::Return(Expr::FunctionCall("helper".to_string(), vec![]))),
+                    BlockItem::Statement(Statement::Return(Some(Expr::FunctionCall("helper".to_string(), vec![])))),
                 ])),
             ],
         };

@@ -47,6 +47,55 @@ cargo test
 | 13 | 浮動小数点数 (`double`, SSE 命令, XMM レジスタ) | 完了 |
 | 14 | ポインタ (`int *`, `&`, `*`, ポインタ比較, null, キャスト) | 完了 |
 | 15 | 配列とポインタ算術 (`int arr[10]`, `arr[i]`, `ptr + n`, `sizeof`) | 完了 |
+| 16 | 文字と文字列 (`char`, `unsigned char`, 文字リテラル, 文字列リテラル) | 完了 |
+| 17 | void 型と void ポインタ (`void`, `void *`, `malloc`/`free`) | 完了 |
+
+### Chapter 17 の詳細
+
+Chapter 17 では以下の機能を追加した:
+
+- **`void` 型**: 関数の戻り値型・キャスト先として使用可能な不完全型
+  ```c
+  void do_nothing(void) { return; }
+  int main(void) { do_nothing(); return 0; }
+  ```
+- **`void *` (void ポインタ)**: 任意のポインタ型と暗黙的に相互変換可能な汎用ポインタ
+  ```c
+  void *malloc(unsigned long size);
+  void free(void *ptr);
+  int main(void) {
+      int *arr = malloc(5 * sizeof(int));  // void* → int* 暗黙変換
+      arr[0] = 42;
+      int result = arr[0];
+      free(arr);                            // int* → void* 暗黙変換
+      return result;  // 42
+  }
+  ```
+- **`(void)expr` キャスト**: 式の値を捨てる（副作用のみ実行）
+  ```c
+  int x;
+  int set_x(int i) { x = i; return 0; }
+  int main(void) { (void) set_x(12); return x; }  // 12
+  ```
+- **void ポインタの暗黙変換**: 代入・関数引数・return・三項演算子で `void *` ↔ 任意のポインタ型
+  ```c
+  void *ptr = malloc(32);
+  double *dp = ptr;      // void* → double* 暗黙変換
+  void *ptr2 = dp;       // double* → void* 暗黙変換
+  free(ptr2);
+  ```
+- **void ternary**: 両辺が void の三項演算子
+  ```c
+  void incr_i(void);
+  void incr_j(void);
+  int main(void) { 1 ? incr_i() : incr_j(); return 0; }
+  ```
+- **不完全型チェック**: 以下をコンパイルエラーとして検出
+  - `void x;` — void 型の変数宣言
+  - `sizeof(void)` — 不完全型の sizeof
+  - `-(void)10` — void 式の算術演算
+  - `void *p; p + 1;` — void ポインタの算術
+  - `int foo(void) { return; }` — 非 void 関数での値なし return
 
 ### Chapter 15 の詳細
 

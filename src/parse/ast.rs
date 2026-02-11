@@ -3,7 +3,7 @@
 //! パーサーが構築する木構造を定義する。
 //! 各ノードはCの文法要素に対応し、ソースの構造を忠実に表現する。
 //!
-//! # 現在サポートする文法（Chapter 15）
+//! # 現在サポートする文法（Chapter 17）
 //! ```text
 //! <program>        ::= <top_level_decl>*                      ← Ch10: 関数+変数
 //! <top_level_decl> ::= <function_decl> | <variable_decl>
@@ -58,9 +58,11 @@
 //! <args>           ::= <assignment> ("," <assignment>)*        ← カンマ演算子と区別
 //! ```
 
-/// 型（Chapter 11, 12, 14, 16）。
+/// 型（Chapter 11, 12, 14, 16, 17）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
+    /// `void` — 不完全型。関数の戻り値やキャスト先として使用（Chapter 17）
+    Void,
     /// `char` / `signed char` — 1バイト符号付き整数（Chapter 16）
     Char,
     /// `unsigned char` — 1バイト符号なし整数（Chapter 16）
@@ -82,6 +84,17 @@ pub enum Type {
 }
 
 impl Type {
+    /// void 型かどうかを判定する（Chapter 17）。
+    pub fn is_void(&self) -> bool {
+        matches!(self, Type::Void)
+    }
+
+    /// 不完全型かどうかを判定する（Chapter 17）。
+    /// void は不完全型。将来 struct 等で拡張可能。
+    pub fn is_incomplete(&self) -> bool {
+        matches!(self, Type::Void)
+    }
+
     /// 符号なし型かどうかを判定する。
     pub fn is_unsigned(&self) -> bool {
         matches!(self, Type::UInt | Type::ULong | Type::UChar)
@@ -116,8 +129,10 @@ impl Type {
     }
 
     /// 型のバイトサイズを返す。
+    /// void は不完全型のためサイズを持たない（呼び出し前にチェックすること）。
     pub fn size(&self) -> usize {
         match self {
+            Type::Void => panic!("void has no size"),
             Type::Char | Type::UChar => 1,
             Type::Int | Type::UInt => 4,
             Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
@@ -196,8 +211,8 @@ pub struct Declaration {
 /// Chapter 8 で while, do-while, for, break, continue が追加された。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
-    /// `return <expr>;` — 式の値を返して関数を終了する
-    Return(Expr),
+    /// `return <expr>;` or `return;` — 式の値を返して関数を終了する（Chapter 17: void 関数で値なし return）
+    Return(Option<Expr>),
     /// `<expr>;` — 式文（副作用のために式を評価する）
     Expression(Expr),
     /// `;` — 空文（何もしない）

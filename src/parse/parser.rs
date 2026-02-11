@@ -148,6 +148,7 @@ impl<'a> Parser<'a> {
             self.tokens[self.pos].kind,
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
             | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
+            | TokenKind::KwVoid
         )
     }
 
@@ -166,6 +167,7 @@ impl<'a> Parser<'a> {
         let mut has_signed = false;
         let mut has_double = false;
         let mut has_char = false;
+        let mut has_void = false;
         let mut count = 0;
 
         loop {
@@ -173,6 +175,21 @@ impl<'a> Parser<'a> {
                 break;
             }
             match &self.peek()?.kind {
+                TokenKind::KwVoid => {
+                    if has_void {
+                        return Err(CompileError::ParseError(
+                            "duplicate 'void' type specifier".to_string()
+                        ));
+                    }
+                    if has_int || has_long || has_unsigned || has_signed || has_double || has_char {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'void' with other type specifiers".to_string()
+                        ));
+                    }
+                    has_void = true;
+                    self.advance()?;
+                    count += 1;
+                }
                 TokenKind::KwInt => {
                     if has_int {
                         return Err(CompileError::ParseError(
@@ -187,6 +204,11 @@ impl<'a> Parser<'a> {
                     if has_char {
                         return Err(CompileError::ParseError(
                             "cannot combine 'char' with 'int'".to_string()
+                        ));
+                    }
+                    if has_void {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'void' with other type specifiers".to_string()
                         ));
                     }
                     has_int = true;
@@ -209,6 +231,11 @@ impl<'a> Parser<'a> {
                             "cannot combine 'char' with 'long'".to_string()
                         ));
                     }
+                    if has_void {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'void' with other type specifiers".to_string()
+                        ));
+                    }
                     has_long = true;
                     self.advance()?;
                     count += 1;
@@ -227,6 +254,11 @@ impl<'a> Parser<'a> {
                     if has_double {
                         return Err(CompileError::ParseError(
                             "cannot combine 'double' with other type specifiers".to_string()
+                        ));
+                    }
+                    if has_void {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'void' with other type specifiers".to_string()
                         ));
                     }
                     has_unsigned = true;
@@ -249,6 +281,11 @@ impl<'a> Parser<'a> {
                             "cannot combine 'double' with other type specifiers".to_string()
                         ));
                     }
+                    if has_void {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'void' with other type specifiers".to_string()
+                        ));
+                    }
                     has_signed = true;
                     self.advance()?;
                     count += 1;
@@ -259,7 +296,7 @@ impl<'a> Parser<'a> {
                             "duplicate 'double' type specifier".to_string()
                         ));
                     }
-                    if has_int || has_long || has_unsigned || has_signed || has_char {
+                    if has_int || has_long || has_unsigned || has_signed || has_char || has_void {
                         return Err(CompileError::ParseError(
                             "cannot combine 'double' with other type specifiers".to_string()
                         ));
@@ -274,7 +311,7 @@ impl<'a> Parser<'a> {
                             "duplicate 'char' type specifier".to_string()
                         ));
                     }
-                    if has_int || has_long || has_double {
+                    if has_int || has_long || has_double || has_void {
                         return Err(CompileError::ParseError(
                             "cannot combine 'char' with other type specifiers".to_string()
                         ));
@@ -295,7 +332,9 @@ impl<'a> Parser<'a> {
         }
 
         // 型の解決
-        if has_double {
+        if has_void {
+            Ok(Type::Void)
+        } else if has_double {
             Ok(Type::Double)
         } else if has_char {
             if has_unsigned {
@@ -419,7 +458,11 @@ impl<'a> Parser<'a> {
             // 関数宣言/定義
             self.expect(&TokenKind::OpenParen)?;
 
-            let params = if self.peek()?.kind == TokenKind::KwVoid {
+            let params = if self.peek()?.kind == TokenKind::KwVoid
+                && self.pos + 1 < self.tokens.len()
+                && self.tokens[self.pos + 1].kind == TokenKind::CloseParen
+            {
+                // `(void)` — no parameters
                 self.advance()?;
                 Vec::new()
             } else {
@@ -478,7 +521,7 @@ impl<'a> Parser<'a> {
     fn parse_block_item(&mut self) -> Result<BlockItem> {
         match &self.peek()?.kind {
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
-            | TokenKind::KwDouble | TokenKind::KwChar
+            | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
             | TokenKind::KwStatic | TokenKind::KwExtern => {
                 Ok(BlockItem::Declaration(self.parse_declaration()?))
             }
@@ -512,9 +555,15 @@ impl<'a> Parser<'a> {
         match &self.peek()?.kind {
             TokenKind::KwReturn => {
                 self.advance()?;
-                let expr = self.parse_expr()?;
-                self.expect(&TokenKind::Semicolon)?;
-                Ok(Statement::Return(expr))
+                // Chapter 17: `return;` (no expression) for void functions
+                if self.peek()?.kind == TokenKind::Semicolon {
+                    self.advance()?;
+                    Ok(Statement::Return(None))
+                } else {
+                    let expr = self.parse_expr()?;
+                    self.expect(&TokenKind::Semicolon)?;
+                    Ok(Statement::Return(Some(expr)))
+                }
             }
             TokenKind::Semicolon => {
                 self.advance()?;
@@ -578,7 +627,7 @@ impl<'a> Parser<'a> {
                 // for-init: 宣言 or 式文 or 空文
                 let init = match &self.peek()?.kind {
                     TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
-                    | TokenKind::KwDouble | TokenKind::KwChar
+                    | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
                     | TokenKind::KwStatic | TokenKind::KwExtern => {
                         ForInit::Declaration(self.parse_declaration()?)
                     }
@@ -871,6 +920,7 @@ impl<'a> Parser<'a> {
                 next,
                 TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
                 | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
+                | TokenKind::KwVoid
             ) {
                 self.advance()?; // consume '('
                 let base_type = self.parse_type_specifier()?;
@@ -909,6 +959,7 @@ impl<'a> Parser<'a> {
                         next,
                         TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
                         | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
+                        | TokenKind::KwVoid
                     ) {
                         self.advance()?; // consume '('
                         let base_type = self.parse_type_specifier()?;
@@ -929,7 +980,7 @@ impl<'a> Parser<'a> {
                     TokenKind::Bang => UnaryOp::Not,
                     _ => unreachable!(),
                 };
-                let inner = self.parse_unary()?;
+                let inner = self.parse_cast()?;
                 Ok(Expr::Unary(op, Box::new(inner)))
             }
             TokenKind::PlusPlus | TokenKind::MinusMinus => {
@@ -1115,7 +1166,7 @@ mod tests {
         assert_eq!(func.name, "main");
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Constant(2)))]
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Constant(2))))]
         );
     }
 
@@ -1129,7 +1180,7 @@ mod tests {
         };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Constant(0)))]
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Constant(0))))]
         );
     }
 
@@ -1157,7 +1208,7 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(5)))))]
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(5))))))]
         );
     }
 
@@ -1169,7 +1220,7 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Complement, Box::new(Expr::Constant(0)))))]
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(UnaryOp::Complement, Box::new(Expr::Constant(0))))))]
         );
     }
 
@@ -1181,7 +1232,7 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Unary(UnaryOp::Not, Box::new(Expr::Constant(1)))))]
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(UnaryOp::Not, Box::new(Expr::Constant(1))))))]
         );
     }
 
@@ -1193,10 +1244,10 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Unary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(
                 UnaryOp::PreDecrement,
                 Box::new(Expr::Constant(5))
-            )))]
+            ))))]
         );
     }
 
@@ -1208,10 +1259,10 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Unary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(
                 UnaryOp::Negate,
                 Box::new(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(5))))
-            )))]
+            ))))]
         );
     }
 
@@ -1223,10 +1274,10 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Unary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(
                 UnaryOp::Complement,
                 Box::new(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(3))))
-            )))]
+            ))))]
         );
     }
 
@@ -1240,11 +1291,11 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::Add,
                 Box::new(Expr::Constant(1)),
                 Box::new(Expr::Constant(2)),
-            )))]
+            ))))]
         );
     }
 
@@ -1256,7 +1307,7 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::Add,
                 Box::new(Expr::Constant(1)),
                 Box::new(Expr::Binary(
@@ -1264,7 +1315,7 @@ mod tests {
                     Box::new(Expr::Constant(2)),
                     Box::new(Expr::Constant(3)),
                 )),
-            )))]
+            ))))]
         );
     }
 
@@ -1276,7 +1327,7 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::Subtract,
                 Box::new(Expr::Binary(
                     BinaryOp::Subtract,
@@ -1284,7 +1335,7 @@ mod tests {
                     Box::new(Expr::Constant(2)),
                 )),
                 Box::new(Expr::Constant(3)),
-            )))]
+            ))))]
         );
     }
 
@@ -1296,7 +1347,7 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::Multiply,
                 Box::new(Expr::Binary(
                     BinaryOp::Add,
@@ -1304,7 +1355,7 @@ mod tests {
                     Box::new(Expr::Constant(2)),
                 )),
                 Box::new(Expr::Constant(3)),
-            )))]
+            ))))]
         );
     }
 
@@ -1316,11 +1367,11 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::Divide,
                 Box::new(Expr::Constant(7)),
                 Box::new(Expr::Constant(2)),
-            )))]
+            ))))]
         );
     }
 
@@ -1332,11 +1383,11 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::Remainder,
                 Box::new(Expr::Constant(7)),
                 Box::new(Expr::Constant(2)),
-            )))]
+            ))))]
         );
     }
 
@@ -1350,11 +1401,11 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::LessThan,
                 Box::new(Expr::Constant(1)),
                 Box::new(Expr::Constant(2)),
-            )))]
+            ))))]
         );
     }
 
@@ -1366,11 +1417,11 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::Equal,
                 Box::new(Expr::Constant(1)),
                 Box::new(Expr::Constant(2)),
-            )))]
+            ))))]
         );
     }
 
@@ -1382,11 +1433,11 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::LogicalAnd,
                 Box::new(Expr::Constant(1)),
                 Box::new(Expr::Constant(2)),
-            )))]
+            ))))]
         );
     }
 
@@ -1398,11 +1449,11 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::LogicalOr,
                 Box::new(Expr::Constant(1)),
                 Box::new(Expr::Constant(2)),
-            )))]
+            ))))]
         );
     }
 
@@ -1414,7 +1465,7 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::LogicalAnd,
                 Box::new(Expr::Binary(
                     BinaryOp::LessThan,
@@ -1426,7 +1477,7 @@ mod tests {
                     Box::new(Expr::Constant(3)),
                     Box::new(Expr::Constant(1)),
                 )),
-            )))]
+            ))))]
         );
     }
 
@@ -1438,7 +1489,7 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::GreaterThan,
                 Box::new(Expr::Binary(
                     BinaryOp::Add,
@@ -1446,7 +1497,7 @@ mod tests {
                     Box::new(Expr::Constant(3)),
                 )),
                 Box::new(Expr::Constant(4)),
-            )))]
+            ))))]
         );
     }
 
@@ -1458,7 +1509,7 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::LogicalOr,
                 Box::new(Expr::Constant(1)),
                 Box::new(Expr::Binary(
@@ -1466,7 +1517,7 @@ mod tests {
                     Box::new(Expr::Constant(2)),
                     Box::new(Expr::Constant(3)),
                 )),
-            )))]
+            ))))]
         );
     }
 
@@ -1478,11 +1529,11 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Binary(
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                 BinaryOp::Add,
                 Box::new(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(1)))),
                 Box::new(Expr::Constant(2)),
-            )))]
+            ))))]
         );
     }
 
@@ -1503,7 +1554,7 @@ mod tests {
                     init: Some(Expr::Constant(5)),
                     storage_class: None,
                 }),
-                BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Var("a".to_string())))),
             ]
         );
     }
@@ -1523,7 +1574,7 @@ mod tests {
                     init: None,
                     storage_class: None,
                 }),
-                BlockItem::Statement(Statement::Return(Expr::Constant(0))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Constant(0)))),
             ]
         );
     }
@@ -1546,7 +1597,7 @@ mod tests {
                 BlockItem::Statement(Statement::Expression(
                     Expr::Assign(Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(10)))
                 )),
-                BlockItem::Statement(Statement::Return(Expr::Var("a".to_string()))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Var("a".to_string())))),
             ]
         );
     }
@@ -1572,11 +1623,11 @@ mod tests {
                     init: Some(Expr::Constant(3)),
                     storage_class: None,
                 }),
-                BlockItem::Statement(Statement::Return(Expr::Binary(
+                BlockItem::Statement(Statement::Return(Some(Expr::Binary(
                     BinaryOp::Add,
                     Box::new(Expr::Var("a".to_string())),
                     Box::new(Expr::Var("b".to_string())),
-                ))),
+                )))),
             ]
         );
     }
@@ -1591,7 +1642,7 @@ mod tests {
             *func.body.as_ref().unwrap(),
             vec![
                 BlockItem::Statement(Statement::Null),
-                BlockItem::Statement(Statement::Return(Expr::Constant(0))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Constant(0)))),
             ]
         );
     }
@@ -1608,7 +1659,7 @@ mod tests {
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
                 condition: Expr::Constant(1),
-                then_branch: Box::new(Statement::Return(Expr::Constant(2))),
+                then_branch: Box::new(Statement::Return(Some(Expr::Constant(2)))),
                 else_branch: None,
             })]
         );
@@ -1624,8 +1675,8 @@ mod tests {
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
                 condition: Expr::Constant(0),
-                then_branch: Box::new(Statement::Return(Expr::Constant(2))),
-                else_branch: Some(Box::new(Statement::Return(Expr::Constant(3)))),
+                then_branch: Box::new(Statement::Return(Some(Expr::Constant(2)))),
+                else_branch: Some(Box::new(Statement::Return(Some(Expr::Constant(3))))),
             })]
         );
     }
@@ -1638,11 +1689,11 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Expr::Conditional {
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Conditional {
                 condition: Box::new(Expr::Constant(1)),
                 then_expr: Box::new(Expr::Constant(5)),
                 else_expr: Box::new(Expr::Constant(10)),
-            }))]
+            })))]
         );
     }
 
@@ -1663,7 +1714,7 @@ mod tests {
                         storage_class: None,
                     }),
                 ])),
-                BlockItem::Statement(Statement::Return(Expr::Constant(0))),
+                BlockItem::Statement(Statement::Return(Some(Expr::Constant(0)))),
             ]
         );
     }
@@ -1681,8 +1732,8 @@ mod tests {
                 condition: Expr::Constant(0),
                 then_branch: Box::new(Statement::If {
                     condition: Expr::Constant(0),
-                    then_branch: Box::new(Statement::Return(Expr::Constant(1))),
-                    else_branch: Some(Box::new(Statement::Return(Expr::Constant(2)))),
+                    then_branch: Box::new(Statement::Return(Some(Expr::Constant(1)))),
+                    else_branch: Some(Box::new(Statement::Return(Some(Expr::Constant(2))))),
                 }),
                 else_branch: None,
             })]
@@ -1713,9 +1764,9 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             func.body.as_ref().unwrap()[1],
-            BlockItem::Statement(Statement::Return(
+            BlockItem::Statement(Statement::Return(Some(
                 Expr::Unary(UnaryOp::PreIncrement, Box::new(Expr::Var("a".to_string())))
-            ))
+            )))
         );
     }
 
@@ -1727,9 +1778,9 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             func.body.as_ref().unwrap()[1],
-            BlockItem::Statement(Statement::Return(
+            BlockItem::Statement(Statement::Return(Some(
                 Expr::PostfixIncrement(Box::new(Expr::Var("a".to_string())))
-            ))
+            )))
         );
     }
 
@@ -1741,9 +1792,9 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             func.body.as_ref().unwrap()[1],
-            BlockItem::Statement(Statement::Return(
+            BlockItem::Statement(Statement::Return(Some(
                 Expr::PostfixDecrement(Box::new(Expr::Var("a".to_string())))
-            ))
+            )))
         );
     }
 
@@ -1755,7 +1806,7 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
-            BlockItem::Statement(Statement::Return(
+            BlockItem::Statement(Statement::Return(Some(
                 Expr::Binary(
                     BinaryOp::Comma,
                     Box::new(Expr::Binary(
@@ -1765,7 +1816,7 @@ mod tests {
                     )),
                     Box::new(Expr::Constant(3)),
                 )
-            ))
+            )))
         );
     }
 
@@ -1820,7 +1871,7 @@ mod tests {
             func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::While {
                 condition: Expr::Constant(1),
-                body: Box::new(Statement::Return(Expr::Constant(0))),
+                body: Box::new(Statement::Return(Some(Expr::Constant(0)))),
             })
         );
     }
@@ -1926,9 +1977,9 @@ mod tests {
         assert_eq!(f1.name, "main");
         assert_eq!(
             f1.body.as_ref().unwrap()[0],
-            BlockItem::Statement(Statement::Return(
+            BlockItem::Statement(Statement::Return(Some(
                 Expr::FunctionCall("five".to_string(), vec![])
-            ))
+            )))
         );
     }
 
@@ -1943,12 +1994,12 @@ mod tests {
         assert_eq!(f0.params, vec![(Type::Int, "a".to_string()), (Type::Int, "b".to_string())]);
         assert_eq!(
             f1.body.as_ref().unwrap()[0],
-            BlockItem::Statement(Statement::Return(
+            BlockItem::Statement(Statement::Return(Some(
                 Expr::FunctionCall("add".to_string(), vec![
                     Expr::Constant(2),
                     Expr::Constant(3),
                 ])
-            ))
+            )))
         );
     }
 
@@ -1986,13 +2037,13 @@ mod tests {
         let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             f1.body.as_ref().unwrap()[0],
-            BlockItem::Statement(Statement::Return(
+            BlockItem::Statement(Statement::Return(Some(
                 Expr::FunctionCall("foo".to_string(), vec![
                     Expr::Constant(1),
                     Expr::Constant(2),
                     Expr::Constant(3),
                 ])
-            ))
+            )))
         );
     }
 
@@ -2134,9 +2185,9 @@ mod tests {
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         assert_eq!(
             func.body.as_ref().unwrap()[2],
-            BlockItem::Statement(Statement::Return(
+            BlockItem::Statement(Statement::Return(Some(
                 Expr::Dereref(Box::new(Expr::Var("p".to_string())))
-            ))
+            )))
         );
     }
 
@@ -2188,9 +2239,9 @@ mod tests {
         assert_eq!(func.params, vec![(Type::Pointer(Box::new(Type::Int)), "p".to_string())]);
         assert_eq!(
             func.body.as_ref().unwrap()[0],
-            BlockItem::Statement(Statement::Return(
+            BlockItem::Statement(Statement::Return(Some(
                 Expr::Dereref(Box::new(Expr::Var("p".to_string())))
-            ))
+            )))
         );
     }
 
