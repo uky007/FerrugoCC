@@ -2,13 +2,19 @@
 //!
 //! "Writing a C Compiler" (Nora Sandler) に沿って開発する学習用Cコンパイラ。
 //!
+//! # パイプライン
+//! ```text
+//! source.c → [Lex] → [Parse] → [Validate] → [TackyGen] → [Optimize] → [Codegen] → [Emit] → source.s → [gcc] → binary
+//! ```
+//!
 //! # 使い方
 //! ```text
 //! ferrugocc <source.c>              # フルコンパイル（実行ファイル生成）
 //! ferrugocc --lex <source.c>        # 字句解析のみ
 //! ferrugocc --parse <source.c>      # 構文解析まで
 //! ferrugocc --validate <source.c>   # 型検査まで
-//! ferrugocc --codegen <source.c>    # コード生成まで
+//! ferrugocc --tacky <source.c>      # TACKY IR 生成まで
+//! ferrugocc --codegen <source.c>    # コード生成まで（Asm AST 構築）
 //! ferrugocc -S <source.c>           # アセンブリ出力まで（.s ファイル生成）
 //! ```
 
@@ -16,6 +22,7 @@ mod error;
 mod lex;
 mod parse;
 mod typecheck;
+mod tacky;
 mod codegen;
 mod emit;
 mod driver;
@@ -46,6 +53,10 @@ struct Cli {
     #[arg(long)]
     validate: bool,
 
+    /// Run through TACKY IR generation
+    #[arg(long)]
+    tacky: bool,
+
     /// Run through code generation
     #[arg(long)]
     codegen: bool,
@@ -68,6 +79,8 @@ fn main() {
         Stage::Parse
     } else if cli.validate {
         Stage::Validate
+    } else if cli.tacky {
+        Stage::Tacky
     } else if cli.codegen {
         Stage::Codegen
     } else if cli.emit_asm {

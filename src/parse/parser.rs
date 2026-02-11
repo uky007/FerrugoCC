@@ -9,19 +9,24 @@
 //! - `peek()` で先読み、`advance()` で消費、`expect()` で特定トークンを要求
 //! - 各 `parse_*` メソッドが文法規則に対応
 //!
-//! # 対応する文法（Chapter 15）
+//! # 対応する文法（Chapter 18）
 //! ```text
 //! <program>        ::= <top_level_decl>*
-//! <top_level_decl> ::= <function_decl> | <variable_decl>
+//! <top_level_decl> ::= <function_decl> | <variable_decl> | <struct_decl>
 //! <function_decl>  ::= <storage_class>? <type> <declarator> "(" <params> ")" ( "{" <block>* "}" | ";" )
-//! <variable_decl>  ::= <storage_class>? <type> <declarator> ("=" <expr>)? ";"
+//! <variable_decl>  ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ";"
+//! <struct_decl>    ::= "struct" <identifier> ("{" <member_decl>* "}")? ";"  ← Ch18
+//! <member_decl>    ::= <type> <declarator> ";"                ← Ch18: 構造体メンバ
 //! <declarator>     ::= "*"* <identifier> ("[" <int> "]")?      ← Ch15: 配列宣言子
 //! <type>           ::= <type_specifier>+
 //! <type_specifier> ::= "int" | "long" | "signed" | "unsigned" | "double"
+//!                    | "char" | "void"                         ← Ch16, Ch17
+//!                    | "struct" <identifier> ("{" <member_decl>* "}")?  ← Ch18
 //! <storage_class>  ::= "static" | "extern"
 //! <params>         ::= "void" | <type> <declarator> ("," <type> <declarator>)*
 //! <block_item>     ::= <statement> | <declaration>
-//! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <assignment>)? ";"
+//! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ";"
+//! <initializer>    ::= <assignment> | "{" <assignment> ("," <assignment>)* ","? "}"  ← Ch18
 //! <statement>      ::= "return" <exp> ";"
 //!                    | <exp> ";"
 //!                    | ";"
@@ -50,8 +55,9 @@
 //!                    | "sizeof" "(" <type> <abstract_declarator> ")"
 //!                    | <postfix>
 //! <unary_op>       ::= "-" | "~" | "!" | "++" | "--" | "*" | "&"
-//! <postfix>        ::= <primary> ("++" | "--" | "[" <exp> "]")* ← Ch15: 配列添字
+//! <postfix>        ::= <primary> ("++" | "--" | "[" <exp> "]" | "." <id> | "->" <id>)*  ← Ch15, Ch18
 //! <primary>        ::= <int> | <long> | <uint> | <ulong> | <double>
+//!                    | <char> | <string>                       ← Ch16
 //!                    | <identifier> ("(" <args>? ")")?
 //!                    | "(" <exp> ")"
 //! <args>           ::= <assignment> ("," <assignment>)*
@@ -59,7 +65,8 @@
 
 use crate::error::{CompileError, Result};
 use crate::lex::{Token, TokenKind};
-use super::ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit, StorageClass, TopLevelDecl, Type};
+use std::collections::HashMap;
+use super::ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit, StorageClass, TopLevelDecl, Type, MemberDecl};
 
 /// トークン列を構文解析して AST に変換する。
 ///
@@ -81,11 +88,13 @@ pub fn parse(tokens: &[Token]) -> Result<Program> {
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    /// 構造体タグテーブル（Chapter 18）。タグ名 → メンバリスト。
+    struct_tags: HashMap<String, Vec<MemberDecl>>,
 }
 
 impl<'a> Parser<'a> {
     fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, struct_tags: HashMap::new() }
     }
 
     /// 現在位置のトークンを消費せずに参照する（先読み）。
@@ -148,7 +157,7 @@ impl<'a> Parser<'a> {
             self.tokens[self.pos].kind,
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
             | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
-            | TokenKind::KwVoid
+            | TokenKind::KwVoid | TokenKind::KwStruct
         )
     }
 
@@ -320,6 +329,14 @@ impl<'a> Parser<'a> {
                     self.advance()?;
                     count += 1;
                 }
+                TokenKind::KwStruct => {
+                    if count > 0 {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'struct' with other type specifiers".to_string()
+                        ));
+                    }
+                    return self.parse_struct_type();
+                }
                 _ => break,
             }
         }
@@ -354,6 +371,50 @@ impl<'a> Parser<'a> {
         } else {
             // has_int or has_signed (or both)
             Ok(Type::Int)
+        }
+    }
+
+    /// 構造体型のパース（Chapter 18）。
+    ///
+    /// `struct tag { members }` または `struct tag` を解析する。
+    fn parse_struct_type(&mut self) -> Result<Type> {
+        self.advance()?; // consume 'struct'
+
+        // タグ名を取得
+        let tag = match &self.peek()?.kind {
+            TokenKind::Identifier(name) => {
+                let name = name.clone();
+                self.advance()?;
+                name
+            }
+            _ => {
+                return Err(CompileError::ParseError(
+                    "expected struct tag name".to_string()
+                ));
+            }
+        };
+
+        // '{' があれば構造体定義
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBrace {
+            self.advance()?; // consume '{'
+
+            let mut members = Vec::new();
+            while self.peek()?.kind != TokenKind::CloseBrace {
+                let member_base = self.parse_type_specifier()?;
+                let (member_type, member_name) = self.parse_declarator(member_base)?;
+                self.expect(&TokenKind::Semicolon)?;
+                members.push(MemberDecl { name: member_name, member_type });
+            }
+            self.expect(&TokenKind::CloseBrace)?;
+
+            // タグテーブルに登録
+            self.struct_tags.insert(tag.clone(), members.clone());
+
+            Ok(Type::Struct { tag, members })
+        } else {
+            // 前方参照: タグテーブルからメンバ情報を取得
+            let members = self.struct_tags.get(&tag).cloned().unwrap_or_default();
+            Ok(Type::Struct { tag, members })
         }
     }
 
@@ -451,6 +512,18 @@ impl<'a> Parser<'a> {
     fn parse_top_level_decl(&mut self) -> Result<TopLevelDecl> {
         let storage_class = self.parse_storage_class()?;
         let base_type = self.parse_type_specifier()?;
+
+        // Chapter 18: `struct tag { ... };` — 構造体定義のみ（変数宣言なし）
+        if base_type.is_struct() && self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
+            self.advance()?; // consume ';'
+            return Ok(TopLevelDecl::Variable(Declaration {
+                name: String::new(),
+                var_type: base_type,
+                init: None,
+                storage_class,
+            }));
+        }
+
         let (decl_type, name) = self.parse_declarator(base_type)?;
 
         // `(` → 関数、`=`/`;` → 変数
@@ -506,7 +579,12 @@ impl<'a> Parser<'a> {
             // 変数宣言
             let init = if self.peek()?.kind == TokenKind::Assign {
                 self.advance()?;
-                Some(self.parse_assignment()?)
+                // Chapter 18: 複合初期化子 `{ expr, expr, ... }`
+                if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBrace {
+                    Some(self.parse_compound_init()?)
+                } else {
+                    Some(self.parse_assignment()?)
+                }
             } else {
                 None
             };
@@ -522,7 +600,16 @@ impl<'a> Parser<'a> {
         match &self.peek()?.kind {
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
             | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
-            | TokenKind::KwStatic | TokenKind::KwExtern => {
+            | TokenKind::KwStatic | TokenKind::KwExtern
+            | TokenKind::KwStruct => {
+                // Chapter 18: struct 定義のみ（変数なし）の場合も処理
+                if self.peek()?.kind == TokenKind::KwStruct {
+                    // `struct tag { ... };` — 変数宣言なしの構造体定義の可能性
+                    // 先読み: struct tag { → 構造体定義の可能性
+                    // struct tag id → 変数宣言
+                    // struct tag; → 前方宣言
+                    // 宣言として処理すれば全てカバーされるので parse_declaration に委譲
+                }
                 Ok(BlockItem::Declaration(self.parse_declaration()?))
             }
             _ => {
@@ -535,17 +622,53 @@ impl<'a> Parser<'a> {
     fn parse_declaration(&mut self) -> Result<Declaration> {
         let storage_class = self.parse_storage_class()?;
         let base_type = self.parse_type_specifier()?;
+
+        // Chapter 18: `struct tag { ... };` — 構造体定義のみ（変数宣言なし）
+        if base_type.is_struct() && self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
+            self.advance()?; // consume ';'
+            // ダミー宣言を返す（コード生成では無視される）
+            return Ok(Declaration {
+                name: String::new(),
+                var_type: base_type,
+                init: None,
+                storage_class,
+            });
+        }
+
         let (var_type, name) = self.parse_declarator(base_type)?;
 
         let init = if self.peek()?.kind == TokenKind::Assign {
             self.advance()?; // consume '='
-            Some(self.parse_assignment()?)
+            // Chapter 18: 複合初期化子 `{ expr, expr, ... }`
+            if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBrace {
+                Some(self.parse_compound_init()?)
+            } else {
+                Some(self.parse_assignment()?)
+            }
         } else {
             None
         };
 
         self.expect(&TokenKind::Semicolon)?;
         Ok(Declaration { name, var_type, init, storage_class })
+    }
+
+    /// 複合初期化子のパース（Chapter 18）。
+    ///
+    /// `{ expr, expr, ... }` をパースする。末尾カンマを許容する。
+    fn parse_compound_init(&mut self) -> Result<Expr> {
+        self.expect(&TokenKind::OpenBrace)?;
+        let mut inits = Vec::new();
+        while self.peek()?.kind != TokenKind::CloseBrace {
+            inits.push(self.parse_assignment()?);
+            if self.peek()?.kind == TokenKind::Comma {
+                self.advance()?; // consume ','
+            } else {
+                break;
+            }
+        }
+        self.expect(&TokenKind::CloseBrace)?;
+        Ok(Expr::CompoundInit(inits))
     }
 
     /// `<statement> ::= "return" <exp> ";" | <exp> ";" | ";"
@@ -628,7 +751,8 @@ impl<'a> Parser<'a> {
                 let init = match &self.peek()?.kind {
                     TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
                     | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
-                    | TokenKind::KwStatic | TokenKind::KwExtern => {
+                    | TokenKind::KwStatic | TokenKind::KwExtern
+                    | TokenKind::KwStruct => {
                         ForInit::Declaration(self.parse_declaration()?)
                     }
                     TokenKind::Semicolon => {
@@ -920,7 +1044,7 @@ impl<'a> Parser<'a> {
                 next,
                 TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
                 | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
-                | TokenKind::KwVoid
+                | TokenKind::KwVoid | TokenKind::KwStruct
             ) {
                 self.advance()?; // consume '('
                 let base_type = self.parse_type_specifier()?;
@@ -959,7 +1083,7 @@ impl<'a> Parser<'a> {
                         next,
                         TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
                         | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
-                        | TokenKind::KwVoid
+                        | TokenKind::KwVoid | TokenKind::KwStruct
                     ) {
                         self.advance()?; // consume '('
                         let base_type = self.parse_type_specifier()?;
@@ -1036,6 +1160,30 @@ impl<'a> Parser<'a> {
                         Box::new(expr),
                         Box::new(index),
                     )));
+                }
+                // Chapter 18: `.member` — 直接メンバアクセス
+                TokenKind::Dot => {
+                    self.advance()?; // consume '.'
+                    let member_token = self.advance()?;
+                    let member_name = match &member_token.kind {
+                        TokenKind::Identifier(name) => name.clone(),
+                        other => return Err(CompileError::ParseError(format!(
+                            "expected member name after '.', got {:?}", other
+                        ))),
+                    };
+                    expr = Expr::Dot(Box::new(expr), member_name);
+                }
+                // Chapter 18: `->member` — ポインタメンバアクセス → `(*ptr).member` に脱糖
+                TokenKind::Arrow => {
+                    self.advance()?; // consume '->'
+                    let member_token = self.advance()?;
+                    let member_name = match &member_token.kind {
+                        TokenKind::Identifier(name) => name.clone(),
+                        other => return Err(CompileError::ParseError(format!(
+                            "expected member name after '->', got {:?}", other
+                        ))),
+                    };
+                    expr = Expr::Dot(Box::new(Expr::Dereref(Box::new(expr))), member_name);
                 }
                 _ => break,
             }

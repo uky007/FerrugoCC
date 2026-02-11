@@ -1,4 +1,4 @@
-//! 型検査ロジック（Chapter 11, 12, 13, 14, 15, 16, 17）
+//! 型検査ロジック（Chapter 11, 12, 13, 14, 15, 16, 17, 18）
 //!
 //! AST を in-place で変換し、以下を行う:
 //! 1. シンボルテーブル構築: 変数と関数の型情報を記録
@@ -45,13 +45,22 @@
 //! - void ポインタの間接参照禁止（`*void_ptr`）
 //! - `(void)expr` キャスト: 式の値を捨てる
 //! - ternary: 両辺 void → void、片方のみ void → エラー
+//!
+//! # Chapter 18: 構造体
+//! - `Dot(inner, member)`: inner が `Struct` でなければエラー → メンバの型を返す
+//! - `CompoundInit`: 式コンテキストではエラー（宣言時のみ使用可能）
+//! - 左辺値拡張: `Dot(inner, _)` は inner が左辺値なら左辺値
+//! - 構造体代入: 同じタグ名の構造体同士のみ代入可能（バイト単位コピー）
+//! - 複合初期化子: メンバ数一致・各メンバの型互換チェック（暗黙キャスト挿入）
+//! - 不完全型チェック: 前方宣言のみの構造体の変数宣言・sizeof を禁止
+//! - 構造体への算術・比較演算は全てエラー
 
 use std::collections::HashMap;
 
 use crate::error::{CompileError, Result};
 use crate::parse::ast::{
     Program, TopLevelDecl, FunctionDecl, BlockItem, Declaration, Statement, Expr,
-    UnaryOp, BinaryOp, ForInit, StorageClass, Type,
+    UnaryOp, BinaryOp, ForInit, Type, struct_member_offset,
 };
 
 /// シンボルの型情報。
@@ -84,10 +93,22 @@ fn typecheck_file_scope_var(
     decl: &mut Declaration,
     symbols: &mut HashMap<String, SymbolType>,
 ) -> Result<()> {
+    // 構造体定義のみ（変数名なし）の場合はスキップ（Chapter 18）
+    if decl.name.is_empty() {
+        return Ok(());
+    }
+
     // void 型の変数宣言は禁止（不完全型）
     if decl.var_type.is_void() {
         return Err(CompileError::TypeError(format!(
             "variable '{}' declared void", decl.name
+        )));
+    }
+
+    // 不完全な構造体型の変数宣言は禁止（Chapter 18）
+    if decl.var_type.is_incomplete() {
+        return Err(CompileError::TypeError(format!(
+            "variable '{}' has incomplete type", decl.name
         )));
     }
 
@@ -155,10 +176,22 @@ fn typecheck_local_declaration(
     decl: &mut Declaration,
     symbols: &mut HashMap<String, SymbolType>,
 ) -> Result<()> {
+    // 構造体定義のみ（変数名なし）の場合はスキップ（Chapter 18）
+    if decl.name.is_empty() {
+        return Ok(());
+    }
+
     // void 型の変数宣言は禁止（不完全型）
     if decl.var_type.is_void() {
         return Err(CompileError::TypeError(format!(
             "variable '{}' declared void", decl.name
+        )));
+    }
+
+    // 不完全な構造体型の変数宣言は禁止（Chapter 18）
+    if decl.var_type.is_incomplete() {
+        return Err(CompileError::TypeError(format!(
+            "variable '{}' has incomplete type", decl.name
         )));
     }
 
@@ -172,14 +205,59 @@ fn typecheck_local_declaration(
     }
 
     if let Some(init) = &mut decl.init {
+        // Chapter 18: 複合初期化子の検査
+        if let Expr::CompoundInit(inits) = init {
+            if let Type::Struct { ref members, .. } = decl.var_type {
+                if inits.len() != members.len() {
+                    return Err(CompileError::TypeError(format!(
+                        "wrong number of initializers for struct (expected {}, got {})",
+                        members.len(), inits.len()
+                    )));
+                }
+                for (init_expr, member) in inits.iter_mut().zip(members.iter()) {
+                    let init_type = typecheck_expr(init_expr, symbols)?;
+                    if init_type != member.member_type {
+                        let old = std::mem::replace(init_expr, Expr::Constant(0));
+                        *init_expr = Expr::Cast {
+                            target_type: member.member_type.clone(),
+                            source_type: init_type,
+                            expr: Box::new(old),
+                        };
+                    }
+                }
+                return Ok(());
+            } else {
+                return Err(CompileError::TypeError(
+                    "compound initializer used with non-struct type".to_string()
+                ));
+            }
+        }
+
         let init_type = typecheck_expr(init, symbols)?;
+
+        // 構造体同士の代入: 同じタグ名の構造体のみ
+        if decl.var_type.is_struct() && init_type.is_struct() {
+            if decl.var_type != init_type {
+                return Err(CompileError::TypeError(
+                    "incompatible struct types in initialization".to_string()
+                ));
+            }
+            return Ok(());
+        }
+
         // 右辺の型が左辺と異なる場合、キャストを挿入
         if init_type != decl.var_type {
+            // 構造体への非構造体代入は禁止
+            if decl.var_type.is_struct() || init_type.is_struct() {
+                return Err(CompileError::TypeError(
+                    "incompatible types in initialization".to_string()
+                ));
+            }
             // void ポインタの暗黙変換: void* ↔ 任意のポインタ型
             if decl.var_type.is_pointer() && !init_type.is_pointer() && !is_null_pointer_constant(init) {
-                return Err(CompileError::TypeError(format!(
-                    "cannot initialize pointer with non-pointer non-null value"
-                )));
+                return Err(CompileError::TypeError(
+                    "cannot initialize pointer with non-pointer non-null value".to_string()
+                ));
             }
             // ポインタ同士だが型が異なる場合: void* が関与する場合のみ許可
             if decl.var_type.is_pointer() && init_type.is_pointer()
@@ -417,6 +495,15 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     "void expression used as right-hand side of assignment".to_string()
                 ));
             }
+            // 構造体同士の代入: 同じタグ名のみ（Chapter 18）
+            if lhs_type.is_struct() || rhs_type.is_struct() {
+                if lhs_type != rhs_type {
+                    return Err(CompileError::TypeError(
+                        "incompatible struct types in assignment".to_string()
+                    ));
+                }
+                return Ok(lhs_type);
+            }
             if rhs_type != lhs_type {
                 // void ポインタ暗黙変換チェック
                 if lhs_type.is_pointer() && rhs_type.is_pointer()
@@ -546,6 +633,11 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     if inner_type.is_pointer() {
                         return Err(CompileError::TypeError(
                             "unary negation '-' cannot be applied to pointer type".to_string()
+                        ));
+                    }
+                    if inner_type.is_struct() {
+                        return Err(CompileError::TypeError(
+                            "unary negation '-' cannot be applied to struct type".to_string()
                         ));
                     }
                     // Integer promotion: Char/UChar → Int（Chapter 16）
@@ -922,9 +1014,9 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
 
         // sizeof（Chapter 15）: 型チェック時に定数に解決
         Expr::SizeOfType(ty) => {
-            if ty.is_void() {
+            if ty.is_incomplete() {
                 return Err(CompileError::TypeError(
-                    "sizeof applied to incomplete type 'void'".to_string()
+                    "sizeof applied to incomplete type".to_string()
                 ));
             }
             let size = ty.size() as u64;
@@ -942,14 +1034,39 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
             } else {
                 typecheck_expr(inner, symbols)?
             };
-            if actual_type.is_void() {
+            if actual_type.is_incomplete() {
                 return Err(CompileError::TypeError(
-                    "sizeof applied to expression of incomplete type 'void'".to_string()
+                    "sizeof applied to expression of incomplete type".to_string()
                 ));
             }
             let size = actual_type.size() as u64;
             *expr = Expr::ConstantULong(size);
             Ok(Type::ULong)
+        }
+
+        // Chapter 18: メンバアクセス
+        Expr::Dot(inner, member_name) => {
+            let inner_type = typecheck_expr(inner, symbols)?;
+            match &inner_type {
+                Type::Struct { members, tag } => {
+                    match struct_member_offset(members, member_name) {
+                        Some((_, member_type)) => Ok(member_type),
+                        None => Err(CompileError::TypeError(format!(
+                            "struct '{}' has no member '{}'", tag, member_name
+                        ))),
+                    }
+                }
+                _ => Err(CompileError::TypeError(
+                    "member access on non-struct type".to_string()
+                )),
+            }
+        }
+
+        // Chapter 18: 複合初期化子（宣言コンテキスト外で使われた場合）
+        Expr::CompoundInit(_) => {
+            Err(CompileError::TypeError(
+                "compound initializer not allowed in expression context".to_string()
+            ))
         }
     }
 }
@@ -999,11 +1116,16 @@ fn is_array_var(expr: &Expr, symbols: &HashMap<String, SymbolType>) -> bool {
     false
 }
 
-/// 左辺値（lvalue）判定（Chapter 14）。
+/// 左辺値（lvalue）判定（Chapter 14, 18）。
 ///
-/// 左辺値は代入の左辺に置ける式。変数参照とポインタ間接参照が該当する。
+/// 左辺値は代入の左辺に置ける式。変数参照、ポインタ間接参照、構造体メンバアクセスが該当する。
 fn is_lvalue(expr: &Expr) -> bool {
-    matches!(expr, Expr::Var(_) | Expr::Dereref(_))
+    match expr {
+        Expr::Var(_) | Expr::Dereref(_) => true,
+        // Chapter 18: Dot(inner, _) は inner が lvalue なら lvalue
+        Expr::Dot(inner, _) => is_lvalue(inner),
+        _ => false,
+    }
 }
 
 /// void ポインタの判定。

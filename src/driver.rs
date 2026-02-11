@@ -5,16 +5,13 @@
 //!
 //! # パイプライン
 //! ```text
-//! source.c → [Lex] → [Parse] → [Validate] → [Codegen] → [Emit] → source.s → [gcc] → source
+//! source.c → [Lex] → [Parse] → [Validate] → [TackyGen] → [Optimize] → [Codegen] → [Emit] → source.s → [gcc] → source
 //! ```
 //!
-//! Chapter 11 で型検査パス（Validate）が Parse と Codegen の間に追加された。
-//! Chapter 12 で `unsigned int`/`unsigned long` に対応。
-//! Chapter 13 で `double`（浮動小数点）に対応。
-//! Chapter 14 でポインタ型（`int *`, `double **` 等）に対応。
-//! Chapter 15 で配列型（`int arr[10]`）、ポインタ算術、`sizeof` に対応。
+//! Chapter 19 で TACKY IR（三アドレスコード中間表現）パスが追加された。
+//! C AST → TACKY IR → 最適化 → Asm AST というパイプラインになる。
 //!
-//! `--lex`, `--parse`, `--validate`, `--codegen`, `-S` フラグで途中のステージで停止できる。
+//! `--lex`, `--parse`, `--validate`, `--tacky`, `--codegen`, `-S` フラグで途中のステージで停止できる。
 //! これは本のテストスイートとの互換性のために必要。
 
 use std::path::Path;
@@ -24,6 +21,7 @@ use crate::error::{CompileError, Result};
 use crate::lex;
 use crate::parse;
 use crate::typecheck;
+use crate::tacky;
 use crate::codegen;
 use crate::emit;
 
@@ -36,6 +34,8 @@ pub enum Stage {
     Parse,
     /// 型検査まで
     Validate,
+    /// TACKY IR 生成まで
+    Tacky,
     /// コード生成まで（アセンブリ AST 構築が成功すれば OK）
     Codegen,
     /// アセンブリ出力まで（.s ファイルを書き出す）
@@ -69,13 +69,22 @@ pub fn run(source_path: &Path, stage: Stage) -> Result<()> {
         return Ok(());
     }
 
-    // ── Stage 3: コード生成 ──
-    let asm_program = codegen::generate(&program)?;
+    // ── Stage 3: TACKY IR 生成 ──
+    let tacky_program = tacky::generate_tacky(&program)?;
+    if stage == Stage::Tacky {
+        return Ok(());
+    }
+
+    // ── Stage 3.5: TACKY 最適化 ──
+    let tacky_program = tacky::optimize(tacky_program);
+
+    // ── Stage 4: コード生成（TACKY → Asm AST）──
+    let asm_program = codegen::generate(&tacky_program)?;
     if stage == Stage::Codegen {
         return Ok(());
     }
 
-    // ── Stage 4: アセンブリ出力 ──
+    // ── Stage 5: アセンブリ出力 ──
     let asm_text = emit::emit(&asm_program)?;
     let asm_path = source_path.with_extension("s");
     std::fs::write(&asm_path, &asm_text)?;
@@ -84,7 +93,7 @@ pub fn run(source_path: &Path, stage: Stage) -> Result<()> {
         return Ok(());
     }
 
-    // ── Stage 5: アセンブル＆リンク ──
+    // ── Stage 6: アセンブル＆リンク ──
     // gcc に .s ファイルを渡してバイナリを生成する。
     // gcc は内部で as（アセンブラ）と ld（リンカ）を呼び出す。
     let output_path = source_path.with_extension("");
