@@ -10,8 +10,9 @@
 //!    - `!` → `!=` or `!`
 //!    - `<` → `<=` or `<`  /  `>` → `>=` or `>`
 //!    - `=` → `==` or `=`  /  `&` → `&&` or `&`  /  `|` → `||`
-//!    - `+` → `++`, `+=`, or `+`  /  `-` → `--`, `-=`, or `-`  (Chapter 7)
+//!    - `+` → `++`, `+=`, or `+`  /  `-` → `--`, `-=`, `->`, or `-`  (Chapter 7, 18)
 //!    - `*` → `*=` or `*`  /  `/` → `/=` or `/`  /  `%` → `%=` or `%`  (Chapter 7)
+//!    - `.` → `Dot`（数字が後続しなければ。浮動小数点リテラルとの区別）(Chapter 18)
 //! 3. 数字で始まる → 連続する数字を読み取り、サフィックスに応じて変換
 //!    - `L`/`l` サフィックス → `LongLiteral` に変換（Chapter 11）
 //!    - サフィックスなし → `IntLiteral` に変換
@@ -154,6 +155,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                     Some((TokenKind::MinusMinus, 2))
                 } else if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
                     Some((TokenKind::MinusAssign, 2))
+                } else if pos + 1 < bytes.len() && bytes[pos + 1] == b'>' {
+                    Some((TokenKind::Arrow, 2))
                 } else {
                     Some((TokenKind::Minus, 1))
                 }
@@ -187,6 +190,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             });
             pos += len;
             column += len;
+            continue;
+        }
+
+        // ── Chapter 18: `.` 演算子 ──
+        // `.` の後に数字が続かない場合はメンバアクセス演算子
+        if b == b'.' && !(pos + 1 < bytes.len() && bytes[pos + 1].is_ascii_digit()) {
+            tokens.push(Token {
+                kind: TokenKind::Dot,
+                span: Span { offset: pos, len: 1, line, column },
+            });
+            pos += 1;
+            column += 1;
             continue;
         }
 
@@ -494,6 +509,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "double"   => TokenKind::KwDouble,
                 "sizeof"   => TokenKind::KwSizeof,
                 "char"     => TokenKind::KwChar,
+                "struct"   => TokenKind::KwStruct,
                 _        => TokenKind::Identifier(text.to_string()),
             };
             tokens.push(Token {

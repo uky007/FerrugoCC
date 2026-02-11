@@ -72,6 +72,8 @@ pub enum TokenKind {
     KwSizeof,
     /// `char` キーワード — 文字型（Chapter 16）
     KwChar,
+    /// `struct` キーワード — 構造体型（Chapter 18）
+    KwStruct,
 
     // ── 演算子 ──（Chapter 2 で追加）
     /// `-` — 単項マイナス / 二項減算
@@ -154,6 +156,10 @@ pub enum TokenKind {
     OpenBracket,
     /// `]` — 配列添字（Chapter 15）
     CloseBracket,
+    /// `.` — メンバアクセス演算子（Chapter 18）
+    Dot,
+    /// `->` — ポインタメンバアクセス演算子（Chapter 18）
+    Arrow,
 }
 
 /// ソースコード中の位置情報。

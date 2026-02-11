@@ -3,19 +3,24 @@
 //! パーサーが構築する木構造を定義する。
 //! 各ノードはCの文法要素に対応し、ソースの構造を忠実に表現する。
 //!
-//! # 現在サポートする文法（Chapter 17）
+//! # 現在サポートする文法（Chapter 18）
 //! ```text
 //! <program>        ::= <top_level_decl>*                      ← Ch10: 関数+変数
-//! <top_level_decl> ::= <function_decl> | <variable_decl>
+//! <top_level_decl> ::= <function_decl> | <variable_decl> | <struct_decl>
 //! <function_decl>  ::= <storage_class>? <type> <declarator> "(" <params> ")" ( "{" <block>* "}" | ";" )
-//! <variable_decl>  ::= <storage_class>? <type> <declarator> ("=" <expr>)? ";"
+//! <variable_decl>  ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ";"
+//! <struct_decl>    ::= "struct" <identifier> "{" <member_decl>* "}" ";"  ← Ch18: 構造体定義のみ
+//! <member_decl>    ::= <type> <declarator> ";"                ← Ch18: 構造体メンバ
 //! <declarator>     ::= "*"* <identifier> ("[" <int> "]")?      ← Ch15: 配列宣言子
 //! <type>           ::= <type_specifier>+                       ← Ch12: 任意順の型指定子
 //! <type_specifier> ::= "int" | "long" | "signed" | "unsigned" | "double"
+//!                    | "char" | "void"                         ← Ch16, Ch17
+//!                    | "struct" <identifier> ("{" <member_decl>* "}")?  ← Ch18: 構造体型
 //! <storage_class>  ::= "static" | "extern"
 //! <params>         ::= "void" | <type> <declarator> ("," <type> <declarator>)*
 //! <block_item>     ::= <statement> | <declaration>
-//! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <assignment>)? ";"
+//! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ";"
+//! <initializer>    ::= <assignment> | "{" <assignment> ("," <assignment>)* ","? "}"  ← Ch18: 複合初期化子
 //! <statement>      ::= "return" <exp> ";"
 //!                    | <exp> ";"
 //!                    | ";"
@@ -46,8 +51,9 @@
 //!                    | "sizeof" "(" <type> <abstract_declarator> ")"  ← Ch15: sizeof(型)
 //!                    | <postfix>
 //! <unary_op>       ::= "-" | "~" | "!" | "++" | "--" | "*" | "&"  ← Ch14: 間接参照・アドレス取得
-//! <postfix>        ::= <primary> ("++" | "--" | "[" <exp> "]")*  ← Ch15: 配列添字
+//! <postfix>        ::= <primary> ("++" | "--" | "[" <exp> "]" | "." <id> | "->" <id>)*  ← Ch15, Ch18
 //! <primary>        ::= <int> | <long> | <uint> | <ulong> | <double>
+//!                    | <char> | <string>                       ← Ch16: 文字・文字列リテラル
 //!                    | <identifier> ("(" <args>? ")")?         ← Ch9: 関数呼び出し
 //!                    | "(" <exp> ")"
 //! <int>            ::= [0-9]+                                  ← 整数リテラル
@@ -58,7 +64,7 @@
 //! <args>           ::= <assignment> ("," <assignment>)*        ← カンマ演算子と区別
 //! ```
 
-/// 型（Chapter 11, 12, 14, 16, 17）。
+/// 型（Chapter 11, 12, 14, 16, 17, 18）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     /// `void` — 不完全型。関数の戻り値やキャスト先として使用（Chapter 17）
@@ -81,6 +87,16 @@ pub enum Type {
     Pointer(Box<Type>),
     /// 配列型（Chapter 15）。`int[10]` → `Array(Box::new(Int), 10)`
     Array(Box<Type>, usize),
+    /// 構造体型（Chapter 18）。tag 名とメンバリストを保持。
+    /// members が空の場合は前方宣言（不完全型）。
+    Struct { tag: String, members: Vec<MemberDecl> },
+}
+
+/// 構造体メンバ宣言（Chapter 18）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberDecl {
+    pub name: String,
+    pub member_type: Type,
 }
 
 impl Type {
@@ -89,10 +105,19 @@ impl Type {
         matches!(self, Type::Void)
     }
 
-    /// 不完全型かどうかを判定する（Chapter 17）。
-    /// void は不完全型。将来 struct 等で拡張可能。
+    /// 構造体型かどうかを判定する（Chapter 18）。
+    pub fn is_struct(&self) -> bool {
+        matches!(self, Type::Struct { .. })
+    }
+
+    /// 不完全型かどうかを判定する（Chapter 17, 18）。
+    /// void は不完全型。前方宣言のみの構造体（members が空）も不完全型。
     pub fn is_incomplete(&self) -> bool {
-        matches!(self, Type::Void)
+        match self {
+            Type::Void => true,
+            Type::Struct { members, .. } => members.is_empty(),
+            _ => false,
+        }
     }
 
     /// 符号なし型かどうかを判定する。
@@ -137,8 +162,71 @@ impl Type {
             Type::Int | Type::UInt => 4,
             Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
             Type::Array(elem, count) => elem.size() * count,
+            Type::Struct { members, tag } => {
+                if members.is_empty() {
+                    panic!("incomplete struct '{}' has no size", tag);
+                }
+                struct_size(members)
+            }
         }
     }
+
+    /// 型のアラインメントを返す（Chapter 18）。
+    pub fn alignment(&self) -> usize {
+        match self {
+            Type::Void => panic!("void has no alignment"),
+            Type::Char | Type::UChar => 1,
+            Type::Int | Type::UInt => 4,
+            Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
+            Type::Array(elem, _) => elem.alignment(),
+            Type::Struct { members, tag } => {
+                if members.is_empty() {
+                    panic!("incomplete struct '{}' has no alignment", tag);
+                }
+                struct_alignment(members)
+            }
+        }
+    }
+}
+
+/// 構造体のアラインメントを計算する（最大メンバアラインメント）。
+pub fn struct_alignment(members: &[MemberDecl]) -> usize {
+    members.iter().map(|m| m.member_type.alignment()).max().unwrap_or(1)
+}
+
+/// 構造体の全体サイズを計算する（パディング込み）。
+pub fn struct_size(members: &[MemberDecl]) -> usize {
+    let mut offset = 0;
+    for m in members {
+        let align = m.member_type.alignment();
+        // メンバのアラインメントに合わせる
+        if offset % align != 0 {
+            offset += align - (offset % align);
+        }
+        offset += m.member_type.size();
+    }
+    // 全体サイズを構造体アラインメントの倍数に切り上げ
+    let struct_align = struct_alignment(members);
+    if offset % struct_align != 0 {
+        offset += struct_align - (offset % struct_align);
+    }
+    offset
+}
+
+/// 構造体メンバのオフセットと型を取得する。
+pub fn struct_member_offset(members: &[MemberDecl], name: &str) -> Option<(usize, Type)> {
+    let mut offset = 0;
+    for m in members {
+        let align = m.member_type.alignment();
+        if offset % align != 0 {
+            offset += align - (offset % align);
+        }
+        if m.name == name {
+            return Some((offset, m.member_type.clone()));
+        }
+        offset += m.member_type.size();
+    }
+    None
 }
 
 /// ストレージクラス指定子（Chapter 10）。
@@ -317,6 +405,11 @@ pub enum Expr {
     SizeOfExpr(Box<Expr>),
     /// 文字列リテラル（Chapter 16）。コード生成で .rodata ラベルに変換される。
     StringLiteral(String),
+    /// メンバアクセス（Chapter 18）。`expr.member`。
+    /// `ptr->member` はパーサーで `Dot(Dereref(ptr), member)` に脱糖される。
+    Dot(Box<Expr>, String),
+    /// 複合初期化子（Chapter 18）。`{ expr, expr, ... }`
+    CompoundInit(Vec<Expr>),
 }
 
 /// 単項演算子の種類（Chapter 2）。
