@@ -18,6 +18,10 @@ cargo run -- --parse source.c    # 構文解析まで
 cargo run -- --validate source.c # 型検査まで
 cargo run -- --codegen source.c  # コード生成まで
 cargo run -- -S source.c         # アセンブリ出力（.s ファイル生成）
+
+# 難読化コンパイル（最適化の代わりに難読化パスを適用）
+cargo run -- --fobfuscate source.c
+cargo run -- --fobfuscate -S source.c  # 難読化アセンブリ出力
 ```
 
 アセンブリから実行ファイルへの変換には、システムに `gcc` が必要。
@@ -575,6 +579,12 @@ Chapter 7 では以下の機能を追加した:
 └────┬─────┘
      ▼
 ┌──────────┐
+│ Optimize  │  src/tacky/         TACKY IR 最適化パス（デフォルト）
+│    or     │  optimize.rs        定数畳み込み・コピー伝播・不要コード除去
+│ Obfuscate │  obfuscate.rs       難読化パス（--fobfuscate 指定時）
+└────┬─────┘                      定数間接化・ジャンクコード・不透明述語・CFF
+     ▼
+┌──────────┐
 │ Codegen   │  src/codegen/       TACKY IR → Asm(Pseudo) に変換
 │          │  generator.rs
 └────┬─────┘
@@ -622,28 +632,26 @@ Chapter 7 では以下の機能を追加した:
 ### コード難読化（Anti-Reverse Engineering）
 
 コンパイラレベルでの難読化変換。元のソースコードと等価だが、逆コンパイル・逆アセンブル時に解析を困難にする。
-`-fobfuscate` フラグ等で有効化し、TACKY IR またはアセンブリ AST 上で変換パスとして実装する想定。
+`--fobfuscate` フラグで有効化し、TACKY IR 上の変換パスとして実装。最適化パスの代わりに4つの難読化パスを順に適用する。
 
-- [ ] **ジャンクコード挿入**: 実行結果に影響しない命令列（dead code）を挿入し、逆コンパイラの解析量を増やす
-- [ ] **不透明述語（Opaque Predicates）**: 常に真/偽だがコンパイル時には判定困難な条件分岐を挿入し、制御フローを複雑化する
+- [x] **定数の間接化（Constant Encoding）**: 即値をランタイム計算に置換（`42` → `6 * 7`, `0` → `a - a` 等）。Double は精度問題のためスキップ
+- [x] **ジャンクコード挿入**: 4命令ごとに実行結果に影響しない dead computation（3命令）を挿入し、逆コンパイラの解析量を増やす
+- [x] **不透明述語（Opaque Predicates）**: `x*(x+1) % 2 == 0`（常に真）の条件分岐で値生成命令を囲み、制御フローを複雑化する
   ```c
   // 元: return x + 1;
   // 難読化後（等価）:
-  if ((y * y) % 2 == 0) { return x + 1; } else { return x - 99; }  // else は到達不能
+  if ((y * (y + 1)) % 2 == 0) { return x + 1; } else { fake_code; }  // else は到達不能
   ```
-- [ ] **制御フロー平坦化（Control Flow Flattening）**: 関数内の基本ブロックを switch-dispatch ループに変換し、元の制御構造を隠蔽する
+- [x] **制御フロー平坦化（Control Flow Flattening）**: 関数内の基本ブロックを state 変数 + dispatch ループに変換し、元の制御構造を隠蔽する
   ```c
   // 元: if (a) { ... } else { ... }; return r;
-  // 変換後: while(1) { switch(state) { case 0: ... state=1; break; case 1: ... } }
+  // 変換後: state=0; dispatch: switch(state) { case 0: ... state=1; goto dispatch; ... }
   ```
-- [ ] **定数の間接化（Constant Encoding）**: 即値をランタイム計算に置換（`42` → `(6 * 7)`, `0` → `(x ^ x)` 等）
+
+未実装の候補:
 - [ ] **文字列暗号化**: 文字列リテラルを暗号化して `.rodata` に配置し、使用時にランタイムで復号する
 - [ ] **関数のインライン展開/アウトライン化**: 関数境界を攪乱し、元の関数構造の復元を困難にする
 - [ ] **レジスタ割り当ての撹乱**: 不要なレジスタ間 mov や register rotation を挿入し、データフロー解析を妨害する
-
-実装レイヤーの候補:
-- **TACKY IR 上**: 不透明述語、制御フロー平坦化、定数の間接化（高レベル変換）
-- **Assembly AST 上**: ジャンクコード挿入、レジスタ撹乱、文字列暗号化（低レベル変換）
 
 ### コード品質
 

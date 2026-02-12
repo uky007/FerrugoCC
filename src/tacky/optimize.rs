@@ -421,7 +421,7 @@ fn dead_store_elimination(instrs: Vec<TackyInstruction>, var_types: &std::collec
 
     // Dead temps: defined but never used (and only temp variables)
     let dead_temps: HashSet<String> = defined.iter()
-        .filter(|d| d.starts_with("tmp.") && !used.contains(*d))
+        .filter(|d| (d.starts_with("tmp.") || d.starts_with("obf_tmp.")) && !used.contains(*d))
         .cloned()
         .collect();
 

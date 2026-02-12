@@ -48,7 +48,7 @@ pub enum Stage {
 ///
 /// `source_path` のCソースファイルを読み込み、`stage` で指定された
 /// ステージまで処理を行う。
-pub fn run(source_path: &Path, stage: Stage) -> Result<()> {
+pub fn run(source_path: &Path, stage: Stage, obfuscate: bool) -> Result<()> {
     let source = std::fs::read_to_string(source_path)?;
 
     // ── Stage 1: 字句解析 ──
@@ -75,8 +75,12 @@ pub fn run(source_path: &Path, stage: Stage) -> Result<()> {
         return Ok(());
     }
 
-    // ── Stage 3.5: TACKY 最適化 ──
-    let tacky_program = tacky::optimize(tacky_program);
+    // ── Stage 3.5: TACKY 最適化 or 難読化 ──
+    let tacky_program = if obfuscate {
+        tacky::obfuscate(tacky_program)
+    } else {
+        tacky::optimize(tacky_program)
+    };
 
     // ── Stage 4: コード生成（TACKY → Asm AST）──
     let asm_program = codegen::generate(&tacky_program)?;

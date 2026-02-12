@@ -65,6 +65,10 @@ struct Cli {
     #[arg(short = 'S')]
     emit_asm: bool,
 
+    /// Enable code obfuscation (instead of optimization)
+    #[arg(long = "fobfuscate")]
+    obfuscate: bool,
+
     /// Input C source file
     source: PathBuf,
 }
@@ -89,7 +93,7 @@ fn main() {
         Stage::Full
     };
 
-    if let Err(e) = driver::run(&cli.source, stage) {
+    if let Err(e) = driver::run(&cli.source, stage, cli.obfuscate) {
         eprintln!("ferrugocc: {e}");
         process::exit(1);
     }
