@@ -400,11 +400,8 @@ fn get_written_var(instr: &TackyInstruction) -> Option<String> {
 }
 
 /// Dead Store Elimination — 無用コード除去
-fn dead_store_elimination(instrs: Vec<TackyInstruction>, var_types: &std::collections::HashMap<String, crate::parse::ast::Type>) -> Vec<TackyInstruction> {
+fn dead_store_elimination(instrs: Vec<TackyInstruction>, _var_types: &std::collections::HashMap<String, crate::parse::ast::Type>) -> Vec<TackyInstruction> {
     use std::collections::HashSet;
-
-    // Simple backward pass: track live variables
-    let mut live: HashSet<String> = HashSet::new();
 
     // All non-temp variables are considered live (conservative)
     // Only eliminate temp variables that are never read

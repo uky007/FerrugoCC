@@ -121,6 +121,12 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             continue;
         }
 
+        // .section .rodata → .section __TEXT,__const (macOS)
+        if trimmed == ".section .rodata" {
+            result.push("    .section __TEXT,__const".to_string());
+            continue;
+        }
+
         // .globl シンボル → .globl _シンボル
         if let Some(rest) = trimmed.strip_prefix(".globl ") {
             let sym = rest.trim();
@@ -212,6 +218,19 @@ fn test_function_call() {
         int main(void) { return add(20, 22); }
         "#,
         42,
+    );
+}
+
+#[test]
+fn test_string_literal() {
+    assert_obfuscation_preserves_behavior(
+        r#"
+        int main(void) {
+            char *s = "Hello";
+            return s[0];
+        }
+        "#,
+        72, // 'H' == 72
     );
 }
 

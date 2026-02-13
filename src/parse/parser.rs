@@ -149,6 +149,7 @@ impl<'a> Parser<'a> {
     ///
     /// 現在位置のトークンが型指定子キーワードかどうかを返す。
     /// キャスト式 `(type)expr` と括弧式 `(expr)` の区別に使う。
+    #[allow(dead_code)]
     fn is_type_keyword(&self) -> bool {
         if self.pos >= self.tokens.len() {
             return false;

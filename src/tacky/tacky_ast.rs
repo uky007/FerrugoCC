@@ -22,6 +22,7 @@ pub struct TackyProgram {
 
 /// TACKY 関数定義
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TackyFunction {
     pub name: String,
     pub global: bool,
@@ -34,6 +35,7 @@ pub struct TackyFunction {
 
 /// TACKY 三アドレスコード命令
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum TackyInstruction {
     /// `return val`
     Return(TackyVal),
@@ -94,6 +96,7 @@ pub enum TackyVal {
 
 /// TACKY 定数
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum TackyConst {
     Int(i32),
     Long(i64),
@@ -154,6 +157,8 @@ pub enum TackyStaticInit {
     DoubleInit(f64),
     ZeroInit(usize),
     StringInit(String, usize),
+    /// バイト配列初期値（難読化された文字列等）
+    ByteArrayInit(Vec<u8>),
 }
 
 /// 読み取り専用の静的定数

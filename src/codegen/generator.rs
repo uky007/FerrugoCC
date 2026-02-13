@@ -133,6 +133,7 @@ fn convert_static_init(init: &TackyStaticInit) -> StaticInit {
         TackyStaticInit::DoubleInit(v) => StaticInit::DoubleInit(*v),
         TackyStaticInit::ZeroInit(n) => StaticInit::ZeroInit(*n),
         TackyStaticInit::StringInit(s, n) => StaticInit::StringInit(s.clone(), *n),
+        TackyStaticInit::ByteArrayInit(bytes) => StaticInit::ByteArrayInit(bytes.clone()),
     }
 }
 
@@ -693,7 +694,8 @@ fn generate_instruction(
 
             let large_label = format!(".Lul2d_large{}", const_counter);
             let end_label = format!(".Lul2d_end{}", const_counter);
-            const_counter += 1;
+            #[allow(unused_assignments)]
+            { const_counter += 1; }
 
             instrs.push(Instruction::Mov {
                 asm_type: AsmType::Quadword,

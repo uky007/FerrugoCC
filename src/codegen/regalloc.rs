@@ -5,16 +5,17 @@
 //!
 //! # パイプライン
 //! ```text
-//! Asm(Pseudo) → [liveness] → [interference graph] → [graph coloring] → [replace] → Asm(Reg+Stack)
-//!              → [fixup] → Asm(valid) → [emit]
+//! Asm(Pseudo) → [liveness] → [interference graph] → [coalescing] → [graph coloring]
+//!             → [replace] → Asm(Reg+Stack) → [fixup] → Asm(valid) → [emit]
 //! ```
 //!
 //! # アルゴリズム
 //! 1. 生存解析（後方データフロー解析）で各命令時点の生存変数集合を計算
-//! 2. 干渉グラフを構築（同時に生存する変数間に辺を張る）
-//! 3. Chaitin-Briggs アルゴリズムでグラフ彩色（レジスタ割り当て）
-//! 4. Pseudo オペランドを Register または Stack(spill) に置換
-//! 5. Fixup パスで無効なオペランド組み合わせを修正 + プロローグ/エピローグ生成
+//! 2. 干渉グラフを構築（同時に生存する変数間に辺を張る、Mov 辺も収集）
+//! 3. 保守的 Coalescing（Briggs/George 基準で Mov 辺のノードを合体、冗長 Mov 除去）
+//! 4. Chaitin-Briggs アルゴリズムでグラフ彩色（レジスタ割り当て）
+//! 5. Pseudo オペランドを Register または Stack(spill) に置換
+//! 6. Fixup パスで無効なオペランド組み合わせを修正 + プロローグ/エピローグ生成
 
 use std::collections::{HashMap, HashSet};
 
@@ -51,18 +52,24 @@ pub fn allocate_registers(
     // 生存解析
     let liveness = analyze_liveness(&instructions);
 
-    // 整数グラフの彩色
+    // 整数グラフの彩色（coalescing 付き）
     let gp_coloring = if !gp_pseudos.is_empty() {
-        let graph = build_interference_graph(&instructions, &liveness, &gp_pseudos, false);
-        color_graph(graph, &GP_ALLOCATABLE, false)
+        let mut graph = build_interference_graph(&instructions, &liveness, &gp_pseudos, false);
+        let merge_map = coalesce_graph(&mut graph, GP_ALLOCATABLE.len());
+        let mut coloring = color_graph(graph, &GP_ALLOCATABLE, false);
+        apply_merge_map(&mut coloring, &merge_map);
+        coloring
     } else {
         ColoringResult { assignments: HashMap::new() }
     };
 
-    // XMM グラフの彩色
+    // XMM グラフの彩色（coalescing 付き）
     let xmm_coloring = if !xmm_pseudos.is_empty() {
-        let graph = build_interference_graph(&instructions, &liveness, &xmm_pseudos, true);
-        color_graph(graph, &XMM_ALLOCATABLE, true)
+        let mut graph = build_interference_graph(&instructions, &liveness, &xmm_pseudos, true);
+        let merge_map = coalesce_graph(&mut graph, XMM_ALLOCATABLE.len());
+        let mut coloring = color_graph(graph, &XMM_ALLOCATABLE, true);
+        apply_merge_map(&mut coloring, &merge_map);
+        coloring
     } else {
         ColoringResult { assignments: HashMap::new() }
     };
@@ -439,12 +446,15 @@ fn analyze_liveness(instructions: &[Instruction]) -> LivenessInfo {
 struct InterferenceGraph {
     /// 隣接リスト
     adj: HashMap<GraphNode, HashSet<GraphNode>>,
+    /// Mov 辺: coalescing 候補の (src, dst) ペア
+    mov_edges: Vec<(GraphNode, GraphNode)>,
 }
 
 impl InterferenceGraph {
     fn new() -> Self {
         InterferenceGraph {
             adj: HashMap::new(),
+            mov_edges: Vec::new(),
         }
     }
 
@@ -532,9 +542,198 @@ fn build_interference_graph(
                 graph.add_edge(d, v);
             }
         }
+
+        // Mov 辺を収集（coalescing 候補 — plain Mov のみ）
+        // Movsx/Truncate 等の型変換命令は値が変わるため coalescing しない。
+        if matches!(instr, Instruction::Mov { .. }) {
+            if let Some(ref src_node) = mov_src {
+                for d in &defined {
+                    if is_relevant(src_node) && is_relevant(d) && src_node != d {
+                        graph.mov_edges.push((src_node.clone(), d.clone()));
+                    }
+                }
+            }
+        }
     }
 
     graph
+}
+
+// ────────────────────────────────────────────
+// 内部: Coalescing（レジスタ合体）
+// ────────────────────────────────────────────
+
+/// merge_map のルートを辿って正規ノードを返す。
+fn find_canonical(merge_map: &HashMap<GraphNode, GraphNode>, node: &GraphNode) -> GraphNode {
+    let mut current = node.clone();
+    while let Some(next) = merge_map.get(&current) {
+        current = next.clone();
+    }
+    current
+}
+
+/// 保守的 coalescing（Briggs + George 基準）を実行する。
+///
+/// Mov 辺で結ばれた非干渉ノードペアを合体し、冗長な Mov を除去する。
+/// - **Briggs 基準** (Pseudo-Pseudo): 合体ノードの degree ≥ k な隣接ノード数 < k なら安全
+/// - **George 基準** (Pseudo-HardReg): Pseudo の全隣接ノード t が、
+///   HardReg とも干渉するか degree < k なら安全
+///
+/// 戻り値の merge_map は「このノードはあのノードに合体された」を記録する。
+fn coalesce_graph(
+    graph: &mut InterferenceGraph,
+    k: usize,
+) -> HashMap<GraphNode, GraphNode> {
+    let mut merge_map: HashMap<GraphNode, GraphNode> = HashMap::new();
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mov_edges_snapshot = graph.mov_edges.clone();
+
+        for (raw_u, raw_v) in &mov_edges_snapshot {
+            let u = find_canonical(&merge_map, raw_u);
+            let v = find_canonical(&merge_map, raw_v);
+            if u == v { continue; } // 既に合体済み
+
+            // 干渉していたら合体不可
+            if graph.adj.get(&u).map_or(false, |s| s.contains(&v)) {
+                continue;
+            }
+
+            let can_coalesce = match (&u, &v) {
+                // Pseudo-Pseudo: Briggs 基準
+                (GraphNode::Pseudo(_), GraphNode::Pseudo(_)) => {
+                    briggs_criterion(graph, &u, &v, k)
+                }
+                // Pseudo-HardReg: George 基準（Pseudo を HardReg に合体）
+                (GraphNode::Pseudo(_), GraphNode::HardReg(_)) => {
+                    george_criterion(graph, &u, &v, k)
+                }
+                (GraphNode::HardReg(_), GraphNode::Pseudo(_)) => {
+                    george_criterion(graph, &v, &u, k)
+                }
+                // HardReg-HardReg: 同じレジスタでない限り合体不可
+                (GraphNode::HardReg(_), GraphNode::HardReg(_)) => false,
+            };
+
+            if can_coalesce {
+                // HardReg は常に into 側（正規ノード、グラフに残る）
+                let (from, into) = match (&u, &v) {
+                    (GraphNode::HardReg(_), _) => (v.clone(), u.clone()),
+                    (_, GraphNode::HardReg(_)) => (u.clone(), v.clone()),
+                    _ => (u.clone(), v.clone()),
+                };
+                merge_nodes(graph, &from, &into);
+                merge_map.insert(from, into);
+                changed = true;
+                break; // グラフが変更されたので再走査
+            }
+        }
+    }
+
+    merge_map
+}
+
+/// Briggs 基準: 合体後のノードが k 未満の高次隣接ノードを持つか判定。
+fn briggs_criterion(
+    graph: &InterferenceGraph,
+    u: &GraphNode,
+    v: &GraphNode,
+    k: usize,
+) -> bool {
+    let u_neighbors = graph.adj.get(u).cloned().unwrap_or_default();
+    let v_neighbors = graph.adj.get(v).cloned().unwrap_or_default();
+    let mut merged_neighbors: HashSet<GraphNode> = u_neighbors;
+    merged_neighbors.extend(v_neighbors);
+    merged_neighbors.remove(u);
+    merged_neighbors.remove(v);
+
+    let high_degree_count = merged_neighbors.iter()
+        .filter(|n| match n {
+            GraphNode::HardReg(_) => true, // precolored は常に高次
+            GraphNode::Pseudo(_) => graph.adj.get(n).map_or(0, |s| s.len()) >= k,
+        })
+        .count();
+
+    high_degree_count < k
+}
+
+/// George 基準: u (Pseudo) の全隣接ノードが v (HardReg) とも干渉するか低次か判定。
+fn george_criterion(
+    graph: &InterferenceGraph,
+    u: &GraphNode, // Pseudo
+    v: &GraphNode, // HardReg
+    k: usize,
+) -> bool {
+    let u_neighbors = graph.adj.get(u).cloned().unwrap_or_default();
+    let v_neighbors = graph.adj.get(v).cloned().unwrap_or_default();
+
+    for t in &u_neighbors {
+        if t == v { continue; }
+        if v_neighbors.contains(t) { continue; } // t は v とも干渉 → OK
+        match t {
+            GraphNode::HardReg(_) => return false, // HardReg が v と非干渉 → 不安全
+            GraphNode::Pseudo(_) => {
+                if graph.adj.get(t).map_or(0, |s| s.len()) >= k {
+                    return false; // 高次 Pseudo が v と非干渉 → 不安全
+                }
+            }
+        }
+    }
+    true
+}
+
+/// ノード `from` を `into` に合体する。隣接リストを更新。
+fn merge_nodes(
+    graph: &mut InterferenceGraph,
+    from: &GraphNode,
+    into: &GraphNode,
+) {
+    let from_neighbors = graph.adj.remove(from).unwrap_or_default();
+
+    for n in &from_neighbors {
+        if n == into { continue; }
+        // n の隣接リストから from を削除し into を追加
+        if let Some(s) = graph.adj.get_mut(n) {
+            s.remove(from);
+            s.insert(into.clone());
+        }
+        // into の隣接リストに n を追加
+        if let Some(s) = graph.adj.get_mut(into) {
+            s.insert(n.clone());
+        }
+    }
+
+    // into の隣接リストから from を削除（self-loop 防止）
+    if let Some(s) = graph.adj.get_mut(into) {
+        s.remove(from);
+    }
+}
+
+/// coalescing の merge_map を彩色結果に適用する。
+///
+/// merge_map 内の各 (from → into) エントリについて、
+/// from の Pseudo に into の割り当て（色）をコピーする。
+fn apply_merge_map(
+    coloring: &mut ColoringResult,
+    merge_map: &HashMap<GraphNode, GraphNode>,
+) {
+    for (from, into) in merge_map {
+        if let GraphNode::Pseudo(from_name) = from {
+            let canonical = find_canonical(merge_map, into);
+            match &canonical {
+                GraphNode::Pseudo(canonical_name) => {
+                    if let Some(assignment) = coloring.assignments.get(canonical_name).cloned() {
+                        coloring.assignments.insert(from_name.clone(), assignment);
+                    }
+                }
+                GraphNode::HardReg(reg) => {
+                    coloring.assignments.insert(from_name.clone(), Assignment::Register(*reg));
+                }
+            }
+        }
+    }
 }
 
 // ────────────────────────────────────────────
@@ -903,9 +1102,9 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: src.clone(), dst: dst.clone() });
         }
 
-        // Movsx: memory,memory → via R11
+        // Movsx: dst is memory → via R11 (movslq requires register destination)
         Instruction::Movsx { ref src, ref dst }
-            if is_memory_operand(src) && is_memory_operand(dst) =>
+            if is_memory_operand(dst) =>
         {
             out.push(Instruction::Movsx { src: src.clone(), dst: Operand::Register(Reg::R11) });
             out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::R11), dst: dst.clone() });
@@ -916,9 +1115,9 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             out.push(Instruction::Mov { asm_type, src: src.clone(), dst: dst.clone() });
         }
 
-        // MovsxByte: memory,memory → via R11
+        // MovsxByte: dst is memory → via R11 (movsbl/movsbq requires register destination)
         Instruction::MovsxByte { asm_type, ref src, ref dst }
-            if is_memory_operand(src) && is_memory_operand(dst) =>
+            if is_memory_operand(dst) =>
         {
             out.push(Instruction::MovsxByte { asm_type, src: src.clone(), dst: Operand::Register(Reg::R11) });
             out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
@@ -929,9 +1128,9 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             out.push(Instruction::Mov { asm_type: AsmType::Longword, src: src.clone(), dst: dst.clone() });
         }
 
-        // MovZeroExtend: memory,memory → via R11
+        // MovZeroExtend: dst is memory → via R11 (requires register destination)
         Instruction::MovZeroExtend { ref src, ref dst }
-            if is_memory_operand(src) && is_memory_operand(dst) =>
+            if is_memory_operand(dst) =>
         {
             out.push(Instruction::MovZeroExtend { src: src.clone(), dst: Operand::Register(Reg::R11) });
             out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::R11), dst: dst.clone() });
@@ -942,9 +1141,9 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             out.push(Instruction::Mov { asm_type, src: src.clone(), dst: dst.clone() });
         }
 
-        // MovZeroExtendByte: memory,memory → via R11
+        // MovZeroExtendByte: dst is memory → via R11 (movzbl/movzbq requires register destination)
         Instruction::MovZeroExtendByte { asm_type, ref src, ref dst }
-            if is_memory_operand(src) && is_memory_operand(dst) =>
+            if is_memory_operand(dst) =>
         {
             out.push(Instruction::MovZeroExtendByte { asm_type, src: src.clone(), dst: Operand::Register(Reg::R11) });
             out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });

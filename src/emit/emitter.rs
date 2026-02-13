@@ -122,6 +122,8 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
         StaticInit::ZeroInit(_) => true,
         // 文字列は .data に配置
         StaticInit::StringInit(_, _) => false,
+        // バイト配列は .data に配置
+        StaticInit::ByteArrayInit(_) => false,
     };
 
     if !is_zero {
@@ -148,6 +150,11 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
             StaticInit::ZeroInit(_) => unreachable!(),
             StaticInit::StringInit(content, _) => {
                 writeln!(out, "    .asciz \"{}\"", escape_string_for_asm(content))
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
+            StaticInit::ByteArrayInit(bytes) => {
+                let byte_strs: Vec<String> = bytes.iter().map(|b| format!("0x{b:02x}")).collect();
+                writeln!(out, "    .byte {}", byte_strs.join(", "))
                     .map_err(|e| CompileError::EmitError(e.to_string()))?;
             }
         }
@@ -187,6 +194,11 @@ fn emit_static_constant(out: &mut String, constant: &AsmStaticConstant) -> Resul
         }
         StaticInit::StringInit(content, _) => {
             writeln!(out, "    .asciz \"{}\"", escape_string_for_asm(content))
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        StaticInit::ByteArrayInit(bytes) => {
+            let byte_strs: Vec<String> = bytes.iter().map(|b| format!("0x{b:02x}")).collect();
+            writeln!(out, "    .byte {}", byte_strs.join(", "))
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
     }

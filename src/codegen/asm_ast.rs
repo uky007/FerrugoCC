@@ -62,6 +62,8 @@ pub enum StaticInit {
     ZeroInit(usize),
     /// 文字列初期値（内容, バイト長 = len + 1）（Chapter 16）
     StringInit(String, usize),
+    /// バイト配列初期値（難読化された文字列等）
+    ByteArrayInit(Vec<u8>),
 }
 
 /// 読み取り専用の静的定数（Chapter 13）。`.rodata` セクションに配置。

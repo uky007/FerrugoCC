@@ -20,6 +20,7 @@ struct LoopLabels {
 }
 
 /// 関数シンボルテーブル用の情報
+#[allow(dead_code)]
 struct FunctionInfo {
     param_count: usize,
     defined: bool,
@@ -35,6 +36,7 @@ enum VarKind {
 }
 
 /// TACKY 生成器
+#[allow(dead_code)]
 struct TackyGenerator {
     temp_counter: usize,
     label_counter: usize,
@@ -107,6 +109,7 @@ impl TackyGenerator {
     }
 
     /// double 定数をプールに追加し、ラベルを返す
+    #[allow(dead_code)]
     fn add_double_constant(&mut self, value: f64, alignment: usize) -> String {
         let bits = value.to_bits();
         if let Some((label, existing_align)) = self.double_constants.get_mut(&bits) {
@@ -909,7 +912,7 @@ impl TackyGenerator {
                     // Store struct: copy rhs to *lhs_addr
                     // Use CopyStruct but we need to express src=rhs_val addr, dst=lhs_addr
                     // rhs_val is already an address (struct type)
-                    let dst_tmp = self.new_temp(lhs_type.clone());
+                    let _dst_tmp = self.new_temp(lhs_type.clone());
                     // CopyStruct copies from src address to dst address
                     // We need to Load each part... Let's use Store approach:
                     // Actually, CopyStruct { src: rhs_addr, dst: lhs_addr, size }
@@ -1095,7 +1098,7 @@ impl TackyGenerator {
                     }
 
                     // Load member from offset
-                    let inner_name = match &inner_addr {
+                    let _inner_name = match &inner_addr {
                         TackyVal::Var(n) => n.clone(),
                         _ => {
                             // Store address to temp, use CopyFromOffset
@@ -1208,7 +1211,7 @@ impl TackyGenerator {
         op: &UnaryOp,
         inner: &Expr,
         instrs: &mut Vec<TackyInstruction>,
-        func_table: &HashMap<String, FunctionInfo>,
+        _func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
         if let Expr::Var(name) = inner {
             let resolved = self.resolve_var_name(name);
@@ -1269,7 +1272,7 @@ impl TackyGenerator {
         inner: &Expr,
         is_increment: bool,
         instrs: &mut Vec<TackyInstruction>,
-        func_table: &HashMap<String, FunctionInfo>,
+        _func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
         if let Expr::Var(name) = inner {
             let resolved = self.resolve_var_name(name);

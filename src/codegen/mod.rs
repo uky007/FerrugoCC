@@ -14,7 +14,7 @@ pub mod asm_ast;
 pub mod generator;
 pub mod regalloc;
 
-pub use asm_ast::{AsmProgram, AsmFunction, AsmStaticVar, AsmStaticConstant, StaticInit, Instruction, Operand, Reg, AsmUnaryOp, AsmBinaryOp, CondCode, AsmType};
+pub use asm_ast::{AsmProgram, AsmFunction};
 
 use crate::error::Result;
 use crate::tacky::tacky_ast::TackyProgram;

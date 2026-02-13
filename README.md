@@ -78,7 +78,10 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
   - ラベル/ジャンプから CFG を構築し、不動点反復で `live_in`/`live_after` を求める
   - 暗黙的な use/def を追跡（`idiv` → AX,DX、`call` → 全 caller-saved レジスタ等）
 - **干渉グラフ**: 同時に生存する変数間に辺を張る。整数グラフと XMM グラフを分離して独立に彩色
-  - Mov 命令の src-dst 間には辺を張らない（将来の coalescing 最適化のため）
+  - Mov 命令の src-dst 間には辺を張らない（coalescing で活用）
+- **保守的 Coalescing**: Mov 辺で結ばれた非干渉ノードを合体し、冗長な Mov を除去
+  - Briggs 基準: Pseudo-Pseudo 合体（合体後の高次隣接数 < k で安全判定）
+  - George 基準: Pseudo-HardReg 合体（Pseudo の全隣接が HardReg とも干渉 or 低次で安全判定）
 - **Chaitin-Briggs グラフ彩色**:
   - Simplify: degree < k のノードをスタックに push して除去
   - Potential Spill: degree が最大のノードを spill 候補としてマーク
@@ -590,7 +593,7 @@ Chapter 7 では以下の機能を追加した:
 └────┬─────┘
      ▼
 ┌──────────┐
-│ RegAlloc  │  src/codegen/       生存解析 → 干渉グラフ → グラフ彩色
+│ RegAlloc  │  src/codegen/       生存解析 → 干渉グラフ → Coalescing → グラフ彩色
 │          │  regalloc.rs         Pseudo → Register/Stack(spill) に置換
 └────┬─────┘
      ▼
@@ -616,7 +619,7 @@ Chapter 7 では以下の機能を追加した:
 
 ### 最適化
 
-- [ ] **Coalescing（コピー合体）**: `Mov a, b` で a と b が干渉しなければ合体し、Mov を除去する。George/Briggs 基準で安全性を判定（Chapter 20 Step 7 として計画済み）
+- [x] **Coalescing（コピー合体）**: `Mov a, b` で a と b が干渉しなければ合体し、Mov を除去する。Briggs 基準（Pseudo-Pseudo）と George 基準（Pseudo-HardReg）で安全性を判定
 - [ ] **TACKY IR 上の最適化パス強化**: 現在の定数畳み込みに加え、コピー伝播・不要コード除去・共通部分式除去など
 - [ ] **ポインタ経由の書き込みを考慮した定数伝播**: `*p = 100; return x;` で `x` の値が更新されないバグの修正（TACKY オプティマイザの既知問題）
 
@@ -649,13 +652,13 @@ Chapter 7 では以下の機能を追加した:
   ```
 
 未実装の候補:
-- [ ] **文字列暗号化**: 文字列リテラルを暗号化して `.rodata` に配置し、使用時にランタイムで復号する
+- [x] **文字列暗号化**: 文字列リテラルを加算暗号化して `.data` に配置し、main() の先頭でアンロール復号コードを挿入
 - [ ] **関数のインライン展開/アウトライン化**: 関数境界を攪乱し、元の関数構造の復元を困難にする
 - [ ] **レジスタ割り当ての撹乱**: 不要なレジスタ間 mov や register rotation を挿入し、データフロー解析を妨害する
 
 ### コード品質
 
-- [ ] **コンパイラ警告の解消**: 既存コード（tacky, parse, lex モジュール）に残る未使用変数・インポートの整理（現在20件）
+- [x] **コンパイラ警告の解消**: 未使用変数・インポートを整理し0件に（19件 → 0件）
 - [ ] **E2E テストスイートの充実**: 各章の機能を網羅する統合テストの追加
 
 ## ライセンス

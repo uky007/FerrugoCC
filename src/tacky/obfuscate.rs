@@ -64,7 +64,132 @@ pub fn obfuscate(program: TackyProgram) -> TackyProgram {
         func.body = control_flow_flattening(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types);
     }
 
+    // Pass 5: 文字列暗号化（他のパスの後に適用 — 復号コードが CFF 等で壊されるのを防ぐ）
+    string_encryption(&mut program, &mut ctx);
+
     program
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pass 0: String Encryption（文字列暗号化）
+// ─────────────────────────────────────────────────────────────
+
+/// 暗号化キー（加算ベース — XOR が TACKY IR にないため）
+const STRING_ENCRYPT_KEY: u8 = 0x5A;
+
+/// 文字列定数を暗号化し、main() の先頭に復号コードを挿入する。
+///
+/// 1. static_constants から StringInit を抽出し、バイト列を加算暗号化
+/// 2. 暗号化バイト列を ByteArrayInit として static_vars に移動（.data、書き込み可能）
+/// 3. main() の先頭にアンロール復号コードを挿入:
+///    各バイトを Load → Subtract(key) → Store で復号
+fn string_encryption(program: &mut TackyProgram, ctx: &mut ObfCtx) {
+    // 暗号化対象の文字列定数を収集
+    let mut encrypted_strings: Vec<(String, Vec<u8>, usize)> = Vec::new(); // (label, encrypted_bytes, original_len_with_null)
+
+    program.static_constants.retain(|sc| {
+        if let TackyStaticInit::StringInit(content, byte_len) = &sc.init {
+            // 各バイトをキーで加算暗号化（null 終端含む）
+            let mut encrypted: Vec<u8> = content.as_bytes().iter()
+                .map(|b| b.wrapping_add(STRING_ENCRYPT_KEY))
+                .collect();
+            // null 終端も暗号化
+            encrypted.push(0u8.wrapping_add(STRING_ENCRYPT_KEY));
+
+            encrypted_strings.push((sc.name.clone(), encrypted, *byte_len));
+            false // static_constants から除去
+        } else {
+            true // StringInit 以外はそのまま残す
+        }
+    });
+
+    if encrypted_strings.is_empty() {
+        return;
+    }
+
+    // 暗号化バイト列を static_vars に追加（.data セクション、書き込み可能）
+    for (label, encrypted_bytes, byte_len) in &encrypted_strings {
+        program.static_vars.push(TackyStaticVar {
+            name: label.clone(),
+            global: false,
+            var_type: Type::Array(Box::new(Type::Char), *byte_len),
+            init: TackyStaticInit::ByteArrayInit(encrypted_bytes.clone()),
+        });
+    }
+
+    // main() を探して先頭に復号コードを挿入
+    if let Some(main_func) = program.functions.iter_mut().find(|f| f.name == "main") {
+        let mut decrypt_instrs = Vec::new();
+
+        for (label, _, byte_len) in &encrypted_strings {
+            // base_ptr = &encrypted_string
+            let base_ptr = ctx.fresh_tmp();
+            main_func.var_types.insert(base_ptr.clone(), Type::Pointer(Box::new(Type::Char)));
+
+            decrypt_instrs.push(TackyInstruction::GetAddress {
+                src: TackyVal::Var(label.clone()),
+                dst: TackyVal::Var(base_ptr.clone()),
+            });
+
+            // 各バイトを復号（アンロール）
+            for i in 0..*byte_len {
+                let byte_ptr = ctx.fresh_tmp();
+                let enc_byte = ctx.fresh_tmp();
+                let enc_int = ctx.fresh_tmp();
+                let dec_int = ctx.fresh_tmp();
+                let dec_byte = ctx.fresh_tmp();
+                main_func.var_types.insert(byte_ptr.clone(), Type::Pointer(Box::new(Type::Char)));
+                main_func.var_types.insert(enc_byte.clone(), Type::Char);
+                main_func.var_types.insert(enc_int.clone(), Type::Int);
+                main_func.var_types.insert(dec_int.clone(), Type::Int);
+                main_func.var_types.insert(dec_byte.clone(), Type::Char);
+
+                // byte_ptr = base_ptr + i
+                decrypt_instrs.push(TackyInstruction::AddPtr {
+                    ptr: TackyVal::Var(base_ptr.clone()),
+                    index: TackyVal::Constant(TackyConst::Int(i as i32)),
+                    scale: 1,
+                    dst: TackyVal::Var(byte_ptr.clone()),
+                });
+
+                // enc_byte = *byte_ptr
+                decrypt_instrs.push(TackyInstruction::Load {
+                    src_ptr: TackyVal::Var(byte_ptr.clone()),
+                    dst: TackyVal::Var(enc_byte.clone()),
+                });
+
+                // enc_int = sign_extend(enc_byte)
+                decrypt_instrs.push(TackyInstruction::SignExtend {
+                    src: TackyVal::Var(enc_byte),
+                    dst: TackyVal::Var(enc_int.clone()),
+                });
+
+                // dec_int = enc_int - KEY
+                decrypt_instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::Subtract,
+                    left: TackyVal::Var(enc_int),
+                    right: TackyVal::Constant(TackyConst::Int(STRING_ENCRYPT_KEY as i32)),
+                    dst: TackyVal::Var(dec_int.clone()),
+                });
+
+                // dec_byte = truncate(dec_int)
+                decrypt_instrs.push(TackyInstruction::Truncate {
+                    src: TackyVal::Var(dec_int),
+                    dst: TackyVal::Var(dec_byte.clone()),
+                });
+
+                // *byte_ptr = dec_byte
+                decrypt_instrs.push(TackyInstruction::Store {
+                    src: TackyVal::Var(dec_byte),
+                    dst_ptr: TackyVal::Var(byte_ptr),
+                });
+            }
+        }
+
+        // main() の先頭に復号コードを挿入
+        decrypt_instrs.append(&mut main_func.body);
+        main_func.body = decrypt_instrs;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
