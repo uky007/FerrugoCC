@@ -3,11 +3,14 @@
 //! TACKY → TACKY の変換を行う難読化パス（最適化の逆）。
 //! `--fobfuscate` フラグで有効化される。
 //!
-//! パス適用順序:
-//! 1. Constant Encoding（定数の間接化）
-//! 2. Junk Code Insertion（ジャンクコード挿入）
-//! 3. Opaque Predicates（不透明述語）
-//! 4. Control Flow Flattening（制御フロー平坦化）
+//! # パス適用順序
+//! 1. Constant Encoding（定数の間接化）— 即値を `a * b + c` の実行時計算に置換
+//! 2. Junk Code Insertion（ジャンクコード挿入）— 4命令ごとに dead computation を挿入
+//! 3. Opaque Predicates（不透明述語）— `x*(x+1)%2==0` の常真条件で値生成命令を囲む
+//! 4. Control Flow Flattening（制御フロー平坦化）— 基本ブロックを state + dispatch ループに変換
+//! 5. String Encryption（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
+//!
+//! Pass 5 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
 
 use super::tacky_ast::*;
 use crate::parse::ast::Type;
@@ -43,7 +46,8 @@ impl ObfCtx {
 
 /// 難読化パスのエントリポイント
 ///
-/// 各関数に対し、Pass 1→2→3→4 の順で適用する。
+/// 各関数に対し Pass 1→4 を適用した後、プログラム全体に Pass 5（文字列暗号化）を適用する。
+/// Pass 5 を最後にすることで、復号コードが他のパス（特に CFF）で破壊されるのを防ぐ。
 pub fn obfuscate(program: TackyProgram) -> TackyProgram {
     let mut program = program;
 
@@ -71,7 +75,7 @@ pub fn obfuscate(program: TackyProgram) -> TackyProgram {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Pass 0: String Encryption（文字列暗号化）
+// Pass 5: String Encryption（文字列暗号化）
 // ─────────────────────────────────────────────────────────────
 
 /// 暗号化キー（加算ベース — XOR が TACKY IR にないため）
@@ -436,7 +440,8 @@ fn opaque_predicates(
     result
 }
 
-/// 値を生成する命令かどうか判定（副作用なし、制御フロー変更なし）
+/// 値を生成する命令かどうか判定する。
+/// 副作用のある命令（FunCall, Store, Return）や制御フロー命令（Jump, Label）は除外。
 fn is_value_producing(instr: &TackyInstruction) -> bool {
     matches!(instr,
         TackyInstruction::Copy { .. }
@@ -756,7 +761,10 @@ fn control_flow_flattening(
 }
 
 /// 命令列を基本ブロックに分割する。
-/// ブロックの先頭: 関数の先頭、ラベル、ジャンプ/リターンの次。
+///
+/// ブロック境界の定義:
+/// - **ブロックの先頭**: 関数の先頭、ラベル命令、ジャンプ/リターンの直後
+/// - **ブロックの末尾**: ジャンプ/リターン命令、次のラベルの直前
 fn split_into_blocks(instrs: &[TackyInstruction]) -> Vec<Vec<TackyInstruction>> {
     if instrs.is_empty() {
         return vec![];

@@ -157,7 +157,8 @@ pub enum TackyStaticInit {
     DoubleInit(f64),
     ZeroInit(usize),
     StringInit(String, usize),
-    /// バイト配列初期値（難読化された文字列等）
+    /// バイト配列初期値（難読化パスの文字列暗号化で使用）。
+    /// StringInit を加算暗号化した結果を `.data` セクションに配置する。
     ByteArrayInit(Vec<u8>),
 }
 

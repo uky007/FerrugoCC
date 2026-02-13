@@ -62,7 +62,8 @@ pub enum StaticInit {
     ZeroInit(usize),
     /// 文字列初期値（内容, バイト長 = len + 1）（Chapter 16）
     StringInit(String, usize),
-    /// バイト配列初期値（難読化された文字列等）
+    /// バイト配列初期値（難読化パスで暗号化された文字列リテラル）。
+    /// `.data` セクションに `.byte 0xNN, ...` として配置される。
     ByteArrayInit(Vec<u8>),
 }
 

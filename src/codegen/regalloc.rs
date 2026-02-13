@@ -128,7 +128,9 @@ pub fn allocate_registers(
 /// Fixup パス: 無効なオペランド組み合わせの修正 + プロローグ/エピローグ生成。
 ///
 /// x86-64 では memory-memory 命令が不正なため、scratch レジスタ（R10/R11/XMM15）
-/// 経由に展開する。その後、spill サイズと使用した callee-saved レジスタに基づいて
+/// 経由に展開する。また符号/ゼロ拡張命令（`movsbl`, `movslq`, `movzbl` 等）は
+/// dst がメモリの場合も無効なため、レジスタ経由に展開する。
+/// その後、spill サイズと使用した callee-saved レジスタに基づいて
 /// プロローグ（push + subq）とエピローグ（addq + pop）を挿入する。
 pub fn fixup_instructions(
     instructions: Vec<Instruction>,

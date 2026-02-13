@@ -718,11 +718,13 @@ impl TackyGenerator {
             Expr::ConstantDouble(value) => {
                 Ok((TackyVal::Constant(TackyConst::Double(*value)), Type::Double))
             }
+            // 文字列リテラル: `.Lstr_N` ラベルで static_constants に StringInit として登録し、
+            // GetAddress でそのアドレスを取得する。
+            // 難読化時は obfuscate::string_encryption() が StringInit を暗号化 ByteArrayInit に変換する。
             Expr::StringLiteral(content) => {
                 let label = format!(".Lstr_{}", self.string_label_counter);
                 self.string_label_counter += 1;
                 self.string_constants.push((label.clone(), content.clone()));
-                // String literal → GetAddress of the string constant variable
                 let dst = self.new_temp(Type::Pointer(Box::new(Type::Char)));
                 instrs.push(TackyInstruction::GetAddress {
                     src: TackyVal::Var(label),

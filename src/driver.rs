@@ -5,11 +5,12 @@
 //!
 //! # パイプライン
 //! ```text
-//! source.c → [Lex] → [Parse] → [Validate] → [TackyGen] → [Optimize] → [Codegen] → [Emit] → source.s → [gcc] → source
+//! source.c → [Lex] → [Parse] → [Validate] → [TackyGen]
+//!          → [Optimize or Obfuscate] → [Codegen] → [Emit] → source.s → [gcc] → binary
 //! ```
 //!
-//! Chapter 19 で TACKY IR（三アドレスコード中間表現）パスが追加された。
-//! C AST → TACKY IR → 最適化 → Asm AST というパイプラインになる。
+//! - デフォルト: TACKY IR 最適化パス（定数畳み込み・コピー伝播・不要コード除去）
+//! - `--fobfuscate`: 難読化パス（定数間接化・ジャンクコード・不透明述語・CFF・文字列暗号化）
 //!
 //! `--lex`, `--parse`, `--validate`, `--tacky`, `--codegen`, `-S` フラグで途中のステージで停止できる。
 //! これは本のテストスイートとの互換性のために必要。
@@ -48,6 +49,8 @@ pub enum Stage {
 ///
 /// `source_path` のCソースファイルを読み込み、`stage` で指定された
 /// ステージまで処理を行う。
+///
+/// `obfuscate` が true の場合、TACKY IR 最適化の代わりに難読化パスを適用する。
 pub fn run(source_path: &Path, stage: Stage, obfuscate: bool) -> Result<()> {
     let source = std::fs::read_to_string(source_path)?;
 

@@ -4,18 +4,23 @@
 //!
 //! # パイプライン
 //! ```text
-//! source.c → [Lex] → [Parse] → [Validate] → [TackyGen] → [Optimize] → [Codegen] → [Emit] → source.s → [gcc] → binary
+//! source.c → [Lex] → [Parse] → [Validate] → [TackyGen] → [Optimize/Obfuscate]
+//!          → [Codegen] → [RegAlloc+Coalescing] → [Fixup] → [Emit] → source.s → [gcc] → binary
 //! ```
+//!
+//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（5パス）を適用する。
 //!
 //! # 使い方
 //! ```text
-//! ferrugocc <source.c>              # フルコンパイル（実行ファイル生成）
-//! ferrugocc --lex <source.c>        # 字句解析のみ
-//! ferrugocc --parse <source.c>      # 構文解析まで
-//! ferrugocc --validate <source.c>   # 型検査まで
-//! ferrugocc --tacky <source.c>      # TACKY IR 生成まで
-//! ferrugocc --codegen <source.c>    # コード生成まで（Asm AST 構築）
-//! ferrugocc -S <source.c>           # アセンブリ出力まで（.s ファイル生成）
+//! ferrugocc <source.c>                      # フルコンパイル（実行ファイル生成）
+//! ferrugocc --lex <source.c>                # 字句解析のみ
+//! ferrugocc --parse <source.c>              # 構文解析まで
+//! ferrugocc --validate <source.c>           # 型検査まで
+//! ferrugocc --tacky <source.c>              # TACKY IR 生成まで
+//! ferrugocc --codegen <source.c>            # コード生成まで（Asm AST 構築）
+//! ferrugocc -S <source.c>                   # アセンブリ出力まで（.s ファイル生成）
+//! ferrugocc --fobfuscate <source.c>         # 難読化コンパイル
+//! ferrugocc --fobfuscate -S <source.c>      # 難読化アセンブリ出力
 //! ```
 
 mod error;
@@ -65,7 +70,7 @@ struct Cli {
     #[arg(short = 'S')]
     emit_asm: bool,
 
-    /// Enable code obfuscation (instead of optimization)
+    /// 難読化コンパイル（最適化の代わりに5つの難読化パスを適用）
     #[arg(long = "fobfuscate")]
     obfuscate: bool,
 

@@ -41,6 +41,10 @@
 //! - 新レジスタ（BX, R10-R15, SP, BP, XMM8-XMM13）のフォーマットを追加。
 //! - `Operand::Pseudo` が emit まで残った場合はバグとして `panic!` する。
 //!
+//! # 難読化対応
+//! - `ByteArrayInit`: 暗号化された文字列リテラルを `.data` セクションに `.byte 0xNN, ...` として出力。
+//!   難読化パスの文字列暗号化（`obfuscate.rs`）で生成される。
+//!
 //! # .note.GNU-stack セクション
 //! 出力末尾に `.section .note.GNU-stack,"",@progbits` を付加する。
 //! これはスタックが実行不可であることをリンカに伝えるセキュリティ上の慣習。
