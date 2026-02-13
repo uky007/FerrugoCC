@@ -86,7 +86,7 @@ pub fn run(source_path: &Path, stage: Stage, obfuscate: bool) -> Result<()> {
     };
 
     // ── Stage 4: コード生成（TACKY → Asm AST）──
-    let asm_program = codegen::generate(&tacky_program)?;
+    let asm_program = codegen::generate(&tacky_program, obfuscate)?;
     if stage == Stage::Codegen {
         return Ok(());
     }

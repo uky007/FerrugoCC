@@ -39,6 +39,13 @@
 //! - プロローグ/エピローグは emitter ではなく fixup パスが `Push`/`Pop`/`AllocateStack`/
 //!   `DeallocateStack` 命令として生成する。emitter はこれらを個々の命令として出力するだけ。
 //! - 新レジスタ（BX, R10-R15, SP, BP, XMM8-XMM13）のフォーマットを追加。
+//!
+//! # 難読化（`--fobfuscate`）対応
+//! - `JmpIndirect(op, _)` → `jmp *%rax` 等の間接ジャンプ出力
+//! - `CallIndirect(op)` → `call *%r10` 等の間接呼び出し出力
+//! - `RawBytes(bytes)` → `.byte 0xe8, ...` の生バイト出力
+//! - `PointerArrayInit(labels)` → `.quad label0, label1, ...` のラベルアドレス配列出力
+//! - `ByteArrayInit(bytes)` → `.byte 0xNN, ...` の暗号化文字列バイト出力
 //! - `Operand::Pseudo` が emit まで残った場合はバグとして `panic!` する。
 //!
 //! # 難読化対応
@@ -107,6 +114,7 @@ fn emit_function(out: &mut String, func: &crate::codegen::asm_ast::AsmFunction) 
 fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
     let (align, size) = match var.init {
         StaticInit::ZeroInit(n) => (16, n),  // 配列は16バイトアラインメント
+        StaticInit::PointerArrayInit(ref labels) => (8, labels.len() * 8),
         _ => match var.asm_type {
             AsmType::Byte => (1, 1),
             AsmType::Longword => (4, 4),
@@ -128,6 +136,8 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
         StaticInit::StringInit(_, _) => false,
         // バイト配列は .data に配置
         StaticInit::ByteArrayInit(_) => false,
+        // ポインタ配列は .data に配置
+        StaticInit::PointerArrayInit(_) => false,
     };
 
     if !is_zero {
@@ -160,6 +170,12 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
                 let byte_strs: Vec<String> = bytes.iter().map(|b| format!("0x{b:02x}")).collect();
                 writeln!(out, "    .byte {}", byte_strs.join(", "))
                     .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
+            StaticInit::PointerArrayInit(labels) => {
+                for label in labels {
+                    writeln!(out, "    .quad {label}")
+                        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                }
             }
         }
     } else {
@@ -204,6 +220,12 @@ fn emit_static_constant(out: &mut String, constant: &AsmStaticConstant) -> Resul
             let byte_strs: Vec<String> = bytes.iter().map(|b| format!("0x{b:02x}")).collect();
             writeln!(out, "    .byte {}", byte_strs.join(", "))
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        StaticInit::PointerArrayInit(labels) => {
+            for label in labels {
+                writeln!(out, "    .quad {label}")
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
         }
     }
     Ok(())
@@ -420,6 +442,25 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
         // Chapter 20: ret のみ出力。エピローグは fixup パスが Ret の前に挿入する。
         Instruction::Ret => {
             writeln!(out, "    ret")
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+
+        // 間接ジャンプ（難読化の CFF ジャンプテーブル用）
+        Instruction::JmpIndirect(operand, _) => {
+            writeln!(out, "    jmp *{}", format_operand_quad(operand))
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+
+        // 間接関数呼び出し（難読化用）
+        Instruction::CallIndirect(operand) => {
+            writeln!(out, "    call *{}", format_operand_quad(operand))
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+
+        // 生バイト出力（反逆アセンブリ用）
+        Instruction::RawBytes(bytes) => {
+            let byte_strs: Vec<String> = bytes.iter().map(|b| format!("0x{b:02x}")).collect();
+            writeln!(out, "    .byte {}", byte_strs.join(", "))
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
     }

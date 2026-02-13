@@ -29,6 +29,14 @@
 //! コード生成の入力が C AST から TACKY IR に変更された。
 //! アセンブリ AST 自体は変更なし（TACKY 命令を機械的にマッピングする）。
 //!
+//! # 難読化（`--fobfuscate`）対応
+//! - `JmpIndirect(Operand, Vec<String>)`: 間接ジャンプ。CFF のジャンプテーブル用。
+//!   `Vec<String>` はジャンプテーブルの全エントリラベルで、生存解析の CFG 構築に使用。
+//! - `CallIndirect(Operand)`: 間接関数呼び出し。`call func` → `call *%r10` の変換用。
+//! - `RawBytes(Vec<u8>)`: 生バイト出力。反逆アセンブリのゴミバイト（`0xE8`）挿入用。
+//! - `StaticInit::PointerArrayInit(Vec<String>)`: ラベルアドレス配列。CFF ジャンプテーブル。
+//! - `StaticInit::ByteArrayInit(Vec<u8>)`: 暗号化文字列バイト配列。文字列暗号化パス用。
+//!
 //! # Chapter 20: レジスタ割り当て
 //! - `Operand::Pseudo(String)`: 割り当て前の疑似レジスタ。コード生成で変数に使用され、
 //!   レジスタ割り当てパス (`regalloc`) で `Register` または `Stack(spill)` に置換される。
@@ -65,6 +73,9 @@ pub enum StaticInit {
     /// バイト配列初期値（難読化パスで暗号化された文字列リテラル）。
     /// `.data` セクションに `.byte 0xNN, ...` として配置される。
     ByteArrayInit(Vec<u8>),
+    /// ポインタ配列初期値（難読化の CFF ジャンプテーブル用）。
+    /// `.data` セクションに `.quad label0, label1, ...` として配置される。
+    PointerArrayInit(Vec<String>),
 }
 
 /// 読み取り専用の静的定数（Chapter 13）。`.rodata` セクションに配置。
@@ -182,6 +193,16 @@ pub enum Instruction {
 
     /// `leaq src, dst` — 実効アドレスのロード（Chapter 14）
     Lea { src: Operand, dst: Operand },
+
+    /// `jmp *operand` — 間接ジャンプ（難読化用）
+    /// `Vec<String>` はジャンプテーブルの全エントリラベル（生存解析用）。
+    JmpIndirect(Operand, Vec<String>),
+
+    /// `call *operand` — 間接関数呼び出し（難読化用）
+    CallIndirect(Operand),
+
+    /// `.byte 0xNN, ...` — 生バイト出力（反逆アセンブリ用）
+    RawBytes(Vec<u8>),
 }
 
 /// アセンブリレベルの単項演算子

@@ -3,14 +3,25 @@
 //! TACKY → TACKY の変換を行う難読化パス（最適化の逆）。
 //! `--fobfuscate` フラグで有効化される。
 //!
-//! # パス適用順序
-//! 1. Constant Encoding（定数の間接化）— 即値を `a * b + c` の実行時計算に置換
-//! 2. Junk Code Insertion（ジャンクコード挿入）— 4命令ごとに dead computation を挿入
-//! 3. Opaque Predicates（不透明述語）— `x*(x+1)%2==0` の常真条件で値生成命令を囲む
-//! 4. Control Flow Flattening（制御フロー平坦化）— 基本ブロックを state + dispatch ループに変換
-//! 5. String Encryption（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
+//! # パス適用順序（TACKY IR レベル）
+//! 1. **Constant Encoding**（定数の間接化）— 即値を `a * b + c` の実行時計算に置換
+//! 2. **Junk Code Insertion**（ジャンクコード挿入）— 4命令ごとに dead computation を挿入
+//! 3. **Opaque Predicates**（不透明述語）— 4パターンの常真条件分岐で値生成命令を囲む
+//!    - パターン 0: `x*(x+1) % 2 == 0`（連続整数の積は偶数）
+//!    - パターン 1: `!(x² + 1 > 0)`（x²+1 は常に正）
+//!    - パターン 2: `(x+1)² - x² - 1 - 2x == 0`（代数恒等式）
+//!    - パターン 3: `(x³ - x) % 3 == 0`（連続3整数の積は3の倍数）
+//! 4. **Control Flow Flattening**（制御フロー平坦化）— 基本ブロックをジャンプテーブル
+//!    + 状態エンコードの dispatch ループに変換。IDA 等の CFG 復元を破壊する。
+//!    - ジャンプテーブル: `.data` セクションにブロックラベルの配列を配置し `jmp *%rax` で分岐
+//!    - 状態エンコード: `encoded = index * 37 + 0xCAFE` のアフィン変換で状態変数を符号化
+//! 5. **String Encryption**（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
 //!
 //! Pass 5 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
+//!
+//! # ASM レベル難読化（codegen/mod.rs で適用、レジスタ割り当て後）
+//! - **Anti-Disassembly**: 無条件ジャンプ直後に `0xE8`（call opcode）を挿入し命令境界認識を破壊
+//! - **Indirect Calls**: `call func` を `lea func(%rip), %r10; call *%r10` に変換
 
 use super::tacky_ast::*;
 use crate::parse::ast::Type;
@@ -61,11 +72,16 @@ pub fn obfuscate(program: TackyProgram) -> TackyProgram {
         // Pass 2: ジャンクコード挿入
         func.body = junk_code_insertion(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types);
 
-        // Pass 3: 不透明述語
+        // Pass 3: 不透明述語（多様化パターン）
         func.body = opaque_predicates(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types);
 
-        // Pass 4: 制御フロー平坦化
-        func.body = control_flow_flattening(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types);
+        // Pass 4: 制御フロー平坦化（ジャンプテーブル + 状態エンコード）
+        func.body = control_flow_flattening(
+            std::mem::take(&mut func.body),
+            &mut ctx,
+            &mut func.var_types,
+            &mut program.static_vars,
+        );
     }
 
     // Pass 5: 文字列暗号化（他のパスの後に適用 — 復号コードが CFF 等で壊されるのを防ぐ）
@@ -453,10 +469,13 @@ fn is_value_producing(instr: &TackyInstruction) -> bool {
     )
 }
 
-/// 不透明述語で命令を囲む:
+/// 不透明述語で命令を囲む（Feature 5: 多様化パターン）。
+///
+/// カウンタの mod 4 で使用するパターンを選択し、パターンマッチによる自動除去を防ぐ。
+///
 /// ```text
-/// obf_tmp = x * (x + 1) % 2    // 常に 0
-/// JumpIfZero(obf_tmp, .Lobf_real)
+/// <predicate computation>   // pred == 0（常に真）
+/// JumpIfZero(pred, .Lobf_real)
 /// <偽コード>
 /// Jump(.Lobf_end)
 /// .Lobf_real:
@@ -473,49 +492,20 @@ fn wrap_with_opaque_predicate(
     let label_real = ctx.fresh_label();
     let label_end = ctx.fresh_label();
 
-    // x = 42（任意の整数定数）
-    let tmp_x = ctx.fresh_tmp();
-    let tmp_x_plus_1 = ctx.fresh_tmp();
-    let tmp_prod = ctx.fresh_tmp();
-    let tmp_pred = ctx.fresh_tmp();
-    var_types.insert(tmp_x.clone(), Type::Int);
-    var_types.insert(tmp_x_plus_1.clone(), Type::Int);
-    var_types.insert(tmp_prod.clone(), Type::Int);
-    var_types.insert(tmp_pred.clone(), Type::Int);
+    // パターン選択（label_counter をローテーション）
+    let pattern = ctx.label_counter % 4;
 
-    // x = 42
-    instrs.push(TackyInstruction::Copy {
-        src: TackyVal::Constant(TackyConst::Int(42)),
-        dst: TackyVal::Var(tmp_x.clone()),
-    });
+    let pred_var = match pattern {
+        0 => generate_predicate_0(ctx, var_types, &mut instrs),
+        1 => generate_predicate_1(ctx, var_types, &mut instrs),
+        2 => generate_predicate_2(ctx, var_types, &mut instrs),
+        3 => generate_predicate_3(ctx, var_types, &mut instrs),
+        _ => unreachable!(),
+    };
 
-    // x_plus_1 = x + 1
-    instrs.push(TackyInstruction::Binary {
-        op: TackyBinaryOp::Add,
-        left: TackyVal::Var(tmp_x.clone()),
-        right: TackyVal::Constant(TackyConst::Int(1)),
-        dst: TackyVal::Var(tmp_x_plus_1.clone()),
-    });
-
-    // prod = x * (x + 1)
-    instrs.push(TackyInstruction::Binary {
-        op: TackyBinaryOp::Multiply,
-        left: TackyVal::Var(tmp_x),
-        right: TackyVal::Var(tmp_x_plus_1),
-        dst: TackyVal::Var(tmp_prod.clone()),
-    });
-
-    // pred = prod % 2  (always 0)
-    instrs.push(TackyInstruction::Binary {
-        op: TackyBinaryOp::Remainder,
-        left: TackyVal::Var(tmp_prod),
-        right: TackyVal::Constant(TackyConst::Int(2)),
-        dst: TackyVal::Var(tmp_pred.clone()),
-    });
-
-    // if pred == 0 goto real (always taken)
+    // if pred == 0 goto real (always taken — all predicates produce 0)
     instrs.push(TackyInstruction::JumpIfZero {
-        condition: TackyVal::Var(tmp_pred),
+        condition: TackyVal::Var(pred_var),
         target: label_real.clone(),
     });
 
@@ -540,26 +530,267 @@ fn wrap_with_opaque_predicate(
     instrs
 }
 
+/// パターン 0: `x*(x+1) % 2 == 0`（連続整数の積は偶数）
+fn generate_predicate_0(
+    ctx: &mut ObfCtx,
+    var_types: &mut std::collections::HashMap<String, Type>,
+    instrs: &mut Vec<TackyInstruction>,
+) -> String {
+    let tmp_x = ctx.fresh_tmp();
+    let tmp_x_plus_1 = ctx.fresh_tmp();
+    let tmp_prod = ctx.fresh_tmp();
+    let tmp_pred = ctx.fresh_tmp();
+    var_types.insert(tmp_x.clone(), Type::Int);
+    var_types.insert(tmp_x_plus_1.clone(), Type::Int);
+    var_types.insert(tmp_prod.clone(), Type::Int);
+    var_types.insert(tmp_pred.clone(), Type::Int);
+
+    instrs.push(TackyInstruction::Copy {
+        src: TackyVal::Constant(TackyConst::Int(42)),
+        dst: TackyVal::Var(tmp_x.clone()),
+    });
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Add,
+        left: TackyVal::Var(tmp_x.clone()),
+        right: TackyVal::Constant(TackyConst::Int(1)),
+        dst: TackyVal::Var(tmp_x_plus_1.clone()),
+    });
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Multiply,
+        left: TackyVal::Var(tmp_x),
+        right: TackyVal::Var(tmp_x_plus_1),
+        dst: TackyVal::Var(tmp_prod.clone()),
+    });
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Remainder,
+        left: TackyVal::Var(tmp_prod),
+        right: TackyVal::Constant(TackyConst::Int(2)),
+        dst: TackyVal::Var(tmp_pred.clone()),
+    });
+
+    tmp_pred
+}
+
+/// パターン 1: `x*x + 1 > 0` を `!(x*x + 1 > 0)` で表現 → 常に 0
+/// x²≥0 なので x²+1≥1 > 0 は常に真。`!(true)` = 0。
+fn generate_predicate_1(
+    ctx: &mut ObfCtx,
+    var_types: &mut std::collections::HashMap<String, Type>,
+    instrs: &mut Vec<TackyInstruction>,
+) -> String {
+    let tmp_x = ctx.fresh_tmp();
+    let tmp_sq = ctx.fresh_tmp();
+    let tmp_sq_plus_1 = ctx.fresh_tmp();
+    let tmp_gt = ctx.fresh_tmp();
+    let tmp_pred = ctx.fresh_tmp();
+    var_types.insert(tmp_x.clone(), Type::Int);
+    var_types.insert(tmp_sq.clone(), Type::Int);
+    var_types.insert(tmp_sq_plus_1.clone(), Type::Int);
+    var_types.insert(tmp_gt.clone(), Type::Int);
+    var_types.insert(tmp_pred.clone(), Type::Int);
+
+    // x = 17
+    instrs.push(TackyInstruction::Copy {
+        src: TackyVal::Constant(TackyConst::Int(17)),
+        dst: TackyVal::Var(tmp_x.clone()),
+    });
+    // sq = x * x
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Multiply,
+        left: TackyVal::Var(tmp_x.clone()),
+        right: TackyVal::Var(tmp_x),
+        dst: TackyVal::Var(tmp_sq.clone()),
+    });
+    // sq_plus_1 = sq + 1
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Add,
+        left: TackyVal::Var(tmp_sq),
+        right: TackyVal::Constant(TackyConst::Int(1)),
+        dst: TackyVal::Var(tmp_sq_plus_1.clone()),
+    });
+    // gt = sq_plus_1 > 0  (always 1)
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::GreaterThan,
+        left: TackyVal::Var(tmp_sq_plus_1),
+        right: TackyVal::Constant(TackyConst::Int(0)),
+        dst: TackyVal::Var(tmp_gt.clone()),
+    });
+    // pred = !gt  (always 0)
+    instrs.push(TackyInstruction::Unary {
+        op: TackyUnaryOp::Not,
+        src: TackyVal::Var(tmp_gt),
+        dst: TackyVal::Var(tmp_pred.clone()),
+    });
+
+    tmp_pred
+}
+
+/// パターン 2: `(x+1)² - x² - 1 == 2*x` — 展開すると恒等式
+/// `(x+1)² - x² - 1 - 2*x` = `x² + 2x + 1 - x² - 1 - 2x` = 0
+fn generate_predicate_2(
+    ctx: &mut ObfCtx,
+    var_types: &mut std::collections::HashMap<String, Type>,
+    instrs: &mut Vec<TackyInstruction>,
+) -> String {
+    let tmp_x = ctx.fresh_tmp();
+    let tmp_x1 = ctx.fresh_tmp();
+    let tmp_x1_sq = ctx.fresh_tmp();
+    let tmp_x_sq = ctx.fresh_tmp();
+    let tmp_sub1 = ctx.fresh_tmp();
+    let tmp_sub2 = ctx.fresh_tmp();
+    let tmp_2x = ctx.fresh_tmp();
+    let tmp_pred = ctx.fresh_tmp();
+    var_types.insert(tmp_x.clone(), Type::Int);
+    var_types.insert(tmp_x1.clone(), Type::Int);
+    var_types.insert(tmp_x1_sq.clone(), Type::Int);
+    var_types.insert(tmp_x_sq.clone(), Type::Int);
+    var_types.insert(tmp_sub1.clone(), Type::Int);
+    var_types.insert(tmp_sub2.clone(), Type::Int);
+    var_types.insert(tmp_2x.clone(), Type::Int);
+    var_types.insert(tmp_pred.clone(), Type::Int);
+
+    // x = 13
+    instrs.push(TackyInstruction::Copy {
+        src: TackyVal::Constant(TackyConst::Int(13)),
+        dst: TackyVal::Var(tmp_x.clone()),
+    });
+    // x1 = x + 1
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Add,
+        left: TackyVal::Var(tmp_x.clone()),
+        right: TackyVal::Constant(TackyConst::Int(1)),
+        dst: TackyVal::Var(tmp_x1.clone()),
+    });
+    // x1_sq = x1 * x1
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Multiply,
+        left: TackyVal::Var(tmp_x1.clone()),
+        right: TackyVal::Var(tmp_x1),
+        dst: TackyVal::Var(tmp_x1_sq.clone()),
+    });
+    // x_sq = x * x
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Multiply,
+        left: TackyVal::Var(tmp_x.clone()),
+        right: TackyVal::Var(tmp_x.clone()),
+        dst: TackyVal::Var(tmp_x_sq.clone()),
+    });
+    // sub1 = x1_sq - x_sq
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Subtract,
+        left: TackyVal::Var(tmp_x1_sq),
+        right: TackyVal::Var(tmp_x_sq),
+        dst: TackyVal::Var(tmp_sub1.clone()),
+    });
+    // sub2 = sub1 - 1
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Subtract,
+        left: TackyVal::Var(tmp_sub1),
+        right: TackyVal::Constant(TackyConst::Int(1)),
+        dst: TackyVal::Var(tmp_sub2.clone()),
+    });
+    // 2x = 2 * x
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Multiply,
+        left: TackyVal::Constant(TackyConst::Int(2)),
+        right: TackyVal::Var(tmp_x),
+        dst: TackyVal::Var(tmp_2x.clone()),
+    });
+    // pred = sub2 - 2x  (always 0)
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Subtract,
+        left: TackyVal::Var(tmp_sub2),
+        right: TackyVal::Var(tmp_2x),
+        dst: TackyVal::Var(tmp_pred.clone()),
+    });
+
+    tmp_pred
+}
+
+/// パターン 3: `(x³ - x) % 3 == 0`（連続3整数の積は3の倍数）
+/// x*(x-1)*(x+1) = x³ - x は 3 の倍数。
+fn generate_predicate_3(
+    ctx: &mut ObfCtx,
+    var_types: &mut std::collections::HashMap<String, Type>,
+    instrs: &mut Vec<TackyInstruction>,
+) -> String {
+    let tmp_x = ctx.fresh_tmp();
+    let tmp_x_sq = ctx.fresh_tmp();
+    let tmp_x_cubed = ctx.fresh_tmp();
+    let tmp_diff = ctx.fresh_tmp();
+    let tmp_pred = ctx.fresh_tmp();
+    var_types.insert(tmp_x.clone(), Type::Int);
+    var_types.insert(tmp_x_sq.clone(), Type::Int);
+    var_types.insert(tmp_x_cubed.clone(), Type::Int);
+    var_types.insert(tmp_diff.clone(), Type::Int);
+    var_types.insert(tmp_pred.clone(), Type::Int);
+
+    // x = 7
+    instrs.push(TackyInstruction::Copy {
+        src: TackyVal::Constant(TackyConst::Int(7)),
+        dst: TackyVal::Var(tmp_x.clone()),
+    });
+    // x_sq = x * x
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Multiply,
+        left: TackyVal::Var(tmp_x.clone()),
+        right: TackyVal::Var(tmp_x.clone()),
+        dst: TackyVal::Var(tmp_x_sq.clone()),
+    });
+    // x_cubed = x_sq * x
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Multiply,
+        left: TackyVal::Var(tmp_x_sq),
+        right: TackyVal::Var(tmp_x.clone()),
+        dst: TackyVal::Var(tmp_x_cubed.clone()),
+    });
+    // diff = x_cubed - x
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Subtract,
+        left: TackyVal::Var(tmp_x_cubed),
+        right: TackyVal::Var(tmp_x),
+        dst: TackyVal::Var(tmp_diff.clone()),
+    });
+    // pred = diff % 3  (always 0)
+    instrs.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Remainder,
+        left: TackyVal::Var(tmp_diff),
+        right: TackyVal::Constant(TackyConst::Int(3)),
+        dst: TackyVal::Var(tmp_pred.clone()),
+    });
+
+    tmp_pred
+}
+
 // ─────────────────────────────────────────────────────────────
 // Pass 4: Control Flow Flattening（制御フロー平坦化）
 // ─────────────────────────────────────────────────────────────
 
-/// 関数本体を基本ブロックに分割し、switch-dispatch ループに変換する。
+/// CFF 状態エンコード定数
+/// エンコード: `encoded = index * CFF_A + CFF_B`
+/// デコード: `index = (encoded - CFF_B) / CFF_A`
+const CFF_A: i32 = 37;
+const CFF_B: i32 = 0xCAFE_u16 as i32;
+
+/// 関数本体を基本ブロックに分割し、ジャンプテーブル + 状態エンコードの dispatch ループに変換する。
+///
+/// Feature 1: ジャンプテーブルによる間接ジャンプ（IDA の CFG 復元を破壊）
+/// Feature 4: 状態変数の算術エンコード（ステートマシン復元を妨害）
 ///
 /// ```text
-/// obf_state = 0
+/// obf_state = 0 * A + B     // encoded initial state
 /// .Lobf_dispatch:
-///   if (obf_state == 0) goto block_0
-///   if (obf_state == 1) goto block_1
-///   ...
-///   goto exit
-/// block_0: <元のコード> obf_state = next; goto dispatch
+///   decoded = (obf_state - B) / A
+///   ptr = jt_base + decoded * 8
+///   JumpIndirect(Load(ptr))
+/// block_0: <元のコード> obf_state = next_encoded; goto dispatch
 /// block_1: ...
 /// ```
 fn control_flow_flattening(
     instrs: Vec<TackyInstruction>,
     ctx: &mut ObfCtx,
     var_types: &mut std::collections::HashMap<String, Type>,
+    static_vars: &mut Vec<TackyStaticVar>,
 ) -> Vec<TackyInstruction> {
     if instrs.is_empty() {
         return instrs;
@@ -589,42 +820,92 @@ fn control_flow_flattening(
 
     let mut result = Vec::new();
 
-    // obf_state = 0
+    // 各ブロック用のラベルを生成
+    let block_labels: Vec<String> = (0..blocks.len())
+        .map(|_| ctx.fresh_label())
+        .collect();
+
+    // ── ジャンプテーブルを静的変数として登録（Feature 1）──
+    let jt_name = format!(".Lobf_jt_{}", ctx.label_counter);
+    ctx.label_counter += 1;
+
+    static_vars.push(TackyStaticVar {
+        name: jt_name.clone(),
+        global: false,
+        var_type: Type::Array(Box::new(Type::Long), blocks.len()),
+        init: TackyStaticInit::PointerArrayInit(block_labels.clone()),
+    });
+
+    // ── エンコード関数: index → index * A + B ──
+    let encode = |index: usize| -> i32 {
+        (index as i32).wrapping_mul(CFF_A).wrapping_add(CFF_B)
+    };
+
+    // obf_state = encode(0) = 0 * A + B = B
     result.push(TackyInstruction::Copy {
-        src: TackyVal::Constant(TackyConst::Int(0)),
+        src: TackyVal::Constant(TackyConst::Int(encode(0))),
         dst: TackyVal::Var(state_var.clone()),
     });
 
     // goto dispatch
     result.push(TackyInstruction::Jump(dispatch_label.clone()));
 
-    // ── Dispatch table ──
+    // ── Dispatch: デコード + ジャンプテーブル間接ジャンプ ──
     result.push(TackyInstruction::Label(dispatch_label.clone()));
 
-    // 各ブロック用のラベルを生成
-    let block_labels: Vec<String> = (0..blocks.len())
-        .map(|_| ctx.fresh_label())
-        .collect();
+    // decoded = (state - B) / A
+    let tmp_sub = ctx.fresh_tmp();
+    let decoded_index = ctx.fresh_tmp();
+    var_types.insert(tmp_sub.clone(), Type::Int);
+    var_types.insert(decoded_index.clone(), Type::Int);
 
-    // dispatch: if (state == i) goto block_i
-    for (i, block_label) in block_labels.iter().enumerate() {
-        let tmp_cmp = ctx.fresh_tmp();
-        var_types.insert(tmp_cmp.clone(), Type::Int);
+    result.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Subtract,
+        left: TackyVal::Var(state_var.clone()),
+        right: TackyVal::Constant(TackyConst::Int(CFF_B)),
+        dst: TackyVal::Var(tmp_sub.clone()),
+    });
+    result.push(TackyInstruction::Binary {
+        op: TackyBinaryOp::Divide,
+        left: TackyVal::Var(tmp_sub),
+        right: TackyVal::Constant(TackyConst::Int(CFF_A)),
+        dst: TackyVal::Var(decoded_index.clone()),
+    });
 
-        result.push(TackyInstruction::Binary {
-            op: TackyBinaryOp::Equal,
-            left: TackyVal::Var(state_var.clone()),
-            right: TackyVal::Constant(TackyConst::Int(i as i32)),
-            dst: TackyVal::Var(tmp_cmp.clone()),
-        });
-        result.push(TackyInstruction::JumpIfNotZero {
-            condition: TackyVal::Var(tmp_cmp),
-            target: block_label.clone(),
-        });
-    }
+    // base = &jump_table
+    let jt_base = ctx.fresh_tmp();
+    var_types.insert(jt_base.clone(), Type::Pointer(Box::new(Type::Long)));
 
-    // fallthrough: goto exit
-    result.push(TackyInstruction::Jump(exit_label.clone()));
+    result.push(TackyInstruction::GetAddress {
+        src: TackyVal::Var(jt_name),
+        dst: TackyVal::Var(jt_base.clone()),
+    });
+
+    // ptr = base + decoded_index * 8
+    let jt_ptr = ctx.fresh_tmp();
+    var_types.insert(jt_ptr.clone(), Type::Pointer(Box::new(Type::Long)));
+
+    result.push(TackyInstruction::AddPtr {
+        ptr: TackyVal::Var(jt_base),
+        index: TackyVal::Var(decoded_index),
+        scale: 8,
+        dst: TackyVal::Var(jt_ptr.clone()),
+    });
+
+    // addr = *ptr
+    let jt_addr = ctx.fresh_tmp();
+    var_types.insert(jt_addr.clone(), Type::Long);
+
+    result.push(TackyInstruction::Load {
+        src_ptr: TackyVal::Var(jt_ptr),
+        dst: TackyVal::Var(jt_addr.clone()),
+    });
+
+    // JumpIndirect(addr) — possible_targets で生存解析に正しい CFG 後続を通知
+    result.push(TackyInstruction::JumpIndirect {
+        target: TackyVal::Var(jt_addr),
+        possible_targets: block_labels.clone(),
+    });
 
     // ── Block bodies ──
     for (i, block) in blocks.iter().enumerate() {
@@ -641,11 +922,11 @@ fn control_flow_flattening(
                     result.push(instr.clone());
                 }
 
-                // Jump → state 設定 + dispatch へ戻る
+                // Jump → encoded state 設定 + dispatch へ戻る
                 TackyInstruction::Jump(target) => {
                     if let Some(&target_block) = label_to_block.get(target) {
                         result.push(TackyInstruction::Copy {
-                            src: TackyVal::Constant(TackyConst::Int(target_block as i32)),
+                            src: TackyVal::Constant(TackyConst::Int(encode(target_block))),
                             dst: TackyVal::Var(state_var.clone()),
                         });
                         result.push(TackyInstruction::Jump(dispatch_label.clone()));
@@ -655,15 +936,13 @@ fn control_flow_flattening(
                     }
                 }
 
-                // JumpIfZero → 条件付き state 設定
+                // JumpIfZero → 条件付き encoded state 設定
                 TackyInstruction::JumpIfZero { condition, target } => {
                     if let Some(&target_block) = label_to_block.get(target) {
                         let fallthrough_block = i + 1;
-                        // if condition == 0: state = target_block, else: state = fallthrough
                         let tmp_is_zero = ctx.fresh_tmp();
                         var_types.insert(tmp_is_zero.clone(), Type::Int);
 
-                        // Check if condition is zero
                         result.push(TackyInstruction::Binary {
                             op: TackyBinaryOp::Equal,
                             left: condition.clone(),
@@ -675,19 +954,19 @@ fn control_flow_flattening(
                             target: format!("{}_taken", block_labels[i]),
                         });
 
-                        // Not taken: state = fallthrough
+                        // Not taken: state = encode(fallthrough)
                         if fallthrough_block < blocks.len() {
                             result.push(TackyInstruction::Copy {
-                                src: TackyVal::Constant(TackyConst::Int(fallthrough_block as i32)),
+                                src: TackyVal::Constant(TackyConst::Int(encode(fallthrough_block))),
                                 dst: TackyVal::Var(state_var.clone()),
                             });
                         }
                         result.push(TackyInstruction::Jump(dispatch_label.clone()));
 
-                        // Taken: state = target
+                        // Taken: state = encode(target)
                         result.push(TackyInstruction::Label(format!("{}_taken", block_labels[i])));
                         result.push(TackyInstruction::Copy {
-                            src: TackyVal::Constant(TackyConst::Int(target_block as i32)),
+                            src: TackyVal::Constant(TackyConst::Int(encode(target_block))),
                             dst: TackyVal::Var(state_var.clone()),
                         });
                         result.push(TackyInstruction::Jump(dispatch_label.clone()));
@@ -696,7 +975,7 @@ fn control_flow_flattening(
                     }
                 }
 
-                // JumpIfNotZero → 条件付き state 設定
+                // JumpIfNotZero → 条件付き encoded state 設定
                 TackyInstruction::JumpIfNotZero { condition, target } => {
                     if let Some(&target_block) = label_to_block.get(target) {
                         let fallthrough_block = i + 1;
@@ -706,19 +985,19 @@ fn control_flow_flattening(
                             target: format!("{}_taken", block_labels[i]),
                         });
 
-                        // Not taken: state = fallthrough
+                        // Not taken: state = encode(fallthrough)
                         if fallthrough_block < blocks.len() {
                             result.push(TackyInstruction::Copy {
-                                src: TackyVal::Constant(TackyConst::Int(fallthrough_block as i32)),
+                                src: TackyVal::Constant(TackyConst::Int(encode(fallthrough_block))),
                                 dst: TackyVal::Var(state_var.clone()),
                             });
                         }
                         result.push(TackyInstruction::Jump(dispatch_label.clone()));
 
-                        // Taken: state = target
+                        // Taken: state = encode(target)
                         result.push(TackyInstruction::Label(format!("{}_taken", block_labels[i])));
                         result.push(TackyInstruction::Copy {
-                            src: TackyVal::Constant(TackyConst::Int(target_block as i32)),
+                            src: TackyVal::Constant(TackyConst::Int(encode(target_block))),
                             dst: TackyVal::Var(state_var.clone()),
                         });
                         result.push(TackyInstruction::Jump(dispatch_label.clone()));
@@ -746,7 +1025,7 @@ fn control_flow_flattening(
             let next_block = i + 1;
             if next_block < blocks.len() {
                 result.push(TackyInstruction::Copy {
-                    src: TackyVal::Constant(TackyConst::Int(next_block as i32)),
+                    src: TackyVal::Constant(TackyConst::Int(encode(next_block))),
                     dst: TackyVal::Var(state_var.clone()),
                 });
                 result.push(TackyInstruction::Jump(dispatch_label.clone()));
@@ -933,11 +1212,6 @@ mod tests {
         // JumpIfZero（不透明述語の分岐）が挿入されていること
         let has_jump_if_zero = result.iter().any(|i| matches!(i, TackyInstruction::JumpIfZero { .. }));
         assert!(has_jump_if_zero, "opaque predicates should insert conditional branches");
-
-        // Remainder（% 2 の計算）が含まれていること
-        let has_remainder = result.iter().any(|i| matches!(i,
-            TackyInstruction::Binary { op: TackyBinaryOp::Remainder, .. }));
-        assert!(has_remainder, "opaque predicates should use x*(x+1)%2 pattern");
     }
 
     #[test]
@@ -966,8 +1240,9 @@ mod tests {
         ];
         let mut ctx = ObfCtx::new();
         let mut var_types = make_var_types(&["x", "r"]);
+        let mut static_vars = Vec::new();
 
-        let result = control_flow_flattening(instrs, &mut ctx, &mut var_types);
+        let result = control_flow_flattening(instrs, &mut ctx, &mut var_types, &mut static_vars);
 
         // dispatch ラベル（.Lobf_）が存在すること
         let has_dispatch_label = result.iter().any(|i| {
@@ -988,5 +1263,56 @@ mod tests {
             }
         });
         assert!(has_state_var, "CFF should use obf_tmp state variable");
+
+        // ジャンプテーブルが static_vars に追加されていること（Feature 1）
+        assert!(!static_vars.is_empty(), "CFF should create jump table static var");
+        let jt_var = &static_vars[0];
+        assert!(matches!(&jt_var.init, TackyStaticInit::PointerArrayInit(_)),
+            "jump table should use PointerArrayInit");
+
+        // JumpIndirect が存在すること（Feature 1）
+        let has_jump_indirect = result.iter().any(|i| matches!(i, TackyInstruction::JumpIndirect { .. }));
+        assert!(has_jump_indirect, "CFF should use JumpIndirect for dispatch");
+
+        // 状態エンコード定数（CFF_B = 0xCAFE）が使用されていること（Feature 4）
+        let has_cafe = result.iter().any(|i| {
+            if let TackyInstruction::Copy { src: TackyVal::Constant(TackyConst::Int(v)), .. } = i {
+                *v == 0xCAFE_u16 as i32
+            } else {
+                false
+            }
+        });
+        assert!(has_cafe, "CFF should use encoded state values (0xCAFE)");
+    }
+
+    #[test]
+    fn test_opaque_predicate_diversification() {
+        // Feature 5: 4つの異なるパターンが使用されることを確認
+        let mut ctx = ObfCtx::new();
+        let mut var_types = make_var_types(&[]);
+
+        // 各パターンが使われることを確認（label_counter % 4 で選択）
+        for i in 0..4 {
+            ctx.label_counter = i;
+            let instr = TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Int(42)),
+                dst: make_int_var("test_dst"),
+            };
+            let result = wrap_with_opaque_predicate(instr, &mut ctx, &mut var_types);
+
+            // JumpIfZero が必ず含まれること
+            let has_jump = result.iter().any(|i| matches!(i, TackyInstruction::JumpIfZero { .. }));
+            assert!(has_jump, "pattern {i} should generate JumpIfZero");
+        }
+    }
+
+    #[test]
+    fn test_state_encoding_consistency() {
+        // Feature 4: エンコード/デコードの一貫性を検証
+        for i in 0..20 {
+            let encoded = (i as i32).wrapping_mul(CFF_A).wrapping_add(CFF_B);
+            let decoded = (encoded.wrapping_sub(CFF_B)) / CFF_A;
+            assert_eq!(decoded, i as i32, "encode/decode should be consistent for index {i}");
+        }
     }
 }

@@ -259,6 +259,13 @@ fn instruction_uses(instr: &Instruction) -> Vec<GraphNode> {
         Instruction::Lea { src, .. } => {
             add_operand_nodes(src, &mut uses);
         }
+        Instruction::JmpIndirect(op, _) => {
+            add_operand_nodes(op, &mut uses);
+        }
+        Instruction::CallIndirect(op) => {
+            add_operand_nodes(op, &mut uses);
+        }
+        Instruction::RawBytes(_) => {}
     }
 
     uses
@@ -333,6 +340,17 @@ fn instruction_defs(instr: &Instruction) -> Vec<GraphNode> {
         Instruction::Lea { dst, .. } => {
             add_operand_nodes(dst, &mut defs);
         }
+        Instruction::JmpIndirect(_, _) => {}
+        Instruction::CallIndirect(_) => {
+            // Same as Call: destroys all caller-saved registers
+            for &reg in &GP_CALLER_SAVED {
+                defs.push(GraphNode::HardReg(reg));
+            }
+            for &reg in &XMM_ALL {
+                defs.push(GraphNode::HardReg(reg));
+            }
+        }
+        Instruction::RawBytes(_) => {}
     }
 
     defs
@@ -353,6 +371,8 @@ fn jump_targets(instr: &Instruction) -> Vec<String> {
     match instr {
         Instruction::Jmp(label) => vec![label.clone()],
         Instruction::JmpCC(_, label) => vec![label.clone()],
+        // JmpIndirect: ジャンプテーブルの全エントリを CFG 後続として返す
+        Instruction::JmpIndirect(_, targets) => targets.clone(),
         _ => vec![],
     }
 }
@@ -389,8 +409,8 @@ fn analyze_liveness(instructions: &[Instruction]) -> LivenessInfo {
                 successors[i].push(idx);
             }
         }
-        // フォールスルー（Jmp と Ret 以外）
-        if !matches!(instructions[i], Instruction::Jmp(_) | Instruction::Ret) {
+        // フォールスルー（Jmp, JmpIndirect, Ret 以外）
+        if !matches!(instructions[i], Instruction::Jmp(_) | Instruction::JmpIndirect(_, _) | Instruction::Ret) {
             if i + 1 < n {
                 successors[i].push(i + 1);
             }
@@ -981,6 +1001,8 @@ fn replace_in_instruction(instr: Instruction, assignments: &HashMap<String, Oper
             src: replace_operand(src, assignments),
             dst: replace_operand(dst, assignments),
         },
+        Instruction::JmpIndirect(op, ref targets) => Instruction::JmpIndirect(replace_operand(op, assignments), targets.clone()),
+        Instruction::CallIndirect(op) => Instruction::CallIndirect(replace_operand(op, assignments)),
         // These don't have operands to replace
         instr @ (Instruction::SignExtend(_)
             | Instruction::Jmp(_)
@@ -989,7 +1011,8 @@ fn replace_in_instruction(instr: Instruction, assignments: &HashMap<String, Oper
             | Instruction::AllocateStack(_)
             | Instruction::DeallocateStack(_)
             | Instruction::Call(_)
-            | Instruction::Ret) => instr,
+            | Instruction::Ret
+            | Instruction::RawBytes(_)) => instr,
     }
 }
 
@@ -1181,6 +1204,12 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
         }
 
+        // JmpIndirect: memory operand → load via R10
+        Instruction::JmpIndirect(ref op, ref targets) if is_memory_operand(op) => {
+            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: op.clone(), dst: Operand::Register(Reg::R10) });
+            out.push(Instruction::JmpIndirect(Operand::Register(Reg::R10), targets.clone()));
+        }
+
         // Default: no fixup needed
         other => out.push(other),
     }
@@ -1285,8 +1314,10 @@ fn for_each_operand<F: FnMut(&Operand)>(instr: &Instruction, mut f: F) {
         Instruction::Cvtsi2sd { src, dst, .. } => { f(src); f(dst); }
         Instruction::Cvttsd2si { src, dst, .. } => { f(src); f(dst); }
         Instruction::Lea { src, dst } => { f(src); f(dst); }
+        Instruction::JmpIndirect(op, _) => { f(op); }
+        Instruction::CallIndirect(op) => { f(op); }
         Instruction::SignExtend(_) | Instruction::Jmp(_) | Instruction::JmpCC(_, _)
         | Instruction::Label(_) | Instruction::AllocateStack(_) | Instruction::DeallocateStack(_)
-        | Instruction::Call(_) | Instruction::Ret => {}
+        | Instruction::Call(_) | Instruction::Ret | Instruction::RawBytes(_) => {}
     }
 }

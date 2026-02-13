@@ -7,6 +7,8 @@
 //! - 三アドレスコード: 各命令は最大3つのオペランドを持つ
 //! - 無制限の仮想変数: `tmp.0`, `tmp.1`, ... で一時変数を生成
 //! - 制御フロー: `Jump`, `JumpIfZero`, `JumpIfNotZero`, `Label` で表現
+//! - 間接ジャンプ: `JumpIndirect` — 難読化の CFF ジャンプテーブル用。
+//!   `possible_targets` で生存解析に正しい CFG 後続ブロック情報を提供
 //! - 型情報: `var_types` マップで全変数の型を追跡（最適化パスで使用）
 
 use std::collections::HashMap;
@@ -85,6 +87,11 @@ pub enum TackyInstruction {
     CopyFromOffset { src: String, offset: usize, dst: TackyVal },
     /// `dst = memcpy(src, size)` (構造体全体のコピー)
     CopyStruct { src: TackyVal, dst: TackyVal, size: usize },
+    /// `jmp *target` — 間接ジャンプ（難読化の CFF ジャンプテーブル用）
+    /// `possible_targets` はジャンプテーブルの全エントリ。
+    /// コード生成時は `jmp *target` のみ出力するが、レジスタ割り当ての
+    /// 生存解析で正しい後続ブロック情報を提供するために使う。
+    JumpIndirect { target: TackyVal, possible_targets: Vec<String> },
 }
 
 /// TACKY 値（定数または変数）
@@ -160,6 +167,9 @@ pub enum TackyStaticInit {
     /// バイト配列初期値（難読化パスの文字列暗号化で使用）。
     /// StringInit を加算暗号化した結果を `.data` セクションに配置する。
     ByteArrayInit(Vec<u8>),
+    /// ポインタ配列初期値（難読化の CFF ジャンプテーブル用）。
+    /// ラベルアドレスの配列を `.data` セクションに `.quad label0, label1, ...` として配置する。
+    PointerArrayInit(Vec<String>),
 }
 
 /// 読み取り専用の静的定数

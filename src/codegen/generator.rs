@@ -134,6 +134,7 @@ fn convert_static_init(init: &TackyStaticInit) -> StaticInit {
         TackyStaticInit::ZeroInit(n) => StaticInit::ZeroInit(*n),
         TackyStaticInit::StringInit(s, n) => StaticInit::StringInit(s.clone(), *n),
         TackyStaticInit::ByteArrayInit(bytes) => StaticInit::ByteArrayInit(bytes.clone()),
+        TackyStaticInit::PointerArrayInit(labels) => StaticInit::PointerArrayInit(labels.clone()),
     }
 }
 
@@ -987,6 +988,11 @@ fn generate_instruction(
                     dst: dst_op,
                 });
             }
+        }
+
+        TackyInstruction::JumpIndirect { target, possible_targets } => {
+            let target_op = val_to_operand(target, static_vars, stack_vars)?;
+            instrs.push(Instruction::JmpIndirect(target_op, possible_targets.clone()));
         }
 
         TackyInstruction::CopyStruct { src, dst, size } => {
