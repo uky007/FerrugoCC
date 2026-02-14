@@ -32,10 +32,12 @@ cargo run -- --fobfuscate --obf-no-cff source.c              # CFF を無効化
 cargo run -- --fobfuscate --obf-no-strings source.c           # 文字列暗号化を無効化
 cargo run -- --fobfuscate --obf-no-anti-disasm source.c       # 反逆アセンブリを無効化
 cargo run -- --fobfuscate --obf-no-indirect-calls source.c    # 間接呼び出しを無効化
+cargo run -- --fobfuscate --obf-no-arith-subst source.c      # 算術置換を無効化
 
 # 頻度パラメータの調整
 cargo run -- --fobfuscate --obf-junk-freq=2 source.c   # 2命令ごとにジャンク挿入
 cargo run -- --fobfuscate --obf-pred-freq=3 source.c    # 3回に1回不透明述語を適用
+cargo run -- --fobfuscate --obf-arith-freq=2 source.c   # 2回に1回算術置換を適用
 ```
 
 アセンブリから実行ファイルへの変換には、システムに `gcc` が必要。
@@ -79,9 +81,9 @@ exit code による正当性検証とサイズ集計を自動実行する。
 ```
 Level 0 (normal):       44,416 bytes  (1.0x)
 Level 1 (light):        46,024 bytes  (1.04x)
-Level 2 (standard):    109,592 bytes  (2.47x)
-Level 3 (full):        109,592 bytes  (2.47x)
-Level 4 (maximum):     205,432 bytes  (4.63x)
+Level 2 (standard):    111,088 bytes  (2.50x)
+Level 3 (full):        116,560 bytes  (2.62x)
+Level 4 (maximum):     239,224 bytes  (5.39x)
 ```
 
 出力先: `benchmark/output/level_N/<name>` (バイナリ), `benchmark/output/level_N/<name>.s` (アセンブリ)
@@ -178,21 +180,21 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 
 書籍全20章の完了後、追加機能としてコード難読化パスを実装した。
 `--fobfuscate` フラグで最適化の代わりに難読化パスを適用する。
-TACKY IR レベルの5パスと ASM レベルの2パスの計7パスで構成される。
+TACKY IR レベルの6パスと ASM レベルの2パスの計8パスで構成される。
 
 `--obf-level=N` で難読化の強度を段階的に制御できる:
 
-| Level | 有効パス | ジャンク頻度 | 述語頻度 | 用途 |
-|-------|---------|------------|---------|------|
-| 1 | 定数間接化, ジャンク, 述語 | 8命令ごと | 10回に1回 | 軽量：基本的な難読化 |
-| 2 | Level 1 + CFF | 4命令ごと | 5回に1回 | 標準：制御フロー平坦化追加 |
-| 3 | Level 2 + 文字列暗号化, Anti-Disasm, 間接呼出 | 4命令ごと | 5回に1回 | 全パス有効（デフォルト） |
-| 4 | 全パス | 2命令ごと | 2回に1回 | 最大：高頻度で全パス適用 |
+| Level | 有効パス | ジャンク頻度 | 述語頻度 | 算術置換頻度 | 用途 |
+|-------|---------|------------|---------|------------|------|
+| 1 | 定数間接化, ジャンク, 述語 | 8命令ごと | 10回に1回 | なし | 軽量：基本的な難読化 |
+| 2 | Level 1 + CFF, 算術置換 | 4命令ごと | 5回に1回 | 5回に1回 | 標準：制御フロー平坦化+算術置換追加 |
+| 3 | Level 2 + 文字列暗号化, Anti-Disasm, 間接呼出 | 4命令ごと | 5回に1回 | 3回に1回 | 全パス有効（デフォルト） |
+| 4 | 全パス | 2命令ごと | 2回に1回 | 2回に1回 | 最大：高頻度で全パス適用 |
 
-各パスは `--obf-no-cff`, `--obf-no-strings` 等で個別に無効化でき、
-`--obf-junk-freq=N`, `--obf-pred-freq=N` で頻度を直接指定することも可能。
+各パスは `--obf-no-cff`, `--obf-no-strings`, `--obf-no-arith-subst` 等で個別に無効化でき、
+`--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N` で頻度を直接指定することも可能。
 
-#### TACKY IR レベル（5パス）
+#### TACKY IR レベル（6パス）
 
 - **Pass 1 — 定数の間接化（Constant Encoding）**: 即値をランタイム計算に置換
   ```c
@@ -200,8 +202,16 @@ TACKY IR レベルの5パスと ASM レベルの2パスの計7パスで構成さ
   // 変換後: tmp_a = 6; tmp_b = 7; x = tmp_a * tmp_b;  // 6 * 7 = 42
   // ゼロの場合: tmp = 7; x = tmp - tmp;                // a - a = 0
   ```
-- **Pass 2 — ジャンクコード挿入**: N命令ごと（デフォルト4）に結果が使われない dead computation を3命令挿入
-- **Pass 3 — 不透明述語（Opaque Predicates）**: N回に1回（デフォルト5）、値生成命令を常に真の条件分岐で囲む。
+- **Pass 2 — 算術置換（Arithmetic Substitution）**: Add/Subtract を数学的に等価な多段計算に展開し、
+  デコンパイラ（Hex-Rays, Ghidra）での式復元を困難にする。4パターンをローテーション:
+  | # | 対象 | 変換 | 原理 |
+  |---|------|------|------|
+  | 0 | Add | `a+b` → `(a+K)+(b-K)` | アフィン変換 |
+  | 1 | Add | `a+b` → `3(a+b)-2a-2b` | 係数展開 |
+  | 2 | Sub | `a-b` → `(a+K)-(b+K)` | アフィン変換 |
+  | 3 | Sub | `a-b` → `3a-3b-(2a-2b)` | 係数展開 |
+- **Pass 3 — ジャンクコード挿入**: N命令ごと（デフォルト4）に結果が使われない dead computation を3命令挿入
+- **Pass 4 — 不透明述語（Opaque Predicates）**: N回に1回（デフォルト5）、値生成命令を常に真の条件分岐で囲む。
   パターンマッチによる自動除去を防ぐため4種類の数学的恒等式をローテーション:
   | # | 恒等式 | 原理 |
   |---|--------|------|
@@ -209,7 +219,7 @@ TACKY IR レベルの5パスと ASM レベルの2パスの計7パスで構成さ
   | 1 | `!(x² + 1 > 0)` → 0 | x²+1 は常に正 |
   | 2 | `(x+1)² - x² - 1 - 2x == 0` | 展開すると恒等式 |
   | 3 | `(x³ - x) % 3 == 0` | 連続3整数の積は3の倍数 |
-- **Pass 4 — 制御フロー平坦化（CFF）**: 関数内の基本ブロックをジャンプテーブル + 状態エンコードの
+- **Pass 5 — 制御フロー平坦化（CFF）**: 関数内の基本ブロックをジャンプテーブル + 状態エンコードの
   dispatch ループに変換し、IDA Pro 等の CFG 復元を破壊する
   - **ジャンプテーブル**: `.data` セクションにブロックラベルの配列（`PointerArrayInit`）を配置し、
     `JumpIndirect`（`jmp *%rax`）で分岐。連続比較の `if (state == i) goto block_i` よりも
@@ -232,13 +242,13 @@ TACKY IR レベルの5パスと ASM レベルの2パスの計7パスで構成さ
   movq (%rax), %rax        # ジャンプ先アドレスをロード
   jmp *%rax                # 間接ジャンプ
   ```
-- **Pass 5 — 文字列暗号化**: 文字列リテラルを加算暗号化（key=0x5A）して `.data` に `ByteArrayInit` として配置。
+- **Pass 6 — 文字列暗号化**: 文字列リテラルを加算暗号化（key=0x5A）して `.data` に `ByteArrayInit` として配置。
   main() の先頭にアンロール復号コード（Load → Subtract(key) → Store）を挿入
-  - Pass 5 は Pass 1〜4 の後に適用する。復号コードが CFF 等で破壊されるのを防ぐため
+  - Pass 6 は Pass 1〜5 の後に適用する。復号コードが CFF 等で破壊されるのを防ぐため
 
 #### ASM レベル（2パス、レジスタ割り当て+fixup 後に適用）
 
-- **Pass 6 — 反逆アセンブリ（Anti-Disassembly）**: 無条件ジャンプ（`Jmp`, `JmpIndirect`）の直後に
+- **Pass 7 — 反逆アセンブリ（Anti-Disassembly）**: 無条件ジャンプ（`Jmp`, `JmpIndirect`）の直後に
   `0xE8`（x86 の `call rel32` オペコード）を `.byte` として挿入。リニアスイープ型逆アセンブラが
   5バイト命令として解釈しようとするため、後続命令の命令境界認識が破壊される
   ```asm
@@ -246,17 +256,18 @@ TACKY IR レベルの5パスと ASM レベルの2パスの計7パスで構成さ
   .byte 0xe8        # ← 逆アセンブラはここから call rel32 として解釈を試みる
   .Lobf_6:
   ```
-- **Pass 7 — 関数呼び出しの間接化（Indirect Calls）**: `call func` を
+- **Pass 8 — 関数呼び出しの間接化（Indirect Calls）**: `call func` を
   `lea func(%rip), %r10; call *%r10` に変換。静的解析でのコールグラフ復元を妨害する
 
 #### パス適用順序の設計
 
 TACKY IR パスの適用順序は意図的に設計されている:
 1. **定数の間接化**が先 → 後続パスが追加する定数はエンコード不要
-2. **ジャンクコード** → 制御フローを変えないので CFF の解析に影響しない
-3. **不透明述語** → 分岐を追加。CFF がこれも含めて平坦化する
-4. **CFF** → 全体の制御構造を破壊。他のパスの後でないと構造が残らない
-5. **文字列暗号化** → 復号コードが他のパスで壊されないよう最後に適用
+2. **算術置換** → 定数間接化で展開された式をさらに複雑にしつつ、後続パスでさらにノイズを加える
+3. **ジャンクコード** → 制御フローを変えないので CFF の解析に影響しない
+4. **不透明述語** → 分岐を追加。CFF がこれも含めて平坦化する
+5. **CFF** → 全体の制御構造を破壊。他のパスの後でないと構造が残らない
+6. **文字列暗号化** → 復号コードが他のパスで壊されないよう最後に適用
 
 ASM レベルパスはレジスタ割り当て後に適用する:
 - 反逆アセンブリはジャンプ命令の位置を変えないため安全
@@ -732,7 +743,7 @@ Chapter 7 では以下の機能を追加した:
 │ Optimize  │  src/tacky/         TACKY IR 最適化パス（デフォルト）
 │    or     │  optimize.rs        定数畳み込み・コピー伝播・不要コード除去
 │ Obfuscate │  obfuscate.rs       TACKY 難読化パス（--fobfuscate 指定時）
-└────┬─────┘                      定数間接化・ジャンクコード・不透明述語・CFF・文字列暗号化
+└────┬─────┘                      定数間接化・算術置換・ジャンクコード・不透明述語・CFF・文字列暗号化
      ▼
 ┌──────────┐
 │ Codegen   │  src/codegen/       TACKY IR → Asm(Pseudo) に変換
@@ -787,10 +798,11 @@ Chapter 7 では以下の機能を追加した:
 ### コード難読化（Anti-Reverse Engineering）
 
 コンパイラレベルでの難読化変換。元のソースコードと等価だが、逆コンパイル・逆アセンブル時に解析を困難にする。
-`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計7パスを適用する。
+`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計8パスを適用する。
 
-TACKY IR レベル（5パス）:
+TACKY IR レベル（6パス）:
 - [x] **定数の間接化（Constant Encoding）**: 即値をランタイム計算に置換（`42` → `6 * 7`, `0` → `a - a` 等）。Double は精度問題のためスキップ
+- [x] **算術置換（Arithmetic Substitution）**: Add/Subtract を多段計算（アフィン変換・係数展開）に展開し、デコンパイラでの式復元を困難にする。`--obf-arith-freq` で適用頻度を設定可能
 - [x] **ジャンクコード挿入**: N命令ごと（`--obf-junk-freq` で設定可能）に実行結果に影響しない dead computation（3命令）を挿入し、逆コンパイラの解析量を増やす
 - [x] **不透明述語（Opaque Predicates）多様化**: 4種類の数学的恒等式（連続整数の積、x²+1>0、代数恒等式、連続3整数の積）をN回に1回（`--obf-pred-freq` で設定可能）ローテーションし、パターンマッチによる自動除去を防ぐ
 - [x] **制御フロー平坦化（CFF）+ ジャンプテーブル + 状態エンコード**: 基本ブロックをジャンプテーブル（`jmp *%rax`）+ アフィン変換で符号化した状態変数の dispatch ループに変換。IDA Pro の CFG 復元を破壊する
@@ -802,8 +814,8 @@ ASM レベル（2パス、レジスタ割り当て後に適用）:
 
 パラメータ化:
 - [x] **難易度レベル制御（`--obf-level=1..4`）**: 段階的に難読化強度を上げたバイナリを生成可能。ベンチマークやデオブフスケーター評価に活用
-- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-anti-disasm`, `--obf-no-indirect-calls` で各パスを個別に無効化
-- [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N` でジャンクコード・不透明述語の挿入頻度を調整
+- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-anti-disasm`, `--obf-no-indirect-calls`, `--obf-no-arith-subst` で各パスを個別に無効化
+- [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N` でジャンクコード・不透明述語・算術置換の挿入頻度を調整
 
 未実装の候補:
 - [ ] **関数のインライン展開/アウトライン化**: 関数境界を攪乱し、元の関数構造の復元を困難にする

@@ -8,19 +8,21 @@
 pub struct ObfuscationConfig {
     // ── パス有効/無効 ──
 
-    /// Pass 1: 定数の間接化（即値を a*b+c に分解）
+    /// Pass 1 (TACKY): 定数の間接化（即値を a*b+c に分解）
     pub constant_encoding: bool,
-    /// Pass 2: ジャンクコード挿入
+    /// Pass 2 (TACKY): 算術置換（Add/Subtract を多段計算に展開）
+    pub arith_subst: bool,
+    /// Pass 3 (TACKY): ジャンクコード挿入
     pub junk_code: bool,
-    /// Pass 3: 不透明述語
+    /// Pass 4 (TACKY): 不透明述語
     pub opaque_predicates: bool,
-    /// Pass 4: 制御フロー平坦化
+    /// Pass 5 (TACKY): 制御フロー平坦化
     pub cff: bool,
-    /// Pass 5: 文字列暗号化
+    /// Pass 6 (TACKY): 文字列暗号化
     pub string_encryption: bool,
-    /// Pass 6: 反逆アセンブリ（ゴミバイト挿入）
+    /// Pass 7 (ASM): 反逆アセンブリ（ゴミバイト挿入）
     pub anti_disassembly: bool,
-    /// Pass 7: 関数呼び出しの間接化
+    /// Pass 8 (ASM): 関数呼び出しの間接化
     pub indirect_calls: bool,
 
     // ── 頻度パラメータ ──
@@ -37,6 +39,9 @@ pub struct ObfuscationConfig {
     /// 状態エンコードバイアス
     pub cff_b: i32,
 
+    /// 算術置換頻度（N回に1回適用）
+    pub arith_freq: usize,
+
     // ── 文字列暗号化パラメータ ──
 
     /// 暗号化キー（加算ベース）
@@ -49,13 +54,14 @@ impl ObfuscationConfig {
     /// | Level | 概要 |
     /// |-------|------|
     /// | 1     | 軽量: 定数+ジャンク+述語のみ、低頻度 |
-    /// | 2     | 標準: 全TACKYパス有効（現在のデフォルト相当） |
-    /// | 3     | 強力: 全7パス有効 |
+    /// | 2     | 標準: +CFF+算術置換 |
+    /// | 3     | 強力: 全8パス有効 |
     /// | 4     | 最大: 全パス有効、高頻度 |
     pub fn from_level(level: u8) -> Self {
         match level {
             1 => ObfuscationConfig {
                 constant_encoding: true,
+                arith_subst: false,
                 junk_code: true,
                 opaque_predicates: true,
                 cff: false,
@@ -64,12 +70,14 @@ impl ObfuscationConfig {
                 indirect_calls: false,
                 junk_freq: 8,
                 pred_freq: 10,
+                arith_freq: 3,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,
             },
             2 => ObfuscationConfig {
                 constant_encoding: true,
+                arith_subst: true,
                 junk_code: true,
                 opaque_predicates: true,
                 cff: true,
@@ -78,12 +86,14 @@ impl ObfuscationConfig {
                 indirect_calls: false,
                 junk_freq: 4,
                 pred_freq: 5,
+                arith_freq: 5,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,
             },
             3 => ObfuscationConfig {
                 constant_encoding: true,
+                arith_subst: true,
                 junk_code: true,
                 opaque_predicates: true,
                 cff: true,
@@ -92,6 +102,7 @@ impl ObfuscationConfig {
                 indirect_calls: true,
                 junk_freq: 4,
                 pred_freq: 5,
+                arith_freq: 3,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,
@@ -99,6 +110,7 @@ impl ObfuscationConfig {
             // level >= 4: 最大
             _ => ObfuscationConfig {
                 constant_encoding: true,
+                arith_subst: true,
                 junk_code: true,
                 opaque_predicates: true,
                 cff: true,
@@ -107,6 +119,7 @@ impl ObfuscationConfig {
                 indirect_calls: true,
                 junk_freq: 2,
                 pred_freq: 2,
+                arith_freq: 2,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,

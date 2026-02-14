@@ -5,19 +5,20 @@
 //!
 //! # パス適用順序（TACKY IR レベル）
 //! 1. **Constant Encoding**（定数の間接化）— 即値を `a * b + c` の実行時計算に置換
-//! 2. **Junk Code Insertion**（ジャンクコード挿入）— 4命令ごとに dead computation を挿入
-//! 3. **Opaque Predicates**（不透明述語）— 4パターンの常真条件分岐で値生成命令を囲む
+//! 2. **Arithmetic Substitution**（算術置換）— Add/Subtract を多段計算に展開
+//! 3. **Junk Code Insertion**（ジャンクコード挿入）— 4命令ごとに dead computation を挿入
+//! 4. **Opaque Predicates**（不透明述語）— 4パターンの常真条件分岐で値生成命令を囲む
 //!    - パターン 0: `x*(x+1) % 2 == 0`（連続整数の積は偶数）
 //!    - パターン 1: `!(x² + 1 > 0)`（x²+1 は常に正）
 //!    - パターン 2: `(x+1)² - x² - 1 - 2x == 0`（代数恒等式）
 //!    - パターン 3: `(x³ - x) % 3 == 0`（連続3整数の積は3の倍数）
-//! 4. **Control Flow Flattening**（制御フロー平坦化）— 基本ブロックをジャンプテーブル
+//! 5. **Control Flow Flattening**（制御フロー平坦化）— 基本ブロックをジャンプテーブル
 //!    + 状態エンコードの dispatch ループに変換。IDA 等の CFG 復元を破壊する。
 //!    - ジャンプテーブル: `.data` セクションにブロックラベルの配列を配置し `jmp *%rax` で分岐
 //!    - 状態エンコード: `encoded = index * 37 + 0xCAFE` のアフィン変換で状態変数を符号化
-//! 5. **String Encryption**（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
+//! 6. **String Encryption**（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
 //!
-//! Pass 5 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
+//! Pass 6 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
 //!
 //! # ASM レベル難読化（codegen/mod.rs で適用、レジスタ割り当て後）
 //! - **Anti-Disassembly**: 無条件ジャンプ直後に `0xE8`（call opcode）を挿入し命令境界認識を破壊
@@ -58,8 +59,8 @@ impl ObfCtx {
 
 /// 難読化パスのエントリポイント
 ///
-/// 各関数に対し Pass 1→4 を適用した後、プログラム全体に Pass 5（文字列暗号化）を適用する。
-/// Pass 5 を最後にすることで、復号コードが他のパス（特に CFF）で破壊されるのを防ぐ。
+/// 各関数に対し Pass 1→5 を適用した後、プログラム全体に Pass 6（文字列暗号化）を適用する。
+/// Pass 6 を最後にすることで、復号コードが他のパス（特に CFF）で破壊されるのを防ぐ。
 pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProgram {
     let mut program = program;
 
@@ -72,17 +73,22 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
             func.body = constant_encoding(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types);
         }
 
-        // Pass 2: ジャンクコード挿入
+        // Pass 2: 算術置換（Add/Subtract を多段計算に展開）
+        if config.arith_subst {
+            func.body = arithmetic_substitution(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types, config.arith_freq);
+        }
+
+        // Pass 3: ジャンクコード挿入
         if config.junk_code {
             func.body = junk_code_insertion(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types, config.junk_freq);
         }
 
-        // Pass 3: 不透明述語（多様化パターン）
+        // Pass 4: 不透明述語（多様化パターン）
         if config.opaque_predicates {
             func.body = opaque_predicates(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types, config.pred_freq);
         }
 
-        // Pass 4: 制御フロー平坦化（ジャンプテーブル + 状態エンコード）
+        // Pass 5: 制御フロー平坦化（ジャンプテーブル + 状態エンコード）
         if config.cff {
             func.body = control_flow_flattening(
                 std::mem::take(&mut func.body),
@@ -95,7 +101,7 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
         }
     }
 
-    // Pass 5: 文字列暗号化（他のパスの後に適用 — 復号コードが CFF 等で壊されるのを防ぐ）
+    // Pass 6: 文字列暗号化（他のパスの後に適用 — 復号コードが CFF 等で壊されるのを防ぐ）
     if config.string_encryption {
         string_encryption(&mut program, &mut ctx, config.string_key);
     }
@@ -104,7 +110,7 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
 }
 
 // ─────────────────────────────────────────────────────────────
-// Pass 5: String Encryption（文字列暗号化）
+// Pass 6: String Encryption（文字列暗号化）
 // ─────────────────────────────────────────────────────────────
 
 /// 文字列定数を暗号化し、main() の先頭に復号コードを挿入する。
@@ -379,7 +385,331 @@ fn decompose_value(value: i64) -> (i64, i64, i64) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Pass 2: Junk Code Insertion（ジャンクコード挿入）
+// Pass 2: Arithmetic Substitution（算術置換）
+// ─────────────────────────────────────────────────────────────
+
+/// Add/Subtract を数学的に等価な多段計算に置換する。
+/// デコンパイラでの式復元を困難にする。
+///
+/// - Add → パターン0（アフィン変換）or パターン1（係数展開）をローテーション
+/// - Subtract → パターン2（アフィン変換）or パターン3（係数展開）をローテーション
+/// - Multiply, Divide, Double系 → スキップ（オーバーフロー・精度問題）
+/// - `obf_tmp.*` 変数への操作 → スキップ（定数間接化との無限展開防止）
+fn arithmetic_substitution(
+    instrs: Vec<TackyInstruction>,
+    ctx: &mut ObfCtx,
+    var_types: &mut std::collections::HashMap<String, Type>,
+    freq: usize,
+) -> Vec<TackyInstruction> {
+    let mut result = Vec::new();
+    let mut candidate_count = 0;
+
+    for instr in instrs {
+        match &instr {
+            TackyInstruction::Binary { op, left, right, dst } => {
+                // obf_tmp.* 変数への操作はスキップ（カスケード防止）
+                let dst_is_obf = if let TackyVal::Var(name) = dst {
+                    name.starts_with("obf_tmp.")
+                } else {
+                    false
+                };
+
+                if !dst_is_obf {
+                    match op {
+                        TackyBinaryOp::Add => {
+                            candidate_count += 1;
+                            if candidate_count % freq == 0 {
+                                // パターン0/1 をローテーション
+                                let pattern = ctx.label_counter % 2;
+                                ctx.label_counter += 1;
+                                match pattern {
+                                    0 => result.extend(arith_add_affine(left, right, dst, ctx, var_types)),
+                                    _ => result.extend(arith_add_coeff(left, right, dst, ctx, var_types)),
+                                }
+                                continue;
+                            }
+                        }
+                        TackyBinaryOp::Subtract => {
+                            candidate_count += 1;
+                            if candidate_count % freq == 0 {
+                                // パターン2/3 をローテーション
+                                let pattern = ctx.label_counter % 2;
+                                ctx.label_counter += 1;
+                                match pattern {
+                                    0 => result.extend(arith_sub_affine(left, right, dst, ctx, var_types)),
+                                    _ => result.extend(arith_sub_coeff(left, right, dst, ctx, var_types)),
+                                }
+                                continue;
+                            }
+                        }
+                        // Multiply, Divide, Double系はスキップ
+                        _ => {}
+                    }
+                }
+
+                result.push(instr);
+            }
+            _ => result.push(instr),
+        }
+    }
+
+    result
+}
+
+/// dst の型を var_types から取得する。見つからなければ Int を返す。
+fn get_dst_type(dst: &TackyVal, var_types: &std::collections::HashMap<String, Type>) -> Type {
+    if let TackyVal::Var(name) = dst {
+        var_types.get(name).cloned().unwrap_or(Type::Int)
+    } else {
+        Type::Int
+    }
+}
+
+/// パターン0 — アフィン変換（Add）:
+/// `dst = a + b` → `tmp1 = a + K; tmp2 = b - K; dst = tmp1 + tmp2`
+fn arith_add_affine(
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: &TackyVal,
+    ctx: &mut ObfCtx,
+    var_types: &mut std::collections::HashMap<String, Type>,
+) -> Vec<TackyInstruction> {
+    let ty = get_dst_type(dst, var_types);
+    let k = ((ctx.label_counter as i64).wrapping_mul(0x9E37) ^ 0x1F2D) & 0x7FFF;
+    let k_const = make_typed_const(&ty, k);
+    let k_const2 = make_typed_const(&ty, k);
+
+    let tmp1 = ctx.fresh_tmp();
+    let tmp2 = ctx.fresh_tmp();
+    var_types.insert(tmp1.clone(), ty.clone());
+    var_types.insert(tmp2.clone(), ty);
+
+    vec![
+        // tmp1 = a + K
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: left.clone(),
+            right: TackyVal::Constant(k_const),
+            dst: TackyVal::Var(tmp1.clone()),
+        },
+        // tmp2 = b - K
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Subtract,
+            left: right.clone(),
+            right: TackyVal::Constant(k_const2),
+            dst: TackyVal::Var(tmp2.clone()),
+        },
+        // dst = tmp1 + tmp2
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: TackyVal::Var(tmp1),
+            right: TackyVal::Var(tmp2),
+            dst: dst.clone(),
+        },
+    ]
+}
+
+/// パターン1 — 係数展開（Add）:
+/// `dst = a + b` → `dst = 3(a+b) - 2a - 2b = a + b`
+fn arith_add_coeff(
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: &TackyVal,
+    ctx: &mut ObfCtx,
+    var_types: &mut std::collections::HashMap<String, Type>,
+) -> Vec<TackyInstruction> {
+    let ty = get_dst_type(dst, var_types);
+    let three = make_typed_const(&ty, 3);
+    let three2 = make_typed_const(&ty, 3);
+    let two = make_typed_const(&ty, 2);
+    let two2 = make_typed_const(&ty, 2);
+
+    let tmp1 = ctx.fresh_tmp(); // a * 3
+    let tmp2 = ctx.fresh_tmp(); // b * 3
+    let tmp3 = ctx.fresh_tmp(); // 3a + 3b
+    let tmp4 = ctx.fresh_tmp(); // a * 2
+    let tmp5 = ctx.fresh_tmp(); // b * 2
+    let tmp6 = ctx.fresh_tmp(); // 2a + 2b
+    for t in [&tmp1, &tmp2, &tmp3, &tmp4, &tmp5, &tmp6] {
+        var_types.insert(t.clone(), ty.clone());
+    }
+
+    vec![
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Multiply,
+            left: left.clone(),
+            right: TackyVal::Constant(three),
+            dst: TackyVal::Var(tmp1.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Multiply,
+            left: right.clone(),
+            right: TackyVal::Constant(three2),
+            dst: TackyVal::Var(tmp2.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: TackyVal::Var(tmp1),
+            right: TackyVal::Var(tmp2),
+            dst: TackyVal::Var(tmp3.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Multiply,
+            left: left.clone(),
+            right: TackyVal::Constant(two),
+            dst: TackyVal::Var(tmp4.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Multiply,
+            left: right.clone(),
+            right: TackyVal::Constant(two2),
+            dst: TackyVal::Var(tmp5.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: TackyVal::Var(tmp4),
+            right: TackyVal::Var(tmp5),
+            dst: TackyVal::Var(tmp6.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Subtract,
+            left: TackyVal::Var(tmp3),
+            right: TackyVal::Var(tmp6),
+            dst: dst.clone(),
+        },
+    ]
+}
+
+/// パターン2 — アフィン変換（Subtract）:
+/// `dst = a - b` → `tmp1 = a + K; tmp2 = b + K; dst = tmp1 - tmp2`
+fn arith_sub_affine(
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: &TackyVal,
+    ctx: &mut ObfCtx,
+    var_types: &mut std::collections::HashMap<String, Type>,
+) -> Vec<TackyInstruction> {
+    let ty = get_dst_type(dst, var_types);
+    let k = ((ctx.label_counter as i64).wrapping_mul(0xA3B7) ^ 0x2E4C) & 0x7FFF;
+    let k_const = make_typed_const(&ty, k);
+    let k_const2 = make_typed_const(&ty, k);
+
+    let tmp1 = ctx.fresh_tmp();
+    let tmp2 = ctx.fresh_tmp();
+    var_types.insert(tmp1.clone(), ty.clone());
+    var_types.insert(tmp2.clone(), ty);
+
+    vec![
+        // tmp1 = a + K
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: left.clone(),
+            right: TackyVal::Constant(k_const),
+            dst: TackyVal::Var(tmp1.clone()),
+        },
+        // tmp2 = b + K
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: right.clone(),
+            right: TackyVal::Constant(k_const2),
+            dst: TackyVal::Var(tmp2.clone()),
+        },
+        // dst = tmp1 - tmp2
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Subtract,
+            left: TackyVal::Var(tmp1),
+            right: TackyVal::Var(tmp2),
+            dst: dst.clone(),
+        },
+    ]
+}
+
+/// パターン3 — 係数展開（Subtract）:
+/// `dst = a - b` → `dst = 3a - 3b - (2a - 2b)`
+fn arith_sub_coeff(
+    left: &TackyVal,
+    right: &TackyVal,
+    dst: &TackyVal,
+    ctx: &mut ObfCtx,
+    var_types: &mut std::collections::HashMap<String, Type>,
+) -> Vec<TackyInstruction> {
+    let ty = get_dst_type(dst, var_types);
+    let three = make_typed_const(&ty, 3);
+    let three2 = make_typed_const(&ty, 3);
+    let two = make_typed_const(&ty, 2);
+    let two2 = make_typed_const(&ty, 2);
+
+    let tmp1 = ctx.fresh_tmp(); // a * 3
+    let tmp2 = ctx.fresh_tmp(); // b * 3
+    let tmp3 = ctx.fresh_tmp(); // 3a - 3b
+    let tmp4 = ctx.fresh_tmp(); // a * 2
+    let tmp5 = ctx.fresh_tmp(); // b * 2
+    let tmp6 = ctx.fresh_tmp(); // 2a - 2b
+    for t in [&tmp1, &tmp2, &tmp3, &tmp4, &tmp5, &tmp6] {
+        var_types.insert(t.clone(), ty.clone());
+    }
+
+    vec![
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Multiply,
+            left: left.clone(),
+            right: TackyVal::Constant(three),
+            dst: TackyVal::Var(tmp1.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Multiply,
+            left: right.clone(),
+            right: TackyVal::Constant(three2),
+            dst: TackyVal::Var(tmp2.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Subtract,
+            left: TackyVal::Var(tmp1),
+            right: TackyVal::Var(tmp2),
+            dst: TackyVal::Var(tmp3.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Multiply,
+            left: left.clone(),
+            right: TackyVal::Constant(two),
+            dst: TackyVal::Var(tmp4.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Multiply,
+            left: right.clone(),
+            right: TackyVal::Constant(two2),
+            dst: TackyVal::Var(tmp5.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Subtract,
+            left: TackyVal::Var(tmp4),
+            right: TackyVal::Var(tmp5),
+            dst: TackyVal::Var(tmp6.clone()),
+        },
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Subtract,
+            left: TackyVal::Var(tmp3),
+            right: TackyVal::Var(tmp6),
+            dst: dst.clone(),
+        },
+    ]
+}
+
+/// 型に応じた定数を生成する。
+fn make_typed_const(ty: &Type, value: i64) -> TackyConst {
+    match ty {
+        Type::Int => TackyConst::Int(value as i32),
+        Type::Long => TackyConst::Long(value),
+        Type::UInt => TackyConst::UInt(value as u32),
+        Type::ULong => TackyConst::ULong(value as u64),
+        Type::Char => TackyConst::Char(value as i8),
+        Type::UChar => TackyConst::UChar(value as u8),
+        _ => TackyConst::Int(value as i32),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pass 3: Junk Code Insertion（ジャンクコード挿入）
 // ─────────────────────────────────────────────────────────────
 
 /// N命令ごとに dead computation（結果が使われない計算）を挿入する。
@@ -440,7 +770,7 @@ fn generate_junk(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Pass 3: Opaque Predicates（不透明述語）
+// Pass 4: Opaque Predicates（不透明述語）
 // ─────────────────────────────────────────────────────────────
 
 /// N回に1回、値生成命令を常に真の条件分岐で囲む。
@@ -775,7 +1105,7 @@ fn generate_predicate_3(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Pass 4: Control Flow Flattening（制御フロー平坦化）
+// Pass 5: Control Flow Flattening（制御フロー平坦化）
 // ─────────────────────────────────────────────────────────────
 
 /// 関数本体を基本ブロックに分割し、ジャンプテーブル + 状態エンコードの dispatch ループに変換する。
@@ -1312,6 +1642,116 @@ mod tests {
             let has_jump = result.iter().any(|i| matches!(i, TackyInstruction::JumpIfZero { .. }));
             assert!(has_jump, "pattern {i} should generate JumpIfZero");
         }
+    }
+
+    #[test]
+    fn test_arith_subst_expands_add() {
+        // freq=1 で全ての Add が置換されることを確認
+        let instrs = vec![
+            TackyInstruction::Binary {
+                op: TackyBinaryOp::Add,
+                left: make_int_var("a"),
+                right: make_int_var("b"),
+                dst: make_int_var("c"),
+            },
+        ];
+        let mut ctx = ObfCtx::new();
+        let mut var_types = make_var_types(&["a", "b", "c"]);
+
+        let result = arithmetic_substitution(instrs, &mut ctx, &mut var_types, 1);
+
+        // 元の1命令が3命令以上に展開されること
+        assert!(result.len() >= 3, "Add should be expanded to 3+ instructions, got {}", result.len());
+        // 元のAdd命令がそのまま残っていないこと
+        let has_original = result.len() == 1;
+        assert!(!has_original, "original Add should be replaced");
+    }
+
+    #[test]
+    fn test_arith_subst_expands_subtract() {
+        let instrs = vec![
+            TackyInstruction::Binary {
+                op: TackyBinaryOp::Subtract,
+                left: make_int_var("a"),
+                right: make_int_var("b"),
+                dst: make_int_var("c"),
+            },
+        ];
+        let mut ctx = ObfCtx::new();
+        let mut var_types = make_var_types(&["a", "b", "c"]);
+
+        let result = arithmetic_substitution(instrs, &mut ctx, &mut var_types, 1);
+
+        assert!(result.len() >= 3, "Subtract should be expanded to 3+ instructions, got {}", result.len());
+    }
+
+    #[test]
+    fn test_arith_subst_skips_multiply() {
+        let instrs = vec![
+            TackyInstruction::Binary {
+                op: TackyBinaryOp::Multiply,
+                left: make_int_var("a"),
+                right: make_int_var("b"),
+                dst: make_int_var("c"),
+            },
+        ];
+        let mut ctx = ObfCtx::new();
+        let mut var_types = make_var_types(&["a", "b", "c"]);
+
+        let result = arithmetic_substitution(instrs, &mut ctx, &mut var_types, 1);
+
+        // Multiply はそのまま残る
+        assert_eq!(result.len(), 1, "Multiply should not be expanded");
+    }
+
+    #[test]
+    fn test_arith_subst_skips_obf_tmp() {
+        // obf_tmp.* への操作はカスケード防止でスキップされる
+        let instrs = vec![
+            TackyInstruction::Binary {
+                op: TackyBinaryOp::Add,
+                left: make_int_var("a"),
+                right: make_int_var("b"),
+                dst: TackyVal::Var("obf_tmp.0".to_string()),
+            },
+        ];
+        let mut ctx = ObfCtx::new();
+        let mut var_types = make_var_types(&["a", "b"]);
+        var_types.insert("obf_tmp.0".to_string(), Type::Int);
+
+        let result = arithmetic_substitution(instrs, &mut ctx, &mut var_types, 1);
+
+        // obf_tmp への Add はスキップされる
+        assert_eq!(result.len(), 1, "Add to obf_tmp should not be expanded");
+    }
+
+    #[test]
+    fn test_arith_subst_respects_frequency() {
+        // freq=2 だと 2回目の Add のみ置換される
+        let instrs = vec![
+            TackyInstruction::Binary {
+                op: TackyBinaryOp::Add,
+                left: make_int_var("a"),
+                right: make_int_var("b"),
+                dst: make_int_var("c"),
+            },
+            TackyInstruction::Binary {
+                op: TackyBinaryOp::Add,
+                left: make_int_var("c"),
+                right: make_int_var("a"),
+                dst: make_int_var("d"),
+            },
+        ];
+        let mut ctx = ObfCtx::new();
+        let mut var_types = make_var_types(&["a", "b", "c", "d"]);
+
+        let result = arithmetic_substitution(instrs, &mut ctx, &mut var_types, 2);
+
+        // 最初の Add はそのまま、2番目が展開される → 1 + 3+ = 4+ 命令
+        assert!(result.len() >= 4, "only every 2nd Add should be expanded, got {} instructions", result.len());
+        // 最初の命令は元の Add のままであること
+        assert!(matches!(&result[0], TackyInstruction::Binary { op: TackyBinaryOp::Add, .. }),
+            "first Add should remain unchanged");
     }
 
     #[test]

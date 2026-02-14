@@ -8,7 +8,7 @@
 //!          → [Codegen] → [RegAlloc+Coalescing] → [Fixup] → [Emit] → source.s → [gcc] → binary
 //! ```
 //!
-//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（7パス）を適用する。
+//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（8パス）を適用する。
 //! `--obf-level=N` で難読化強度を段階的に制御可能（1=軽量〜4=最大）。
 //!
 //! # 使い方
@@ -108,6 +108,14 @@ struct Cli {
     #[arg(long = "obf-pred-freq")]
     obf_pred_freq: Option<usize>,
 
+    /// 算術置換を無効化
+    #[arg(long = "obf-no-arith-subst")]
+    obf_no_arith_subst: bool,
+
+    /// 算術置換頻度（N回に1回適用）
+    #[arg(long = "obf-arith-freq")]
+    obf_arith_freq: Option<usize>,
+
     /// Input C source file
     source: PathBuf,
 }
@@ -141,10 +149,12 @@ fn main() {
         if cli.obf_no_strings { config.string_encryption = false; }
         if cli.obf_no_anti_disasm { config.anti_disassembly = false; }
         if cli.obf_no_indirect_calls { config.indirect_calls = false; }
+        if cli.obf_no_arith_subst { config.arith_subst = false; }
 
         // 頻度オーバーライド
         if let Some(freq) = cli.obf_junk_freq { config.junk_freq = freq; }
         if let Some(freq) = cli.obf_pred_freq { config.pred_freq = freq; }
+        if let Some(freq) = cli.obf_arith_freq { config.arith_freq = freq; }
 
         Some(config)
     } else {
