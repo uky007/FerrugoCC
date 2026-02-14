@@ -7,7 +7,7 @@
 //! ```
 //!
 //! - `optimize`: 定数畳み込み・コピー伝播・不要コード除去（デフォルト）
-//! - `obfuscate`: 定数間接化・算術置換・ジャンクコード・不透明述語・CFF・文字列暗号化（`--fobfuscate`）
+//! - `obfuscate`: 定数間接化・算術置換・ジャンクコード・不透明述語・CFF・文字列暗号化 + ASM レベルのレジスタシャッフル等（`--fobfuscate`）
 
 pub mod tacky_ast;
 pub mod tacky_gen;

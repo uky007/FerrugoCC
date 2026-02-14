@@ -21,6 +21,7 @@
 //! Pass 6 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
 //!
 //! # ASM レベル難読化（codegen/mod.rs で適用、レジスタ割り当て後）
+//! - **Register Shuffle**: dead な `movq` を挿入し偽のレジスタ間依存関係を生成（R10/R11 使用）
 //! - **Anti-Disassembly**: 無条件ジャンプ直後に `0xE8`（call opcode）を挿入し命令境界認識を破壊
 //! - **Indirect Calls**: `call func` を `lea func(%rip), %r10; call *%r10` に変換
 

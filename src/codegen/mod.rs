@@ -20,11 +20,12 @@ pub use asm_ast::{AsmProgram, AsmFunction};
 use crate::error::Result;
 use crate::obfuscation::ObfuscationConfig;
 use crate::tacky::tacky_ast::TackyProgram;
-use asm_ast::{Instruction, Operand, Reg};
+use asm_ast::{AsmType, Instruction, Operand, Reg};
 
 /// TACKY プログラムをアセンブリ AST に変換する（Chapter 20: レジスタ割り当て統合）。
 ///
 /// `obf_config` が Some の場合、regalloc + fixup の後に ASM レベルの難読化パスを適用する:
+/// - レジスタシャッフル（dead mov 挿入）
 /// - 反逆アセンブリ（ゴミバイト挿入）
 /// - 関数呼び出しの間接化
 pub fn generate(program: &TackyProgram, obf_config: Option<&ObfuscationConfig>) -> Result<AsmProgram> {
@@ -52,6 +53,9 @@ pub fn generate(program: &TackyProgram, obf_config: Option<&ObfuscationConfig>) 
 
     // 3. ASM レベル難読化（fixup 後に適用）
     if let Some(config) = obf_config {
+        if config.reg_shuffle {
+            register_shuffle(&mut functions, config.reg_shuffle_freq);
+        }
         if config.anti_disassembly {
             insert_anti_disassembly(&mut functions);
         }
@@ -108,5 +112,177 @@ fn indirect_calls(functions: &mut [AsmFunction]) {
             }
         }
         func.instructions = new_instrs;
+    }
+}
+
+/// レジスタシャッフル: dead な `mov` 命令を挿入し、偽のレジスタ間依存関係を生成する。
+///
+/// デコンパイラ（Hex-Rays, Ghidra）がデータフローグラフを構築する際、
+/// R10/R11 への偽コピーが変数追跡・式復元を困難にする。
+///
+/// 3種のパターンをローテーション:
+/// - パターン0: Dead copy（`movq %rX, %r10`）
+/// - パターン1: Copy chain（`movq %rX, %r10; movq %r10, %r11`）
+/// - パターン2: Round-trip（`movq %rX, %r10; movq %r10, %rX`）
+fn register_shuffle(functions: &mut [AsmFunction], freq: usize) {
+    let freq = if freq == 0 { 5 } else { freq };
+    for func in functions {
+        let mut new_instrs = Vec::new();
+        let mut counter: usize = 0;
+        let mut pattern: usize = 0;
+        let orig = &func.instructions;
+        for (i, instr) in orig.iter().enumerate() {
+            new_instrs.push(instr.clone());
+            counter += 1;
+            if counter < freq {
+                continue;
+            }
+            // 安全な挿入位置か判定
+            let next = orig.get(i + 1);
+            if !is_safe_shuffle_point(instr, next) {
+                continue;
+            }
+            // ソースレジスタを選択
+            let src_reg = extract_source_reg(instr);
+            let src = Operand::Register(src_reg);
+            match pattern % 3 {
+                0 => {
+                    // Dead copy: movq %rX, %r10
+                    new_instrs.push(Instruction::Mov {
+                        asm_type: AsmType::Quadword,
+                        src: src,
+                        dst: Operand::Register(Reg::R10),
+                    });
+                }
+                1 => {
+                    // Copy chain: movq %rX, %r10; movq %r10, %r11
+                    new_instrs.push(Instruction::Mov {
+                        asm_type: AsmType::Quadword,
+                        src: src,
+                        dst: Operand::Register(Reg::R10),
+                    });
+                    new_instrs.push(Instruction::Mov {
+                        asm_type: AsmType::Quadword,
+                        src: Operand::Register(Reg::R10),
+                        dst: Operand::Register(Reg::R11),
+                    });
+                }
+                2 => {
+                    // Round-trip: movq %rX, %r10; movq %r10, %rX
+                    new_instrs.push(Instruction::Mov {
+                        asm_type: AsmType::Quadword,
+                        src: src.clone(),
+                        dst: Operand::Register(Reg::R10),
+                    });
+                    new_instrs.push(Instruction::Mov {
+                        asm_type: AsmType::Quadword,
+                        src: Operand::Register(Reg::R10),
+                        dst: src,
+                    });
+                }
+                _ => unreachable!(),
+            }
+            counter = 0;
+            pattern += 1;
+        }
+        func.instructions = new_instrs;
+    }
+}
+
+/// 安全な挿入位置か判定する。
+///
+/// 以下をすべて満たす場合に true:
+/// 1. 次の命令が R10/R11 を読まない（fixup 生成シーケンス保護）
+/// 2. 現在の命令が Cmp/SetCC でない（フラグレジスタのライブ区間を避ける）
+/// 3. プロローグ/エピローグ命令でない（Push/Pop/AllocateStack/DeallocateStack/Ret）
+/// 4. 次の命令が Label でない（ラベルの直前には挿入しない）
+fn is_safe_shuffle_point(current: &Instruction, next: Option<&Instruction>) -> bool {
+    // 条件2: Cmp/SetCC はスキップ
+    if matches!(current, Instruction::Cmp { .. } | Instruction::SetCC { .. }) {
+        return false;
+    }
+    // 条件3: プロローグ/エピローグ命令はスキップ
+    if matches!(
+        current,
+        Instruction::Push(_)
+            | Instruction::Pop(_)
+            | Instruction::AllocateStack(_)
+            | Instruction::DeallocateStack(_)
+            | Instruction::Ret
+    ) {
+        return false;
+    }
+    if let Some(next_instr) = next {
+        // 条件4: 次が Label なら挿入しない
+        if matches!(next_instr, Instruction::Label(_)) {
+            return false;
+        }
+        // 条件1: 次の命令が R10/R11 を読むならスキップ
+        if reads_r10_or_r11(next_instr) {
+            return false;
+        }
+    }
+    true
+}
+
+/// 命令からデスティネーションレジスタを抽出し、ソースレジスタとして使用する。
+///
+/// Mov/Binary/Lea の dst が GP レジスタ（R10/R11/SP/BP/XMM* 以外）ならそのまま返す。
+/// 抽出できない場合は AX をフォールバックとして返す。
+fn extract_source_reg(instr: &Instruction) -> Reg {
+    let reg = match instr {
+        Instruction::Mov { dst: Operand::Register(r), .. } => Some(*r),
+        Instruction::Binary { dst: Operand::Register(r), .. } => Some(*r),
+        Instruction::Lea { dst: Operand::Register(r), .. } => Some(*r),
+        _ => None,
+    };
+    match reg {
+        Some(r) if is_valid_shuffle_source(r) => r,
+        _ => Reg::AX,
+    }
+}
+
+/// シャッフルソースとして有効なレジスタか判定する。
+/// R10/R11（scratch）、SP/BP（フレーム）、XMM*（浮動小数点）は除外する。
+fn is_valid_shuffle_source(r: Reg) -> bool {
+    !matches!(
+        r,
+        Reg::R10
+            | Reg::R11
+            | Reg::SP
+            | Reg::BP
+            | Reg::XMM0 | Reg::XMM1 | Reg::XMM2 | Reg::XMM3
+            | Reg::XMM4 | Reg::XMM5 | Reg::XMM6 | Reg::XMM7
+            | Reg::XMM8 | Reg::XMM9 | Reg::XMM10 | Reg::XMM11
+            | Reg::XMM12 | Reg::XMM13 | Reg::XMM14 | Reg::XMM15
+    )
+}
+
+/// 命令が R10 または R11 を読むか判定する。
+///
+/// Binary/Unary は read-modify-write なので dst/operand も読み取り対象。
+/// fixup が生成する R11 シーケンス（`mov Stack, R11; imul src, R11; mov R11, Stack`）を
+/// 保護するため、dst に R10/R11 がある場合もスキップ対象とする。
+fn reads_r10_or_r11(instr: &Instruction) -> bool {
+    let check = |op: &Operand| matches!(op, Operand::Register(Reg::R10 | Reg::R11));
+    match instr {
+        Instruction::Mov { src, .. } => check(src),
+        Instruction::Binary { src, dst, .. } => check(src) || check(dst),
+        Instruction::Cmp { src, dst, .. } => check(src) || check(dst),
+        Instruction::Unary { operand, .. } => check(operand),
+        Instruction::Idiv { operand, .. } => check(operand),
+        Instruction::Div { operand, .. } => check(operand),
+        Instruction::SetCC { operand, .. } => check(operand),
+        Instruction::Push(op) => check(op),
+        Instruction::Movsx { src, dst } => check(src) || check(dst),
+        Instruction::MovsxByte { src, dst, .. } => check(src) || check(dst),
+        Instruction::MovZeroExtend { src, dst } => check(src) || check(dst),
+        Instruction::MovZeroExtendByte { src, dst, .. } => check(src) || check(dst),
+        Instruction::Truncate { src, dst } => check(src) || check(dst),
+        Instruction::Cvtsi2sd { src, dst, .. } => check(src) || check(dst),
+        Instruction::Cvttsd2si { src, dst, .. } => check(src) || check(dst),
+        Instruction::Lea { src, dst } => check(src) || check(dst),
+        Instruction::CallIndirect(op) => check(op),
+        _ => false,
     }
 }

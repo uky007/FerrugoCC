@@ -24,6 +24,8 @@ pub struct ObfuscationConfig {
     pub anti_disassembly: bool,
     /// Pass 8 (ASM): 関数呼び出しの間接化
     pub indirect_calls: bool,
+    /// Pass 9 (ASM): レジスタシャッフル（dead mov 挿入）
+    pub reg_shuffle: bool,
 
     // ── 頻度パラメータ ──
 
@@ -41,6 +43,8 @@ pub struct ObfuscationConfig {
 
     /// 算術置換頻度（N回に1回適用）
     pub arith_freq: usize,
+    /// レジスタシャッフル頻度（N命令ごとに挿入）
+    pub reg_shuffle_freq: usize,
 
     // ── 文字列暗号化パラメータ ──
 
@@ -55,7 +59,7 @@ impl ObfuscationConfig {
     /// |-------|------|
     /// | 1     | 軽量: 定数+ジャンク+述語のみ、低頻度 |
     /// | 2     | 標準: +CFF+算術置換 |
-    /// | 3     | 強力: 全8パス有効 |
+    /// | 3     | 強力: 全9パス有効 |
     /// | 4     | 最大: 全パス有効、高頻度 |
     pub fn from_level(level: u8) -> Self {
         match level {
@@ -68,9 +72,11 @@ impl ObfuscationConfig {
                 string_encryption: false,
                 anti_disassembly: false,
                 indirect_calls: false,
+                reg_shuffle: false,
                 junk_freq: 8,
                 pred_freq: 10,
                 arith_freq: 3,
+                reg_shuffle_freq: 5,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,
@@ -84,9 +90,11 @@ impl ObfuscationConfig {
                 string_encryption: false,
                 anti_disassembly: false,
                 indirect_calls: false,
+                reg_shuffle: false,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 5,
+                reg_shuffle_freq: 5,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,
@@ -100,9 +108,11 @@ impl ObfuscationConfig {
                 string_encryption: true,
                 anti_disassembly: true,
                 indirect_calls: true,
+                reg_shuffle: true,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 3,
+                reg_shuffle_freq: 5,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,
@@ -117,9 +127,11 @@ impl ObfuscationConfig {
                 string_encryption: true,
                 anti_disassembly: true,
                 indirect_calls: true,
+                reg_shuffle: true,
                 junk_freq: 2,
                 pred_freq: 2,
                 arith_freq: 2,
+                reg_shuffle_freq: 3,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,

@@ -33,11 +33,13 @@ cargo run -- --fobfuscate --obf-no-strings source.c           # 文字列暗号�
 cargo run -- --fobfuscate --obf-no-anti-disasm source.c       # 反逆アセンブリを無効化
 cargo run -- --fobfuscate --obf-no-indirect-calls source.c    # 間接呼び出しを無効化
 cargo run -- --fobfuscate --obf-no-arith-subst source.c      # 算術置換を無効化
+cargo run -- --fobfuscate --obf-no-reg-shuffle source.c      # レジスタシャッフルを無効化
 
 # 頻度パラメータの調整
 cargo run -- --fobfuscate --obf-junk-freq=2 source.c   # 2命令ごとにジャンク挿入
 cargo run -- --fobfuscate --obf-pred-freq=3 source.c    # 3回に1回不透明述語を適用
 cargo run -- --fobfuscate --obf-arith-freq=2 source.c   # 2回に1回算術置換を適用
+cargo run -- --fobfuscate --obf-reg-shuffle-freq=3 source.c  # 3命令ごとにレジスタシャッフル挿入
 ```
 
 アセンブリから実行ファイルへの変換には、システムに `gcc` が必要。
@@ -82,8 +84,8 @@ exit code による正当性検証とサイズ集計を自動実行する。
 Level 0 (normal):       44,416 bytes  (1.0x)
 Level 1 (light):        46,024 bytes  (1.04x)
 Level 2 (standard):    111,088 bytes  (2.50x)
-Level 3 (full):        116,560 bytes  (2.62x)
-Level 4 (maximum):     239,224 bytes  (5.39x)
+Level 3 (full):        128,920 bytes  (2.90x)
+Level 4 (maximum):     267,992 bytes  (6.03x)
 ```
 
 出力先: `benchmark/output/level_N/<name>` (バイナリ), `benchmark/output/level_N/<name>.s` (アセンブリ)
@@ -180,19 +182,19 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 
 書籍全20章の完了後、追加機能としてコード難読化パスを実装した。
 `--fobfuscate` フラグで最適化の代わりに難読化パスを適用する。
-TACKY IR レベルの6パスと ASM レベルの2パスの計8パスで構成される。
+TACKY IR レベルの6パスと ASM レベルの3パスの計9パスで構成される。
 
 `--obf-level=N` で難読化の強度を段階的に制御できる:
 
-| Level | 有効パス | ジャンク頻度 | 述語頻度 | 算術置換頻度 | 用途 |
-|-------|---------|------------|---------|------------|------|
-| 1 | 定数間接化, ジャンク, 述語 | 8命令ごと | 10回に1回 | なし | 軽量：基本的な難読化 |
-| 2 | Level 1 + CFF, 算術置換 | 4命令ごと | 5回に1回 | 5回に1回 | 標準：制御フロー平坦化+算術置換追加 |
-| 3 | Level 2 + 文字列暗号化, Anti-Disasm, 間接呼出 | 4命令ごと | 5回に1回 | 3回に1回 | 全パス有効（デフォルト） |
-| 4 | 全パス | 2命令ごと | 2回に1回 | 2回に1回 | 最大：高頻度で全パス適用 |
+| Level | 有効パス | ジャンク頻度 | 述語頻度 | 算術置換頻度 | シャッフル頻度 | 用途 |
+|-------|---------|------------|---------|------------|-------------|------|
+| 1 | 定数間接化, ジャンク, 述語 | 8命令ごと | 10回に1回 | なし | なし | 軽量：基本的な難読化 |
+| 2 | Level 1 + CFF, 算術置換 | 4命令ごと | 5回に1回 | 5回に1回 | なし | 標準：制御フロー平坦化+算術置換追加 |
+| 3 | Level 2 + 文字列暗号化, Anti-Disasm, 間接呼出, レジスタシャッフル | 4命令ごと | 5回に1回 | 3回に1回 | 5命令ごと | 全パス有効（デフォルト） |
+| 4 | 全パス | 2命令ごと | 2回に1回 | 2回に1回 | 3命令ごと | 最大：高頻度で全パス適用 |
 
-各パスは `--obf-no-cff`, `--obf-no-strings`, `--obf-no-arith-subst` 等で個別に無効化でき、
-`--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N` で頻度を直接指定することも可能。
+各パスは `--obf-no-cff`, `--obf-no-strings`, `--obf-no-arith-subst`, `--obf-no-reg-shuffle` 等で個別に無効化でき、
+`--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N`, `--obf-reg-shuffle-freq=N` で頻度を直接指定することも可能。
 
 #### TACKY IR レベル（6パス）
 
@@ -246,7 +248,7 @@ TACKY IR レベルの6パスと ASM レベルの2パスの計8パスで構成さ
   main() の先頭にアンロール復号コード（Load → Subtract(key) → Store）を挿入
   - Pass 6 は Pass 1〜5 の後に適用する。復号コードが CFF 等で破壊されるのを防ぐため
 
-#### ASM レベル（2パス、レジスタ割り当て+fixup 後に適用）
+#### ASM レベル（3パス、レジスタ割り当て+fixup 後に適用）
 
 - **Pass 7 — 反逆アセンブリ（Anti-Disassembly）**: 無条件ジャンプ（`Jmp`, `JmpIndirect`）の直後に
   `0xE8`（x86 の `call rel32` オペコード）を `.byte` として挿入。リニアスイープ型逆アセンブラが
@@ -258,6 +260,16 @@ TACKY IR レベルの6パスと ASM レベルの2パスの計8パスで構成さ
   ```
 - **Pass 8 — 関数呼び出しの間接化（Indirect Calls）**: `call func` を
   `lea func(%rip), %r10; call *%r10` に変換。静的解析でのコールグラフ復元を妨害する
+- **Pass 9 — レジスタシャッフル（Register Shuffle）**: dead な `movq` 命令を N 命令ごとに挿入し、
+  R10/R11 scratch レジスタへの偽コピーでデータフローグラフに偽の依存関係を生成する。
+  3パターンをローテーション: Dead copy（1命令）、Copy chain（2命令）、Round-trip（2命令）
+  ```asm
+  movq %rcx, %r10       # Dead copy: ライブなレジスタの値を scratch にコピー
+  movq %rax, %r10       # Copy chain: レジスタ値を scratch1 に
+  movq %r10, %r11       #   scratch1 → scratch2 に伝播
+  movq %rdx, %r10       # Round-trip: scratch に退避
+  movq %r10, %rdx       #   scratch から復元（noop）
+  ```
 
 #### パス適用順序の設計
 
@@ -269,7 +281,8 @@ TACKY IR パスの適用順序は意図的に設計されている:
 5. **CFF** → 全体の制御構造を破壊。他のパスの後でないと構造が残らない
 6. **文字列暗号化** → 復号コードが他のパスで壊されないよう最後に適用
 
-ASM レベルパスはレジスタ割り当て後に適用する:
+ASM レベルパスはレジスタ割り当て後に適用する（適用順: レジスタシャッフル → 反逆アセンブリ → 間接コール）:
+- レジスタシャッフルは dead mov を挿入し R10/R11 scratch を使用。fixup シーケンスの中間を避けるため安全
 - 反逆アセンブリはジャンプ命令の位置を変えないため安全
 - 間接コール変換は R10（caller-saved scratch）を使用し、Call の直前に挿入するため安全
 
@@ -762,7 +775,7 @@ Chapter 7 では以下の機能を追加した:
      ▼
 ┌──────────┐
 │ ASM Obf   │  src/codegen/       ASM レベル難読化（--fobfuscate 指定時）
-│          │  mod.rs              反逆アセンブリ（ゴミバイト挿入）・間接コール変換
+│          │  mod.rs              レジスタシャッフル・反逆アセンブリ・間接コール変換
 └────┬─────┘
      ▼
 ┌──────────┐
@@ -798,7 +811,7 @@ Chapter 7 では以下の機能を追加した:
 ### コード難読化（Anti-Reverse Engineering）
 
 コンパイラレベルでの難読化変換。元のソースコードと等価だが、逆コンパイル・逆アセンブル時に解析を困難にする。
-`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計8パスを適用する。
+`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計9パスを適用する。
 
 TACKY IR レベル（6パス）:
 - [x] **定数の間接化（Constant Encoding）**: 即値をランタイム計算に置換（`42` → `6 * 7`, `0` → `a - a` 等）。Double は精度問題のためスキップ
@@ -808,18 +821,18 @@ TACKY IR レベル（6パス）:
 - [x] **制御フロー平坦化（CFF）+ ジャンプテーブル + 状態エンコード**: 基本ブロックをジャンプテーブル（`jmp *%rax`）+ アフィン変換で符号化した状態変数の dispatch ループに変換。IDA Pro の CFG 復元を破壊する
 - [x] **文字列暗号化**: 文字列リテラルを加算暗号化して `.data` に配置し、main() の先頭でアンロール復号コードを挿入
 
-ASM レベル（2パス、レジスタ割り当て後に適用）:
+ASM レベル（3パス、レジスタ割り当て後に適用）:
 - [x] **反逆アセンブリ（Anti-Disassembly）**: 無条件ジャンプ直後に `0xE8`（call opcode）を挿入し、リニアスイープ型逆アセンブラの命令境界認識を破壊する
 - [x] **関数呼び出しの間接化（Indirect Calls）**: `call func` → `lea func(%rip), %r10; call *%r10` に変換し、静的解析でのコールグラフ復元を妨害する
+- [x] **レジスタシャッフル（Register Shuffle）**: dead な `movq` をN命令ごとに挿入し、R10/R11 への偽コピーでデータフロー解析を妨害する
 
 パラメータ化:
 - [x] **難易度レベル制御（`--obf-level=1..4`）**: 段階的に難読化強度を上げたバイナリを生成可能。ベンチマークやデオブフスケーター評価に活用
-- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-anti-disasm`, `--obf-no-indirect-calls`, `--obf-no-arith-subst` で各パスを個別に無効化
-- [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N` でジャンクコード・不透明述語・算術置換の挿入頻度を調整
+- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-anti-disasm`, `--obf-no-indirect-calls`, `--obf-no-arith-subst`, `--obf-no-reg-shuffle` で各パスを個別に無効化
+- [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N`, `--obf-reg-shuffle-freq=N` でジャンクコード・不透明述語・算術置換・レジスタシャッフルの挿入頻度を調整
 
 未実装の候補:
 - [ ] **関数のインライン展開/アウトライン化**: 関数境界を攪乱し、元の関数構造の復元を困難にする
-- [ ] **レジスタ割り当ての撹乱**: 不要なレジスタ間 mov や register rotation を挿入し、データフロー解析を妨害する
 
 ### ベンチマーク・評価
 
