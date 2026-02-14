@@ -4,21 +4,23 @@
 //! `--fobfuscate` フラグで有効化される。
 //!
 //! # パス適用順序（TACKY IR レベル）
-//! 1. **Constant Encoding**（定数の間接化）— 即値を `a * b + c` の実行時計算に置換
-//! 2. **Arithmetic Substitution**（算術置換）— Add/Subtract を多段計算に展開
-//! 3. **Junk Code Insertion**（ジャンクコード挿入）— 4命令ごとに dead computation を挿入
-//! 4. **Opaque Predicates**（不透明述語）— 4パターンの常真条件分岐で値生成命令を囲む
+//! 1. **Function Inlining**（関数インライン展開）— 呼び出し先の本体を呼び出し元に埋め込む
+//! 2. **Constant Encoding**（定数の間接化）— 即値を `a * b + c` の実行時計算に置換
+//! 3. **Arithmetic Substitution**（算術置換）— Add/Subtract を多段計算に展開
+//! 4. **Junk Code Insertion**（ジャンクコード挿入）— 4命令ごとに dead computation を挿入
+//! 5. **Opaque Predicates**（不透明述語）— 4パターンの常真条件分岐で値生成命令を囲む
 //!    - パターン 0: `x*(x+1) % 2 == 0`（連続整数の積は偶数）
 //!    - パターン 1: `!(x² + 1 > 0)`（x²+1 は常に正）
 //!    - パターン 2: `(x+1)² - x² - 1 - 2x == 0`（代数恒等式）
 //!    - パターン 3: `(x³ - x) % 3 == 0`（連続3整数の積は3の倍数）
-//! 5. **Control Flow Flattening**（制御フロー平坦化）— 基本ブロックをジャンプテーブル
+//! 6. **Function Outlining**（関数アウトライン化）— コード断片を新しい関数に切り出す
+//! 7. **Control Flow Flattening**（制御フロー平坦化）— 基本ブロックをジャンプテーブル
 //!    + 状態エンコードの dispatch ループに変換。IDA 等の CFG 復元を破壊する。
 //!    - ジャンプテーブル: `.data` セクションにブロックラベルの配列を配置し `jmp *%rax` で分岐
 //!    - 状態エンコード: `encoded = index * 37 + 0xCAFE` のアフィン変換で状態変数を符号化
-//! 6. **String Encryption**（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
+//! 8. **String Encryption**（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
 //!
-//! Pass 6 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
+//! Pass 8 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
 //!
 //! # ASM レベル難読化（codegen/mod.rs で適用、レジスタ割り当て後）
 //! - **Stack Frame Obfuscation**: 偽のスタックスロットと偽の read/write 操作を挿入し偽ローカル変数を生成
@@ -26,6 +28,8 @@
 //! - **Instruction Substitution**: 命令を意味的に等価な別の命令列に置換しパターンマッチングを妨害
 //! - **Anti-Disassembly**: 無条件ジャンプ直後に `0xE8`（call opcode）を挿入し命令境界認識を破壊
 //! - **Indirect Calls**: `call func` を `lea func(%rip), %r10; call *%r10` に変換
+
+use std::collections::{HashMap, HashSet};
 
 use super::tacky_ast::*;
 use crate::parse::ast::Type;
@@ -35,6 +39,8 @@ use crate::obfuscation::ObfuscationConfig;
 struct ObfCtx {
     tmp_counter: usize,
     label_counter: usize,
+    inline_counter: usize,
+    outline_counter: usize,
 }
 
 impl ObfCtx {
@@ -42,6 +48,8 @@ impl ObfCtx {
         ObfCtx {
             tmp_counter: 0,
             label_counter: 0,
+            inline_counter: 0,
+            outline_counter: 0,
         }
     }
 
@@ -62,13 +70,23 @@ impl ObfCtx {
 
 /// 難読化パスのエントリポイント
 ///
-/// 各関数に対し Pass 1→5 を適用した後、プログラム全体に Pass 6（文字列暗号化）を適用する。
-/// Pass 6 を最後にすることで、復号コードが他のパス（特に CFF）で破壊されるのを防ぐ。
+/// パス適用順序:
+/// 1. Pass 12: 関数インライン展開（インラインされたコードが後続パスで難読化される）
+/// 2. Pass 1-4: 定数間接化・算術置換・ジャンクコード・不透明述語
+/// 3. Pass 13: 関数アウトライン化（難読化済みコードが関数に切り出される）
+/// 4. Pass 5: CFF（切り出された新関数を含む全関数に適用）
+/// 5. Pass 6: 文字列暗号化（復号コードが CFF 等で破壊されるのを防ぐ）
 pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProgram {
     let mut program = program;
 
     let mut ctx = ObfCtx::new();
 
+    // Pass 12: 関数インライン展開（全パスの前 → インラインされたコードが後続で難読化される）
+    if config.func_inline {
+        inline_functions(&mut program, &mut ctx, config.func_inline_freq);
+    }
+
+    // Pass 1-4: 関数ごとの変換
     for func in &mut program.functions {
 
         // Pass 1: 定数の間接化
@@ -90,8 +108,15 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
         if config.opaque_predicates {
             func.body = opaque_predicates(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types, config.pred_freq);
         }
+    }
 
-        // Pass 5: 制御フロー平坦化（ジャンプテーブル + 状態エンコード）
+    // Pass 13: 関数アウトライン化（Pass 1-4 の後、CFF の前）
+    if config.func_outline {
+        outline_functions(&mut program, &mut ctx, config.func_outline_min_block);
+    }
+
+    // Pass 5: CFF（切り出された新関数を含む全関数に適用）
+    for func in &mut program.functions {
         if config.cff {
             func.body = control_flow_flattening(
                 std::mem::take(&mut func.body),
@@ -110,6 +135,576 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
     }
 
     program
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pass 12: Function Inlining（関数インライン展開）
+// ─────────────────────────────────────────────────────────────
+
+/// 関数呼び出しを呼び出し先の関数本体で置換する。
+/// コールグラフを破壊し、元の関数構造の復元を困難にする。
+fn inline_functions(program: &mut TackyProgram, ctx: &mut ObfCtx, freq: usize) {
+    // 静的変数・静的定数の名前を収集（リネーム対象外）
+    let static_names: HashSet<String> = program.static_vars.iter().map(|v| v.name.clone())
+        .chain(program.static_constants.iter().map(|c| c.name.clone()))
+        .collect();
+
+    // 全関数を clone して callee_map を構築（可変借用と不変借用の衝突を回避）
+    let callee_map: HashMap<String, TackyFunction> = program.functions.iter()
+        .map(|f| (f.name.clone(), f.clone()))
+        .collect();
+
+    for func in &mut program.functions {
+        let mut new_body = Vec::new();
+        let mut eligible_count = 0usize;
+
+        for instr in std::mem::take(&mut func.body) {
+            if let TackyInstruction::FunCall { ref name, ref args, ref dst, ref dst_type } = instr {
+                if let Some(callee) = callee_map.get(name) {
+                    if is_inline_eligible(callee, name, dst_type, &static_names) {
+                        eligible_count += 1;
+                        if freq > 0 && eligible_count % freq == 0 {
+                            // インライン展開を実行
+                            let prefix = format!("_inline_{}", ctx.inline_counter);
+                            ctx.inline_counter += 1;
+                            let end_label = format!("{}_end", prefix);
+
+                            // 引数→リネームされたパラメータへの Copy
+                            for (param, arg) in callee.params.iter().zip(args.iter()) {
+                                let renamed_param = format!("{}_{}", prefix, param);
+                                new_body.push(TackyInstruction::Copy {
+                                    src: arg.clone(),
+                                    dst: TackyVal::Var(renamed_param),
+                                });
+                            }
+
+                            // リネームされた本体を挿入
+                            for callee_instr in &callee.body {
+                                match callee_instr {
+                                    TackyInstruction::Return(val) => {
+                                        if !matches!(callee.return_type, Type::Void) {
+                                            new_body.push(TackyInstruction::Copy {
+                                                src: rename_val(val, &prefix, &static_names),
+                                                dst: dst.clone(),
+                                            });
+                                        }
+                                        new_body.push(TackyInstruction::Jump(end_label.clone()));
+                                    }
+                                    TackyInstruction::ReturnVoid => {
+                                        new_body.push(TackyInstruction::Jump(end_label.clone()));
+                                    }
+                                    _ => {
+                                        new_body.push(rename_instruction(
+                                            callee_instr, &prefix, &static_names,
+                                            dst, &end_label, &callee.return_type,
+                                        ));
+                                    }
+                                }
+                            }
+
+                            // end ラベル
+                            new_body.push(TackyInstruction::Label(end_label.clone()));
+
+                            // リネームされた変数を呼び出し元の var_types に追加
+                            for (var_name, var_type) in &callee.var_types {
+                                if !static_names.contains(var_name) {
+                                    let renamed = format!("{}_{}", prefix, var_name);
+                                    func.var_types.insert(renamed, var_type.clone());
+                                }
+                            }
+
+                            continue;
+                        }
+                    }
+                }
+            }
+            new_body.push(instr);
+        }
+
+        func.body = new_body;
+    }
+}
+
+/// インライン適格条件を判定する
+fn is_inline_eligible(
+    callee: &TackyFunction,
+    callee_name: &str,
+    dst_type: &Type,
+    static_names: &HashSet<String>,
+) -> bool {
+    // 1. main() でない
+    if callee_name == "main" {
+        return false;
+    }
+    // 2. 本体が空でない
+    if callee.body.is_empty() {
+        return false;
+    }
+    // 3. 本体が ≤ 50 命令
+    if callee.body.len() > 50 {
+        return false;
+    }
+    // 4. 戻り値型が Struct でない
+    if matches!(dst_type, Type::Struct { .. }) {
+        return false;
+    }
+    // 5. 直接再帰でない
+    if is_directly_recursive(callee) {
+        return false;
+    }
+    // 6. パラメータの GetAddress を含まない
+    if has_param_address_taken(callee, static_names) {
+        return false;
+    }
+    true
+}
+
+/// 関数本体に自身への FunCall があるか判定する
+fn is_directly_recursive(func: &TackyFunction) -> bool {
+    func.body.iter().any(|instr| {
+        matches!(instr, TackyInstruction::FunCall { name, .. } if name == &func.name)
+    })
+}
+
+/// GetAddress の src がパラメータか判定する
+fn has_param_address_taken(func: &TackyFunction, static_names: &HashSet<String>) -> bool {
+    let params: HashSet<&str> = func.params.iter().map(|s| s.as_str()).collect();
+    func.body.iter().any(|instr| {
+        if let TackyInstruction::GetAddress { src: TackyVal::Var(name), .. } = instr {
+            // 静的変数はパラメータではない
+            !static_names.contains(name) && params.contains(name.as_str())
+        } else {
+            false
+        }
+    })
+}
+
+/// TackyVal のリネーム。Var をリネームし Constant はそのまま。
+fn rename_val(val: &TackyVal, prefix: &str, static_names: &HashSet<String>) -> TackyVal {
+    match val {
+        TackyVal::Var(name) => {
+            if static_names.contains(name) {
+                val.clone()
+            } else {
+                TackyVal::Var(format!("{}_{}", prefix, name))
+            }
+        }
+        TackyVal::Constant(_) => val.clone(),
+    }
+}
+
+/// ラベル名のリネーム
+fn rename_label(label: &str, prefix: &str) -> String {
+    format!("{}_{}", prefix, label)
+}
+
+/// 命令全体のリネーム。全 TackyInstruction バリアントの変数・ラベルをリネームする。
+/// Return / ReturnVoid は call_dst への Copy + Jump(end_label) に変換する。
+fn rename_instruction(
+    instr: &TackyInstruction,
+    prefix: &str,
+    static_names: &HashSet<String>,
+    call_dst: &TackyVal,
+    end_label: &str,
+    return_type: &Type,
+) -> TackyInstruction {
+    let rv = |v: &TackyVal| rename_val(v, prefix, static_names);
+    let rl = |l: &str| rename_label(l, prefix);
+
+    // Return を特別処理するためマクロ的に書かない
+    match instr {
+        // Return(val) → Copy { src: rename(val), dst: call_dst } + Jump(end_label)
+        // ただしここでは1命令しか返せないので、呼び出し側で特別処理が必要。
+        // 実際には rename_instruction は inline_functions 内のループで呼ばれるので、
+        // Return は呼び出し側で展開する。ここでは Copy に変換する。
+        TackyInstruction::Return(val) => {
+            if matches!(return_type, Type::Void) {
+                TackyInstruction::Jump(end_label.to_string())
+            } else {
+                // Return は2命令に展開する必要があるが、1命令しか返せないので
+                // Copy として返し、呼び出し側で Jump を追加する設計にする。
+                // → 実際には inline_functions 内で直接展開するべき。
+                // ここでは placeholder として Copy + Jump の最初の命令を返す。
+                TackyInstruction::Copy {
+                    src: rv(val),
+                    dst: call_dst.clone(),
+                }
+            }
+        }
+        TackyInstruction::ReturnVoid => {
+            TackyInstruction::Jump(end_label.to_string())
+        }
+
+        TackyInstruction::Unary { op, src, dst } => TackyInstruction::Unary {
+            op: *op, src: rv(src), dst: rv(dst),
+        },
+        TackyInstruction::Binary { op, left, right, dst } => TackyInstruction::Binary {
+            op: *op, left: rv(left), right: rv(right), dst: rv(dst),
+        },
+        TackyInstruction::Copy { src, dst } => TackyInstruction::Copy {
+            src: rv(src), dst: rv(dst),
+        },
+        TackyInstruction::Jump(target) => TackyInstruction::Jump(rl(target)),
+        TackyInstruction::JumpIfZero { condition, target } => TackyInstruction::JumpIfZero {
+            condition: rv(condition), target: rl(target),
+        },
+        TackyInstruction::JumpIfNotZero { condition, target } => TackyInstruction::JumpIfNotZero {
+            condition: rv(condition), target: rl(target),
+        },
+        TackyInstruction::Label(name) => TackyInstruction::Label(rl(name)),
+        TackyInstruction::FunCall { name, args, dst, dst_type } => TackyInstruction::FunCall {
+            name: name.clone(), // 関数名はリネームしない
+            args: args.iter().map(|a| rv(a)).collect(),
+            dst: rv(dst),
+            dst_type: dst_type.clone(),
+        },
+        TackyInstruction::SignExtend { src, dst } => TackyInstruction::SignExtend {
+            src: rv(src), dst: rv(dst),
+        },
+        TackyInstruction::ZeroExtend { src, dst } => TackyInstruction::ZeroExtend {
+            src: rv(src), dst: rv(dst),
+        },
+        TackyInstruction::Truncate { src, dst } => TackyInstruction::Truncate {
+            src: rv(src), dst: rv(dst),
+        },
+        TackyInstruction::IntToDouble { src, dst } => TackyInstruction::IntToDouble {
+            src: rv(src), dst: rv(dst),
+        },
+        TackyInstruction::DoubleToInt { src, dst } => TackyInstruction::DoubleToInt {
+            src: rv(src), dst: rv(dst),
+        },
+        TackyInstruction::UIntToDouble { src, dst } => TackyInstruction::UIntToDouble {
+            src: rv(src), dst: rv(dst),
+        },
+        TackyInstruction::DoubleToUInt { src, dst } => TackyInstruction::DoubleToUInt {
+            src: rv(src), dst: rv(dst),
+        },
+        TackyInstruction::GetAddress { src, dst } => TackyInstruction::GetAddress {
+            src: rv(src), dst: rv(dst),
+        },
+        TackyInstruction::Load { src_ptr, dst } => TackyInstruction::Load {
+            src_ptr: rv(src_ptr), dst: rv(dst),
+        },
+        TackyInstruction::Store { src, dst_ptr } => TackyInstruction::Store {
+            src: rv(src), dst_ptr: rv(dst_ptr),
+        },
+        TackyInstruction::AddPtr { ptr, index, scale, dst } => TackyInstruction::AddPtr {
+            ptr: rv(ptr), index: rv(index), scale: *scale, dst: rv(dst),
+        },
+        TackyInstruction::CopyToOffset { src, dst, offset } => TackyInstruction::CopyToOffset {
+            src: rv(src),
+            dst: if static_names.contains(dst) { dst.clone() } else { format!("{}_{}", prefix, dst) },
+            offset: *offset,
+        },
+        TackyInstruction::CopyFromOffset { src, offset, dst } => TackyInstruction::CopyFromOffset {
+            src: if static_names.contains(src) { src.clone() } else { format!("{}_{}", prefix, src) },
+            offset: *offset,
+            dst: rv(dst),
+        },
+        TackyInstruction::CopyStruct { src, dst, size } => TackyInstruction::CopyStruct {
+            src: rv(src), dst: rv(dst), size: *size,
+        },
+        TackyInstruction::JumpIndirect { target, possible_targets } => TackyInstruction::JumpIndirect {
+            target: rv(target),
+            possible_targets: possible_targets.iter().map(|l| rl(l)).collect(),
+        },
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pass 13: Function Outlining（関数アウトライン化）
+// ─────────────────────────────────────────────────────────────
+
+/// コード断片を新しい関数に切り出す。
+/// 偽の関数が大量に出現し、元の関数構造の復元を困難にする。
+fn outline_functions(program: &mut TackyProgram, ctx: &mut ObfCtx, min_block_size: usize) {
+    let mut new_functions: Vec<TackyFunction> = Vec::new();
+    // 1関数あたりの最大アウトライン数（CFF の実行時オーバーヘッドを抑制）
+    const MAX_OUTLINES_PER_FUNC: usize = 30;
+
+    for func in &mut program.functions {
+        let mut new_body: Vec<TackyInstruction> = Vec::new();
+        let body = std::mem::take(&mut func.body);
+        let mut i = 0;
+        let mut outline_count = 0usize;
+
+        while i < body.len() {
+            // アウトライン候補ブロックを検索（上限チェック付き）
+            if outline_count < MAX_OUTLINES_PER_FUNC {
+                if let Some(block_len) = find_outline_candidate(&body, i, min_block_size) {
+                    let block = &body[i..i + block_len];
+                    let rest = &body[i + block_len..];
+
+                    if let Some((inputs, output_name, intermediates)) =
+                        analyze_block(block, rest, &func.var_types)
+                    {
+                        // 入力変数 ≤ 6（整数レジスタ呼出規約の上限）
+                        if inputs.len() <= 6 {
+                            // Double / Struct / Array 型の入出力を除外
+                            let output_type = func.var_types.get(&output_name)
+                                .cloned().unwrap_or(Type::Int);
+                            let has_bad_type = matches!(output_type,
+                                Type::Double | Type::Struct { .. } | Type::Array(_, _))
+                                || inputs.iter().any(|name| {
+                                    let ty = func.var_types.get(name).unwrap_or(&Type::Int);
+                                    matches!(ty, Type::Double | Type::Struct { .. } | Type::Array(_, _))
+                                });
+
+                            if !has_bad_type {
+                                // 新関数を構築
+                                let outlined_func = build_outlined_function(
+                                    ctx, block, &inputs, &output_name, &intermediates,
+                                    &output_type, &func.var_types,
+                                );
+                                let func_name = outlined_func.name.clone();
+
+                                // 元の位置に FunCall を挿入
+                                let call_args: Vec<TackyVal> = inputs.iter()
+                                    .map(|name| TackyVal::Var(name.clone()))
+                                    .collect();
+                                new_body.push(TackyInstruction::FunCall {
+                                    name: func_name,
+                                    args: call_args,
+                                    dst: TackyVal::Var(output_name),
+                                    dst_type: output_type,
+                                });
+
+                                new_functions.push(outlined_func);
+                                outline_count += 1;
+                                i += block_len;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            new_body.push(body[i].clone());
+            i += 1;
+        }
+
+        func.body = new_body;
+    }
+
+    // 新しく生成された関数をプログラムに追加
+    program.functions.extend(new_functions);
+}
+
+/// アウトライン候補ブロックを検出する。
+/// pos から始まる連続する Copy / Binary / Unary 命令のブロックを探す。
+fn find_outline_candidate(body: &[TackyInstruction], pos: usize, min_size: usize) -> Option<usize> {
+    let mut len = 0;
+    for instr in &body[pos..] {
+        match instr {
+            TackyInstruction::Copy { .. }
+            | TackyInstruction::Binary { .. }
+            | TackyInstruction::Unary { .. } => {
+                len += 1;
+            }
+            _ => break,
+        }
+    }
+    if len >= min_size {
+        Some(len)
+    } else {
+        None
+    }
+}
+
+/// ブロックの入出力を解析する。
+/// 成功時: (入力変数名リスト, 出力変数名, 中間変数名集合) を返す。
+/// 安全でない場合は None を返す。
+fn analyze_block(
+    block: &[TackyInstruction],
+    rest_of_body: &[TackyInstruction],
+    var_types: &HashMap<String, Type>,
+) -> Option<(Vec<String>, String, HashSet<String>)> {
+    let mut inputs: Vec<String> = Vec::new();
+    let mut input_set: HashSet<String> = HashSet::new();
+    let mut written: HashSet<String> = HashSet::new();
+
+    for instr in block {
+        // ソースオペランドを収集
+        for src_val in instruction_sources(instr) {
+            if let TackyVal::Var(name) = src_val {
+                if !written.contains(name) && !input_set.contains(name) {
+                    inputs.push(name.clone());
+                    input_set.insert(name.clone());
+                }
+            }
+        }
+        // dst を written に追加
+        if let Some(dst_name) = instruction_dst_name(instr) {
+            written.insert(dst_name);
+        }
+    }
+
+    // 出力 = 最後の命令の dst
+    let output = instruction_dst_name(block.last()?)?;
+
+    // 中間変数 = written - {output}
+    let mut intermediates = written;
+    intermediates.remove(&output);
+
+    // 安全性チェック: 中間変数がブロック以降で使われていないか
+    if !intermediates.is_empty() {
+        for instr in rest_of_body {
+            for operand in instruction_all_operands(instr) {
+                if let TackyVal::Var(name) = operand {
+                    if intermediates.contains(name) {
+                        return None; // 中間変数がブロック外で使われている
+                    }
+                }
+            }
+        }
+    }
+
+    // 入力変数の型チェック（Double / Struct / Array を除外）
+    let _ = var_types; // 型チェックは呼び出し側で行う
+
+    Some((inputs, output, intermediates))
+}
+
+/// 命令のソースオペランド（読まれる TackyVal）を返す
+fn instruction_sources(instr: &TackyInstruction) -> Vec<&TackyVal> {
+    match instr {
+        TackyInstruction::Copy { src, .. } => vec![src],
+        TackyInstruction::Unary { src, .. } => vec![src],
+        TackyInstruction::Binary { left, right, .. } => vec![left, right],
+        _ => vec![],
+    }
+}
+
+/// 命令の dst 変数名を返す
+fn instruction_dst_name(instr: &TackyInstruction) -> Option<String> {
+    match instr {
+        TackyInstruction::Copy { dst: TackyVal::Var(name), .. }
+        | TackyInstruction::Unary { dst: TackyVal::Var(name), .. }
+        | TackyInstruction::Binary { dst: TackyVal::Var(name), .. } => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// 命令の全オペランド（ソース+dst）を返す（中間変数の使用チェック用）
+fn instruction_all_operands(instr: &TackyInstruction) -> Vec<&TackyVal> {
+    match instr {
+        TackyInstruction::Return(val) => vec![val],
+        TackyInstruction::ReturnVoid => vec![],
+        TackyInstruction::Unary { src, dst, .. } => vec![src, dst],
+        TackyInstruction::Binary { left, right, dst, .. } => vec![left, right, dst],
+        TackyInstruction::Copy { src, dst } => vec![src, dst],
+        TackyInstruction::Jump(_) => vec![],
+        TackyInstruction::JumpIfZero { condition, .. }
+        | TackyInstruction::JumpIfNotZero { condition, .. } => vec![condition],
+        TackyInstruction::Label(_) => vec![],
+        TackyInstruction::FunCall { args, dst, .. } => {
+            let mut v: Vec<&TackyVal> = args.iter().collect();
+            v.push(dst);
+            v
+        }
+        TackyInstruction::SignExtend { src, dst }
+        | TackyInstruction::ZeroExtend { src, dst }
+        | TackyInstruction::Truncate { src, dst }
+        | TackyInstruction::IntToDouble { src, dst }
+        | TackyInstruction::DoubleToInt { src, dst }
+        | TackyInstruction::UIntToDouble { src, dst }
+        | TackyInstruction::DoubleToUInt { src, dst } => vec![src, dst],
+        TackyInstruction::GetAddress { src, dst } => vec![src, dst],
+        TackyInstruction::Load { src_ptr, dst } => vec![src_ptr, dst],
+        TackyInstruction::Store { src, dst_ptr } => vec![src, dst_ptr],
+        TackyInstruction::AddPtr { ptr, index, dst, .. } => vec![ptr, index, dst],
+        TackyInstruction::CopyToOffset { src, .. } => vec![src],
+        TackyInstruction::CopyFromOffset { dst, .. } => vec![dst],
+        TackyInstruction::CopyStruct { src, dst, .. } => vec![src, dst],
+        TackyInstruction::JumpIndirect { target, .. } => vec![target],
+    }
+}
+
+/// 新関数を構築する
+fn build_outlined_function(
+    ctx: &mut ObfCtx,
+    block: &[TackyInstruction],
+    inputs: &[String],
+    output_name: &str,
+    intermediates: &HashSet<String>,
+    output_type: &Type,
+    caller_var_types: &HashMap<String, Type>,
+) -> TackyFunction {
+    let func_name = format!("_obf_outlined_{}", ctx.outline_counter);
+    ctx.outline_counter += 1;
+
+    // 入力変数→パラメータ名のマッピング
+    let mut input_to_param: HashMap<String, String> = HashMap::new();
+    let mut params: Vec<String> = Vec::new();
+    let mut var_types: HashMap<String, Type> = HashMap::new();
+
+    for input_name in inputs {
+        let param_name = ctx.fresh_tmp();
+        let ty = caller_var_types.get(input_name).cloned().unwrap_or(Type::Int);
+        var_types.insert(param_name.clone(), ty);
+        input_to_param.insert(input_name.clone(), param_name.clone());
+        params.push(param_name);
+    }
+
+    // 中間変数→新名前のマッピング
+    let mut intermediate_to_new: HashMap<String, String> = HashMap::new();
+    for name in intermediates {
+        let new_name = ctx.fresh_tmp();
+        let ty = caller_var_types.get(name).cloned().unwrap_or(Type::Int);
+        var_types.insert(new_name.clone(), ty);
+        intermediate_to_new.insert(name.clone(), new_name);
+    }
+
+    // 出力変数→新名前
+    let output_new = ctx.fresh_tmp();
+    var_types.insert(output_new.clone(), output_type.clone());
+
+    // 命令のリネーム
+    let rename = |val: &TackyVal| -> TackyVal {
+        match val {
+            TackyVal::Var(name) => {
+                if let Some(param) = input_to_param.get(name) {
+                    TackyVal::Var(param.clone())
+                } else if let Some(new_name) = intermediate_to_new.get(name) {
+                    TackyVal::Var(new_name.clone())
+                } else if name == output_name {
+                    TackyVal::Var(output_new.clone())
+                } else {
+                    val.clone()
+                }
+            }
+            TackyVal::Constant(_) => val.clone(),
+        }
+    };
+
+    let mut body: Vec<TackyInstruction> = Vec::new();
+    for instr in block {
+        let new_instr = match instr {
+            TackyInstruction::Copy { src, dst } => TackyInstruction::Copy {
+                src: rename(src), dst: rename(dst),
+            },
+            TackyInstruction::Unary { op, src, dst } => TackyInstruction::Unary {
+                op: *op, src: rename(src), dst: rename(dst),
+            },
+            TackyInstruction::Binary { op, left, right, dst } => TackyInstruction::Binary {
+                op: *op, left: rename(left), right: rename(right), dst: rename(dst),
+            },
+            _ => instr.clone(),
+        };
+        body.push(new_instr);
+    }
+
+    // Return(output)
+    body.push(TackyInstruction::Return(TackyVal::Var(output_new)));
+
+    TackyFunction {
+        name: func_name,
+        global: false,
+        params,
+        body,
+        return_type: output_type.clone(),
+        var_types,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@
 //!          → [Codegen] → [RegAlloc+Coalescing] → [Fixup] → [Emit] → source.s → [gcc] → binary
 //! ```
 //!
-//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（11パス）を適用する。
+//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（13パス）を適用する。
 //! `--obf-level=N` で難読化強度を段階的に制御可能（1=軽量〜4=最大）。
 //!
 //! # 使い方
@@ -27,8 +27,12 @@
 //! ferrugocc --fobfuscate --obf-no-reg-shuffle <source.c> # レジスタシャッフル無効化
 //! ferrugocc --fobfuscate --obf-no-stack-frame <source.c> # スタックフレーム難読化無効化
 //! ferrugocc --fobfuscate --obf-no-instr-subst <source.c> # 命令置換無効化
+//! ferrugocc --fobfuscate --obf-no-func-inline <source.c> # 関数インライン展開無効化
+//! ferrugocc --fobfuscate --obf-no-func-outline <source.c> # 関数アウトライン化無効化
 //! ferrugocc --fobfuscate --obf-junk-freq=2 <source.c>   # ジャンク頻度変更
 //! ferrugocc --fobfuscate --obf-reg-shuffle-freq=3 <source.c> # シャッフル頻度変更
+//! ferrugocc --fobfuscate --obf-inline-freq=2 <source.c>  # インライン頻度変更
+//! ferrugocc --fobfuscate --obf-outline-min-block=3 <source.c> # アウトライン最小ブロック変更
 //! ```
 
 mod error;
@@ -128,6 +132,14 @@ struct Cli {
     #[arg(long = "obf-no-instr-subst")]
     obf_no_instr_subst: bool,
 
+    /// 関数インライン展開を無効化
+    #[arg(long = "obf-no-func-inline")]
+    obf_no_func_inline: bool,
+
+    /// 関数アウトライン化を無効化
+    #[arg(long = "obf-no-func-outline")]
+    obf_no_func_outline: bool,
+
     /// 算術置換頻度（N回に1回適用）
     #[arg(long = "obf-arith-freq")]
     obf_arith_freq: Option<usize>,
@@ -147,6 +159,14 @@ struct Cli {
     /// 命令置換頻度（N命令ごと）
     #[arg(long = "obf-instr-subst-freq")]
     obf_instr_subst_freq: Option<usize>,
+
+    /// インライン展開頻度（N回の適格呼び出しごとにインライン化）
+    #[arg(long = "obf-inline-freq")]
+    obf_inline_freq: Option<usize>,
+
+    /// アウトライン最小ブロックサイズ
+    #[arg(long = "obf-outline-min-block")]
+    obf_outline_min_block: Option<usize>,
 
     /// Input C source file
     source: PathBuf,
@@ -185,6 +205,8 @@ fn main() {
         if cli.obf_no_reg_shuffle { config.reg_shuffle = false; }
         if cli.obf_no_stack_frame { config.stack_frame_obf = false; }
         if cli.obf_no_instr_subst { config.instr_subst = false; }
+        if cli.obf_no_func_inline { config.func_inline = false; }
+        if cli.obf_no_func_outline { config.func_outline = false; }
 
         // 頻度オーバーライド
         if let Some(freq) = cli.obf_junk_freq { config.junk_freq = freq; }
@@ -194,6 +216,8 @@ fn main() {
         if let Some(n) = cli.obf_stack_padding { config.stack_frame_padding = n; }
         if let Some(freq) = cli.obf_stack_fake_freq { config.stack_frame_fake_freq = freq; }
         if let Some(freq) = cli.obf_instr_subst_freq { config.instr_subst_freq = freq; }
+        if let Some(freq) = cli.obf_inline_freq { config.func_inline_freq = freq; }
+        if let Some(n) = cli.obf_outline_min_block { config.func_outline_min_block = n; }
 
         Some(config)
     } else {

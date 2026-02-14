@@ -36,6 +36,8 @@ cargo run -- --fobfuscate --obf-no-arith-subst source.c      # 算術置換を�
 cargo run -- --fobfuscate --obf-no-reg-shuffle source.c      # レジスタシャッフルを無効化
 cargo run -- --fobfuscate --obf-no-stack-frame source.c     # スタックフレーム難読化を無効化
 cargo run -- --fobfuscate --obf-no-instr-subst source.c    # 命令置換を無効化
+cargo run -- --fobfuscate --obf-no-func-inline source.c   # 関数インライン展開を無効化
+cargo run -- --fobfuscate --obf-no-func-outline source.c  # 関数アウトライン化を無効化
 
 # 頻度パラメータの調整
 cargo run -- --fobfuscate --obf-junk-freq=2 source.c   # 2命令ごとにジャンク挿入
@@ -45,6 +47,8 @@ cargo run -- --fobfuscate --obf-reg-shuffle-freq=3 source.c  # 3命令ごとに�
 cargo run -- --fobfuscate --obf-stack-padding=8 source.c    # 偽スタックスロット数を8に
 cargo run -- --fobfuscate --obf-stack-fake-freq=4 source.c  # 4命令ごとに偽スタック操作を挿入
 cargo run -- --fobfuscate --obf-instr-subst-freq=2 source.c # 2命令ごとに命令置換を試行
+cargo run -- --fobfuscate --obf-inline-freq=2 source.c     # 2回の適格呼出ごとにインライン化
+cargo run -- --fobfuscate --obf-outline-min-block=3 source.c # アウトライン最小ブロックサイズを3に
 ```
 
 アセンブリから実行ファイルへの変換には、システムに `gcc` が必要。
@@ -88,9 +92,9 @@ exit code による正当性検証とサイズ集計を自動実行する。
 ```
 Level 0 (normal):       44,416 bytes  (1.0x)
 Level 1 (light):        46,024 bytes  (1.04x)
-Level 2 (standard):    111,088 bytes  (2.50x)
-Level 3 (full):        128,944 bytes  (2.90x)
-Level 4 (maximum):     313,480 bytes  (7.06x)
+Level 2 (standard):    111,112 bytes  (2.50x)
+Level 3 (full):        133,336 bytes  (3.00x)
+Level 4 (maximum):     349,272 bytes  (7.86x)
 ```
 
 出力先: `benchmark/output/level_N/<name>` (バイナリ), `benchmark/output/level_N/<name>.s` (アセンブリ)
@@ -187,22 +191,32 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 
 書籍全20章の完了後、追加機能としてコード難読化パスを実装した。
 `--fobfuscate` フラグで最適化の代わりに難読化パスを適用する。
-TACKY IR レベルの6パスと ASM レベルの5パスの計11パスで構成される。
+TACKY IR レベルの8パスと ASM レベルの5パスの計13パスで構成される。
 
 `--obf-level=N` で難読化の強度を段階的に制御できる:
 
-| Level | 有効パス | ジャンク頻度 | 述語頻度 | 算術置換頻度 | シャッフル頻度 | 偽スロット数 | 偽操作頻度 | 命令置換頻度 | 用途 |
-|-------|---------|------------|---------|------------|-------------|------------|-----------|------------|------|
-| 1 | 定数間接化, ジャンク, 述語 | 8命令ごと | 10回に1回 | なし | なし | なし | なし | なし | 軽量：基本的な難読化 |
-| 2 | Level 1 + CFF, 算術置換 | 4命令ごと | 5回に1回 | 5回に1回 | なし | なし | なし | なし | 標準：制御フロー平坦化+算術置換追加 |
-| 3 | Level 2 + 文字列暗号化, Anti-Disasm, 間接呼出, レジスタシャッフル, スタックフレーム難読化, 命令置換 | 4命令ごと | 5回に1回 | 3回に1回 | 5命令ごと | 4 | 8命令ごと | 4命令ごと | 全パス有効（デフォルト） |
-| 4 | 全パス | 2命令ごと | 2回に1回 | 2回に1回 | 3命令ごと | 8 | 4命令ごと | 2命令ごと | 最大：高頻度で全パス適用 |
+| Level | 有効パス | ジャンク頻度 | 述語頻度 | 算術置換頻度 | インライン頻度 | アウトライン最小 | シャッフル頻度 | 偽スロット数 | 偽操作頻度 | 命令置換頻度 | 用途 |
+|-------|---------|------------|---------|------------|-------------|---------------|-------------|------------|-----------|------------|------|
+| 1 | 定数間接化, ジャンク, 述語 | 8命令ごと | 10回に1回 | なし | なし | なし | なし | なし | なし | なし | 軽量：基本的な難読化 |
+| 2 | Level 1 + CFF, 算術置換 | 4命令ごと | 5回に1回 | 5回に1回 | なし | なし | なし | なし | なし | なし | 標準：制御フロー平坦化+算術置換追加 |
+| 3 | Level 2 + インライン, アウトライン, 文字列暗号化, Anti-Disasm, 間接呼出, レジスタシャッフル, スタックフレーム難読化, 命令置換 | 4命令ごと | 5回に1回 | 3回に1回 | 3回に1回 | 4命令 | 5命令ごと | 4 | 8命令ごと | 4命令ごと | 全パス有効（デフォルト） |
+| 4 | 全パス | 2命令ごと | 2回に1回 | 2回に1回 | 2回に1回 | 3命令 | 3命令ごと | 8 | 4命令ごと | 2命令ごと | 最大：高頻度で全パス適用 |
 
-各パスは `--obf-no-cff`, `--obf-no-strings`, `--obf-no-arith-subst`, `--obf-no-reg-shuffle`, `--obf-no-stack-frame`, `--obf-no-instr-subst` 等で個別に無効化でき、
-`--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N`, `--obf-reg-shuffle-freq=N`, `--obf-stack-padding=N`, `--obf-stack-fake-freq=N`, `--obf-instr-subst-freq=N` で頻度を直接指定することも可能。
+各パスは `--obf-no-cff`, `--obf-no-strings`, `--obf-no-arith-subst`, `--obf-no-reg-shuffle`, `--obf-no-stack-frame`, `--obf-no-instr-subst`, `--obf-no-func-inline`, `--obf-no-func-outline` 等で個別に無効化でき、
+`--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N`, `--obf-reg-shuffle-freq=N`, `--obf-stack-padding=N`, `--obf-stack-fake-freq=N`, `--obf-instr-subst-freq=N`, `--obf-inline-freq=N`, `--obf-outline-min-block=N` で頻度を直接指定することも可能。
 
-#### TACKY IR レベル（6パス）
+#### TACKY IR レベル（8パス）
 
+- **Pass 12 — 関数インライン展開（Function Inlining）**: 呼び出し先の関数本体を呼び出し元に埋め込み、コールグラフを破壊する。
+  変数・ラベルを `_inline_{N}_{name}` でリネームし、`Return` を `Copy + Jump` に変換。
+  適格条件: 本体 ≤ 50 命令、非再帰、非 main、非 Struct 戻り値、パラメータの GetAddress なし。
+  `--obf-inline-freq=N` で N 回の適格呼び出しごとにインライン化（デフォルト 3）
+  ```c
+  // 元: result = add(a, b);
+  // 変換後: _inline_0_x = a; _inline_0_y = b;
+  //         _inline_0_tmp = _inline_0_x + _inline_0_y;
+  //         result = _inline_0_tmp;
+  ```
 - **Pass 1 — 定数の間接化（Constant Encoding）**: 即値をランタイム計算に置換
   ```c
   // 元: x = 42;
@@ -226,6 +240,16 @@ TACKY IR レベルの6パスと ASM レベルの5パスの計11パスで構成�
   | 1 | `!(x² + 1 > 0)` → 0 | x²+1 は常に正 |
   | 2 | `(x+1)² - x² - 1 - 2x == 0` | 展開すると恒等式 |
   | 3 | `(x³ - x) % 3 == 0` | 連続3整数の積は3の倍数 |
+- **Pass 13 — 関数アウトライン化（Function Outlining）**: 関数内の直線コードブロック（Copy/Binary/Unary のみで構成）を
+  新しい関数 `_obf_outlined_{N}` に切り出し、偽の関数を大量に出現させる。解析者が見る関数は意味不明な断片となる。
+  入力変数 ≤ 6、Double/Struct/Array 型の入出力なし、中間変数がブロック以降で未使用であることを検証。
+  `--obf-outline-min-block=N` で最小ブロックサイズを設定（デフォルト 4）
+  ```c
+  // 元: tmp = a + b; result = tmp * c;
+  // 変換後: result = _obf_outlined_0(a, b, c);
+  // 新関数: int _obf_outlined_0(int p0, int p1, int p2) {
+  //           t0 = p0 + p1; t1 = t0 * p2; return t1; }
+  ```
 - **Pass 5 — 制御フロー平坦化（CFF）**: 関数内の基本ブロックをジャンプテーブル + 状態エンコードの
   dispatch ループに変換し、IDA Pro 等の CFG 復元を破壊する
   - **ジャンプテーブル**: `.data` セクションにブロックラベルの配列（`PointerArrayInit`）を配置し、
@@ -299,12 +323,14 @@ TACKY IR レベルの6パスと ASM レベルの5パスの計11パスで構成�
 #### パス適用順序の設計
 
 TACKY IR パスの適用順序は意図的に設計されている:
-1. **定数の間接化**が先 → 後続パスが追加する定数はエンコード不要
-2. **算術置換** → 定数間接化で展開された式をさらに複雑にしつつ、後続パスでさらにノイズを加える
-3. **ジャンクコード** → 制御フローを変えないので CFF の解析に影響しない
-4. **不透明述語** → 分岐を追加。CFF がこれも含めて平坦化する
-5. **CFF** → 全体の制御構造を破壊。他のパスの後でないと構造が残らない
-6. **文字列暗号化** → 復号コードが他のパスで壊されないよう最後に適用
+1. **関数インライン展開**が最初 → インラインされたコードに後続の全パスが適用される
+2. **定数の間接化** → 後続パスが追加する定数はエンコード不要
+3. **算術置換** → 定数間接化で展開された式をさらに複雑にしつつ、後続パスでさらにノイズを加える
+4. **ジャンクコード** → 制御フローを変えないので CFF の解析に影響しない
+5. **不透明述語** → 分岐を追加。CFF がこれも含めて平坦化する
+6. **関数アウトライン化** → Pass 1-4 で難読化済みのコードが切り出され、解析者が見る関数は意味不明な断片
+7. **CFF** → アウトラインで生成された新関数を含む全関数に適用。全体の制御構造を破壊
+8. **文字列暗号化** → 復号コードが他のパスで壊されないよう最後に適用
 
 ASM レベルパスはレジスタ割り当て後に適用する（適用順: スタックフレーム難読化 → レジスタシャッフル → 命令置換 → 反逆アセンブリ → 間接コール）:
 - スタックフレーム難読化はフレーム構造を変更するため最初に適用。後続のレジスタシャッフルが挿入する dead mov が偽スタック操作の近傍に散在することで解析をさらに困難にする
@@ -783,7 +809,7 @@ Chapter 7 では以下の機能を追加した:
 │ Optimize  │  src/tacky/         TACKY IR 最適化パス（デフォルト）
 │    or     │  optimize.rs        定数畳み込み・コピー伝播・不要コード除去
 │ Obfuscate │  obfuscate.rs       TACKY 難読化パス（--fobfuscate 指定時）
-└────┬─────┘                      定数間接化・算術置換・ジャンクコード・不透明述語・CFF・文字列暗号化
+└────┬─────┘                      インライン展開・定数間接化・算術置換・ジャンクコード・不透明述語・アウトライン化・CFF・文字列暗号化
      ▼
 ┌──────────┐
 │ Codegen   │  src/codegen/       TACKY IR → Asm(Pseudo) に変換
@@ -838,9 +864,9 @@ Chapter 7 では以下の機能を追加した:
 ### コード難読化（Anti-Reverse Engineering）
 
 コンパイラレベルでの難読化変換。元のソースコードと等価だが、逆コンパイル・逆アセンブル時に解析を困難にする。
-`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計11パスを適用する。
+`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計13パスを適用する。
 
-TACKY IR レベル（6パス）:
+TACKY IR レベル（8パス）:
 - [x] **定数の間接化（Constant Encoding）**: 即値をランタイム計算に置換（`42` → `6 * 7`, `0` → `a - a` 等）。Double は精度問題のためスキップ
 - [x] **算術置換（Arithmetic Substitution）**: Add/Subtract を多段計算（アフィン変換・係数展開）に展開し、デコンパイラでの式復元を困難にする。`--obf-arith-freq` で適用頻度を設定可能
 - [x] **ジャンクコード挿入**: N命令ごと（`--obf-junk-freq` で設定可能）に実行結果に影響しない dead computation（3命令）を挿入し、逆コンパイラの解析量を増やす
@@ -855,13 +881,14 @@ ASM レベル（5パス、レジスタ割り当て後に適用）:
 - [x] **スタックフレーム難読化（Stack Frame Obfuscation）**: スタックフレームを拡張して偽スタックスロットを追加し、偽の store/load 操作を挿入してデコンパイラに偽のローカル変数を生成させる
 - [x] **命令置換（Instruction Substitution）**: x86-64 命令を意味的に等価な別の命令列に置換（Add⇄Sub即値スワップ、Neg展開、Mov即値分割）し、デコンパイラのパターンマッチングを妨害する
 
+関数境界攪乱（2パス）:
+- [x] **関数インライン展開（Function Inlining）**: 呼び出し先の関数本体を呼び出し元に埋め込み、コールグラフを破壊する。適格条件（≤50命令、非再帰、非main等）を満たす呼び出しを `--obf-inline-freq=N` の頻度でインライン化
+- [x] **関数アウトライン化（Function Outlining）**: 直線コードブロック（Copy/Binary/Unaryのみ）を新関数 `_obf_outlined_N` に切り出し、偽の関数を大量に出現させる。入力変数≤6、中間変数の安全性を検証
+
 パラメータ化:
 - [x] **難易度レベル制御（`--obf-level=1..4`）**: 段階的に難読化強度を上げたバイナリを生成可能。ベンチマークやデオブフスケーター評価に活用
-- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-anti-disasm`, `--obf-no-indirect-calls`, `--obf-no-arith-subst`, `--obf-no-reg-shuffle`, `--obf-no-stack-frame`, `--obf-no-instr-subst` で各パスを個別に無効化
-- [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N`, `--obf-reg-shuffle-freq=N`, `--obf-stack-padding=N`, `--obf-stack-fake-freq=N`, `--obf-instr-subst-freq=N` でジャンクコード・不透明述語・算術置換・レジスタシャッフル・スタックフレーム難読化・命令置換の挿入頻度を調整
-
-未実装の候補:
-- [ ] **関数のインライン展開/アウトライン化**: 関数境界を攪乱し、元の関数構造の復元を困難にする
+- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-anti-disasm`, `--obf-no-indirect-calls`, `--obf-no-arith-subst`, `--obf-no-reg-shuffle`, `--obf-no-stack-frame`, `--obf-no-instr-subst`, `--obf-no-func-inline`, `--obf-no-func-outline` で各パスを個別に無効化
+- [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N`, `--obf-reg-shuffle-freq=N`, `--obf-stack-padding=N`, `--obf-stack-fake-freq=N`, `--obf-instr-subst-freq=N`, `--obf-inline-freq=N`, `--obf-outline-min-block=N` でジャンクコード・不透明述語・算術置換・レジスタシャッフル・スタックフレーム難読化・命令置換・インライン展開・アウトライン化の頻度を調整
 
 ### ベンチマーク・評価
 

@@ -151,6 +151,19 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             }
         }
 
+        // leaq 命令: `leaq func(%rip), reg` → `leaq _func(%rip), reg`
+        // （間接呼び出し変換で生成される lea 命令の macOS 対応）
+        if trimmed.starts_with("leaq ") {
+            if let Some(rip_pos) = trimmed.find("(%rip)") {
+                let after_leaq = &trimmed[5..rip_pos]; // "leaq " is 5 chars
+                if symbols.contains(after_leaq) {
+                    let suffix = &trimmed[rip_pos..];
+                    result.push(format!("    leaq _{after_leaq}{suffix}"));
+                    continue;
+                }
+            }
+        }
+
         result.push(line.to_string());
     }
 

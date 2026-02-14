@@ -2,7 +2,7 @@
 //!
 //! 各難読化パスの有効/無効およびパラメータを管理する。
 //! `--fobfuscate` と `--obf-level=N` で制御する。
-//! 全11パス（TACKY IR 6パス + ASM 5パス）。
+//! 全13パス（TACKY IR 8パス + ASM 5パス）。
 
 /// 難読化パスの設定。パイプライン全体で共有される。
 #[derive(Debug, Clone)]
@@ -31,6 +31,10 @@ pub struct ObfuscationConfig {
     pub stack_frame_obf: bool,
     /// Pass 11 (ASM): 命令置換（同等命令列への置換）
     pub instr_subst: bool,
+    /// Pass 12 (TACKY): 関数インライン展開
+    pub func_inline: bool,
+    /// Pass 13 (TACKY): 関数アウトライン化
+    pub func_outline: bool,
 
     // ── 頻度パラメータ ──
 
@@ -56,6 +60,10 @@ pub struct ObfuscationConfig {
     pub stack_frame_fake_freq: usize,
     /// 命令置換頻度（N命令ごと）
     pub instr_subst_freq: usize,
+    /// インライン展開頻度（N回の適格呼び出しごとにインライン化）
+    pub func_inline_freq: usize,
+    /// アウトライン化の最小ブロックサイズ
+    pub func_outline_min_block: usize,
 
     // ── 文字列暗号化パラメータ ──
 
@@ -70,7 +78,7 @@ impl ObfuscationConfig {
     /// |-------|------|
     /// | 1     | 軽量: 定数+ジャンク+述語のみ、低頻度 |
     /// | 2     | 標準: +CFF+算術置換 |
-    /// | 3     | 強力: 全11パス有効 |
+    /// | 3     | 強力: 全13パス有効 |
     /// | 4     | 最大: 全パス有効、高頻度 |
     pub fn from_level(level: u8) -> Self {
         match level {
@@ -86,6 +94,8 @@ impl ObfuscationConfig {
                 reg_shuffle: false,
                 stack_frame_obf: false,
                 instr_subst: false,
+                func_inline: false,
+                func_outline: false,
                 junk_freq: 8,
                 pred_freq: 10,
                 arith_freq: 3,
@@ -93,6 +103,8 @@ impl ObfuscationConfig {
                 stack_frame_padding: 4,
                 stack_frame_fake_freq: 8,
                 instr_subst_freq: 4,
+                func_inline_freq: 3,
+                func_outline_min_block: 4,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,
@@ -109,6 +121,8 @@ impl ObfuscationConfig {
                 reg_shuffle: false,
                 stack_frame_obf: false,
                 instr_subst: false,
+                func_inline: false,
+                func_outline: false,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 5,
@@ -116,6 +130,8 @@ impl ObfuscationConfig {
                 stack_frame_padding: 4,
                 stack_frame_fake_freq: 8,
                 instr_subst_freq: 4,
+                func_inline_freq: 3,
+                func_outline_min_block: 4,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,
@@ -132,6 +148,8 @@ impl ObfuscationConfig {
                 reg_shuffle: true,
                 stack_frame_obf: true,
                 instr_subst: true,
+                func_inline: true,
+                func_outline: true,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 3,
@@ -139,6 +157,8 @@ impl ObfuscationConfig {
                 stack_frame_padding: 4,
                 stack_frame_fake_freq: 8,
                 instr_subst_freq: 4,
+                func_inline_freq: 3,
+                func_outline_min_block: 4,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,
@@ -156,6 +176,8 @@ impl ObfuscationConfig {
                 reg_shuffle: true,
                 stack_frame_obf: true,
                 instr_subst: true,
+                func_inline: true,
+                func_outline: true,
                 junk_freq: 2,
                 pred_freq: 2,
                 arith_freq: 2,
@@ -163,6 +185,8 @@ impl ObfuscationConfig {
                 stack_frame_padding: 8,
                 stack_frame_fake_freq: 4,
                 instr_subst_freq: 2,
+                func_inline_freq: 2,
+                func_outline_min_block: 3,
                 cff_a: 37,
                 cff_b: 0xCAFE,
                 string_key: 0x5A,
