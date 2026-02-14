@@ -25,6 +25,7 @@ use asm_ast::{AsmType, Instruction, Operand, Reg};
 /// TACKY プログラムをアセンブリ AST に変換する（Chapter 20: レジスタ割り当て統合）。
 ///
 /// `obf_config` が Some の場合、regalloc + fixup の後に ASM レベルの難読化パスを適用する:
+/// - スタックフレーム難読化（偽スタックスロット挿入）
 /// - レジスタシャッフル（dead mov 挿入）
 /// - 反逆アセンブリ（ゴミバイト挿入）
 /// - 関数呼び出しの間接化
@@ -53,6 +54,9 @@ pub fn generate(program: &TackyProgram, obf_config: Option<&ObfuscationConfig>) 
 
     // 3. ASM レベル難読化（fixup 後に適用）
     if let Some(config) = obf_config {
+        if config.stack_frame_obf {
+            obfuscate_stack_frame(&mut functions, config.stack_frame_padding, config.stack_frame_fake_freq);
+        }
         if config.reg_shuffle {
             register_shuffle(&mut functions, config.reg_shuffle_freq);
         }
@@ -69,6 +73,174 @@ pub fn generate(program: &TackyProgram, obf_config: Option<&ObfuscationConfig>) 
         static_vars,
         static_constants,
     })
+}
+
+/// スタックフレーム難読化: 偽のスタックスロットと偽の read/write 操作を挿入する。
+///
+/// デコンパイラ（Hex-Rays, Ghidra）がスタック変数を復元する際、
+/// 偽のローカル変数を生成させてソースコード復元を困難にする。
+///
+/// 1. AllocateStack/DeallocateStack を拡張して dead スタックスロットを追加
+/// 2. dead スロットへの偽の store/load 操作を N 命令ごとに挿入
+fn obfuscate_stack_frame(functions: &mut [AsmFunction], num_fake_slots: usize, freq: usize) {
+    let num_fake_slots = if num_fake_slots == 0 { 4 } else { num_fake_slots };
+    let freq = if freq == 0 { 8 } else { freq };
+    let padding_size = (num_fake_slots * 8 + 15) & !15;
+
+    for func in functions {
+        // Phase 1: AllocateStack を探す
+        let alloc_size = match find_allocate_stack(&func.instructions) {
+            Some(size) => size,
+            None => continue,
+        };
+
+        // 最も深い Stack(offset) を探す
+        let min_offset = find_min_stack_offset(&func.instructions);
+        if min_offset >= 0 {
+            continue; // spill スロットなし
+        }
+
+        // Phase 2: フレーム拡張
+        // AllocateStack(N) → AllocateStack(N + padding_size)
+        // DeallocateStack(N) → DeallocateStack(N + padding_size) （元の alloc_size と一致するもののみ）
+        for instr in func.instructions.iter_mut() {
+            match instr {
+                Instruction::AllocateStack(n) if *n == alloc_size => {
+                    *n += padding_size;
+                }
+                Instruction::DeallocateStack(n) if *n == alloc_size => {
+                    *n += padding_size;
+                }
+                _ => {}
+            }
+        }
+
+        // 偽スロットのオフセットを計算: min_offset - 8, min_offset - 16, ...
+        let fake_offsets: Vec<i32> = (1..=num_fake_slots as i32)
+            .map(|i| min_offset - 8 * i)
+            .collect();
+
+        // Phase 3: 偽操作の挿入
+        let mut new_instrs = Vec::new();
+        let mut counter: usize = 0;
+        let mut pattern: usize = 0;
+        let mut slot_idx: usize = 0;
+        let mut written_slots: Vec<i32> = Vec::new();
+        let orig = func.instructions.clone();
+        for (i, instr) in orig.iter().enumerate() {
+            new_instrs.push(instr.clone());
+            counter += 1;
+            if counter < freq {
+                continue;
+            }
+            // 安全な挿入位置か判定
+            let next = orig.get(i + 1);
+            if !is_safe_shuffle_point(instr, next) {
+                continue;
+            }
+            let offset = fake_offsets[slot_idx % num_fake_slots];
+            match pattern % 3 {
+                0 => {
+                    // Fake int store: movl %eXX, fake_offset(%rbp)
+                    let src_reg = extract_source_reg(instr);
+                    new_instrs.push(Instruction::Mov {
+                        asm_type: AsmType::Longword,
+                        src: Operand::Register(src_reg),
+                        dst: Operand::Stack(offset),
+                    });
+                    if !written_slots.contains(&offset) {
+                        written_slots.push(offset);
+                    }
+                }
+                1 => {
+                    // Fake quad store: movq %rXX, fake_offset(%rbp)
+                    let src_reg = extract_source_reg(instr);
+                    new_instrs.push(Instruction::Mov {
+                        asm_type: AsmType::Quadword,
+                        src: Operand::Register(src_reg),
+                        dst: Operand::Stack(offset),
+                    });
+                    if !written_slots.contains(&offset) {
+                        written_slots.push(offset);
+                    }
+                }
+                2 => {
+                    // Fake load: movl fake_offset(%rbp), %r10d
+                    // 書き込み済みスロットから読む。なければパターン0にフォールバック
+                    if written_slots.is_empty() {
+                        let src_reg = extract_source_reg(instr);
+                        new_instrs.push(Instruction::Mov {
+                            asm_type: AsmType::Longword,
+                            src: Operand::Register(src_reg),
+                            dst: Operand::Stack(offset),
+                        });
+                        if !written_slots.contains(&offset) {
+                            written_slots.push(offset);
+                        }
+                    } else {
+                        let read_offset = written_slots[slot_idx % written_slots.len()];
+                        new_instrs.push(Instruction::Mov {
+                            asm_type: AsmType::Longword,
+                            src: Operand::Stack(read_offset),
+                            dst: Operand::Register(Reg::R10),
+                        });
+                    }
+                }
+                _ => unreachable!(),
+            }
+            counter = 0;
+            pattern += 1;
+            slot_idx += 1;
+        }
+        func.instructions = new_instrs;
+    }
+}
+
+/// AllocateStack 命令を探してサイズを返す。
+fn find_allocate_stack(instructions: &[Instruction]) -> Option<usize> {
+    for instr in instructions {
+        if let Instruction::AllocateStack(n) = instr {
+            return Some(*n);
+        }
+    }
+    None
+}
+
+/// 最も深い（最も負の）Stack(offset) を探す。
+fn find_min_stack_offset(instructions: &[Instruction]) -> i32 {
+    let mut min_offset: i32 = 0;
+    for instr in instructions {
+        let check = |op: &Operand| {
+            if let Operand::Stack(off) = op {
+                *off
+            } else {
+                0
+            }
+        };
+        let offset = match instr {
+            Instruction::Mov { src, dst, .. } => check(src).min(check(dst)),
+            Instruction::Binary { src, dst, .. } => check(src).min(check(dst)),
+            Instruction::Cmp { src, dst, .. } => check(src).min(check(dst)),
+            Instruction::Unary { operand, .. } => check(operand),
+            Instruction::Idiv { operand, .. } => check(operand),
+            Instruction::Div { operand, .. } => check(operand),
+            Instruction::SetCC { operand, .. } => check(operand),
+            Instruction::Push(op) => check(op),
+            Instruction::Movsx { src, dst } => check(src).min(check(dst)),
+            Instruction::MovsxByte { src, dst, .. } => check(src).min(check(dst)),
+            Instruction::MovZeroExtend { src, dst } => check(src).min(check(dst)),
+            Instruction::MovZeroExtendByte { src, dst, .. } => check(src).min(check(dst)),
+            Instruction::Truncate { src, dst } => check(src).min(check(dst)),
+            Instruction::Cvtsi2sd { src, dst, .. } => check(src).min(check(dst)),
+            Instruction::Cvttsd2si { src, dst, .. } => check(src).min(check(dst)),
+            Instruction::Lea { src, dst } => check(src).min(check(dst)),
+            _ => 0,
+        };
+        if offset < min_offset {
+            min_offset = offset;
+        }
+    }
+    min_offset
 }
 
 /// 反逆アセンブリ: 無条件ジャンプ直後にゴミバイトを挿入する。

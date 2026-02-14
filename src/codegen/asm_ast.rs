@@ -38,6 +38,8 @@
 //! - `StaticInit::ByteArrayInit(Vec<u8>)`: 暗号化文字列バイト配列。文字列暗号化パス用。
 //! - レジスタシャッフル: 既存の `Mov` 命令を使い R10/R11 scratch レジスタへの dead copy を挿入。
 //!   新しい AST バリアントは不要（`Mov { Quadword, Register, Register }` で表現）。
+//! - スタックフレーム難読化: 既存の `Mov` + `Stack(offset)` で偽スタック操作を挿入。
+//!   `AllocateStack`/`DeallocateStack` のサイズを拡張し、偽スロットへの read/write を追加。
 //!
 //! # Chapter 20: レジスタ割り当て
 //! - `Operand::Pseudo(String)`: 割り当て前の疑似レジスタ。コード生成で変数に使用され、

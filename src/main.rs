@@ -8,7 +8,7 @@
 //!          → [Codegen] → [RegAlloc+Coalescing] → [Fixup] → [Emit] → source.s → [gcc] → binary
 //! ```
 //!
-//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（9パス）を適用する。
+//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（10パス）を適用する。
 //! `--obf-level=N` で難読化強度を段階的に制御可能（1=軽量〜4=最大）。
 //!
 //! # 使い方
@@ -25,6 +25,7 @@
 //! ferrugocc --fobfuscate --obf-level=4 <source.c>       # 最大難読化
 //! ferrugocc --fobfuscate --obf-no-cff <source.c>        # CFF 無効化
 //! ferrugocc --fobfuscate --obf-no-reg-shuffle <source.c> # レジスタシャッフル無効化
+//! ferrugocc --fobfuscate --obf-no-stack-frame <source.c> # スタックフレーム難読化無効化
 //! ferrugocc --fobfuscate --obf-junk-freq=2 <source.c>   # ジャンク頻度変更
 //! ferrugocc --fobfuscate --obf-reg-shuffle-freq=3 <source.c> # シャッフル頻度変更
 //! ```
@@ -118,6 +119,10 @@ struct Cli {
     #[arg(long = "obf-no-reg-shuffle")]
     obf_no_reg_shuffle: bool,
 
+    /// スタックフレーム難読化を無効化
+    #[arg(long = "obf-no-stack-frame")]
+    obf_no_stack_frame: bool,
+
     /// 算術置換頻度（N回に1回適用）
     #[arg(long = "obf-arith-freq")]
     obf_arith_freq: Option<usize>,
@@ -125,6 +130,14 @@ struct Cli {
     /// レジスタシャッフル頻度（N命令ごとに挿入）
     #[arg(long = "obf-reg-shuffle-freq")]
     obf_reg_shuffle_freq: Option<usize>,
+
+    /// 偽スタックスロット数
+    #[arg(long = "obf-stack-padding")]
+    obf_stack_padding: Option<usize>,
+
+    /// 偽スタック操作の挿入頻度（N命令ごと）
+    #[arg(long = "obf-stack-fake-freq")]
+    obf_stack_fake_freq: Option<usize>,
 
     /// Input C source file
     source: PathBuf,
@@ -161,12 +174,15 @@ fn main() {
         if cli.obf_no_indirect_calls { config.indirect_calls = false; }
         if cli.obf_no_arith_subst { config.arith_subst = false; }
         if cli.obf_no_reg_shuffle { config.reg_shuffle = false; }
+        if cli.obf_no_stack_frame { config.stack_frame_obf = false; }
 
         // 頻度オーバーライド
         if let Some(freq) = cli.obf_junk_freq { config.junk_freq = freq; }
         if let Some(freq) = cli.obf_pred_freq { config.pred_freq = freq; }
         if let Some(freq) = cli.obf_arith_freq { config.arith_freq = freq; }
         if let Some(freq) = cli.obf_reg_shuffle_freq { config.reg_shuffle_freq = freq; }
+        if let Some(n) = cli.obf_stack_padding { config.stack_frame_padding = n; }
+        if let Some(freq) = cli.obf_stack_fake_freq { config.stack_frame_fake_freq = freq; }
 
         Some(config)
     } else {
