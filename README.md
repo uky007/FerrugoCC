@@ -22,6 +22,20 @@ cargo run -- -S source.c         # アセンブリ出力（.s ファイル生成
 # 難読化コンパイル（最適化の代わりに難読化パスを適用）
 cargo run -- --fobfuscate source.c
 cargo run -- --fobfuscate -S source.c  # 難読化アセンブリ出力
+
+# 難読化レベル指定（1=軽量, 2=標準, 3=全パス有効, 4=最大）
+cargo run -- --fobfuscate --obf-level=1 source.c  # 定数+ジャンク+述語のみ
+cargo run -- --fobfuscate --obf-level=4 source.c  # 全パス＋高頻度
+
+# 個別パス制御
+cargo run -- --fobfuscate --obf-no-cff source.c              # CFF を無効化
+cargo run -- --fobfuscate --obf-no-strings source.c           # 文字列暗号化を無効化
+cargo run -- --fobfuscate --obf-no-anti-disasm source.c       # 反逆アセンブリを無効化
+cargo run -- --fobfuscate --obf-no-indirect-calls source.c    # 間接呼び出しを無効化
+
+# 頻度パラメータの調整
+cargo run -- --fobfuscate --obf-junk-freq=2 source.c   # 2命令ごとにジャンク挿入
+cargo run -- --fobfuscate --obf-pred-freq=3 source.c    # 3回に1回不透明述語を適用
 ```
 
 アセンブリから実行ファイルへの変換には、システムに `gcc` が必要。
@@ -121,6 +135,18 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 `--fobfuscate` フラグで最適化の代わりに難読化パスを適用する。
 TACKY IR レベルの5パスと ASM レベルの2パスの計7パスで構成される。
 
+`--obf-level=N` で難読化の強度を段階的に制御できる:
+
+| Level | 有効パス | ジャンク頻度 | 述語頻度 | 用途 |
+|-------|---------|------------|---------|------|
+| 1 | 定数間接化, ジャンク, 述語 | 8命令ごと | 10回に1回 | 軽量：基本的な難読化 |
+| 2 | Level 1 + CFF | 4命令ごと | 5回に1回 | 標準：制御フロー平坦化追加 |
+| 3 | Level 2 + 文字列暗号化, Anti-Disasm, 間接呼出 | 4命令ごと | 5回に1回 | 全パス有効（デフォルト） |
+| 4 | 全パス | 2命令ごと | 2回に1回 | 最大：高頻度で全パス適用 |
+
+各パスは `--obf-no-cff`, `--obf-no-strings` 等で個別に無効化でき、
+`--obf-junk-freq=N`, `--obf-pred-freq=N` で頻度を直接指定することも可能。
+
 #### TACKY IR レベル（5パス）
 
 - **Pass 1 — 定数の間接化（Constant Encoding）**: 即値をランタイム計算に置換
@@ -129,8 +155,8 @@ TACKY IR レベルの5パスと ASM レベルの2パスの計7パスで構成さ
   // 変換後: tmp_a = 6; tmp_b = 7; x = tmp_a * tmp_b;  // 6 * 7 = 42
   // ゼロの場合: tmp = 7; x = tmp - tmp;                // a - a = 0
   ```
-- **Pass 2 — ジャンクコード挿入**: 4命令ごとに結果が使われない dead computation を3命令挿入
-- **Pass 3 — 不透明述語（Opaque Predicates）**: 5回に1回、値生成命令を常に真の条件分岐で囲む。
+- **Pass 2 — ジャンクコード挿入**: N命令ごと（デフォルト4）に結果が使われない dead computation を3命令挿入
+- **Pass 3 — 不透明述語（Opaque Predicates）**: N回に1回（デフォルト5）、値生成命令を常に真の条件分岐で囲む。
   パターンマッチによる自動除去を防ぐため4種類の数学的恒等式をローテーション:
   | # | 恒等式 | 原理 |
   |---|--------|------|
@@ -143,7 +169,7 @@ TACKY IR レベルの5パスと ASM レベルの2パスの計7パスで構成さ
   - **ジャンプテーブル**: `.data` セクションにブロックラベルの配列（`PointerArrayInit`）を配置し、
     `JumpIndirect`（`jmp *%rax`）で分岐。連続比較の `if (state == i) goto block_i` よりも
     静的解析での復元が困難
-  - **状態エンコード**: state 変数をアフィン変換（`encoded = index * 37 + 0xCAFE`）で符号化。
+  - **状態エンコード**: state 変数をアフィン変換（`encoded = index * A + B`、デフォルト A=37, B=0xCAFE）で符号化。
     dispatch でデコード（`index = (encoded - 0xCAFE) / 37`）してからジャンプテーブルを索引。
     自動的なステートマシン復元を妨害する
   - **`JumpIndirect` の `possible_targets`**: 間接ジャンプは動的ターゲットだが、レジスタ割り当ての
@@ -720,14 +746,19 @@ Chapter 7 では以下の機能を追加した:
 
 TACKY IR レベル（5パス）:
 - [x] **定数の間接化（Constant Encoding）**: 即値をランタイム計算に置換（`42` → `6 * 7`, `0` → `a - a` 等）。Double は精度問題のためスキップ
-- [x] **ジャンクコード挿入**: 4命令ごとに実行結果に影響しない dead computation（3命令）を挿入し、逆コンパイラの解析量を増やす
-- [x] **不透明述語（Opaque Predicates）多様化**: 4種類の数学的恒等式（連続整数の積、x²+1>0、代数恒等式、連続3整数の積）をローテーションし、パターンマッチによる自動除去を防ぐ
-- [x] **制御フロー平坦化（CFF）+ ジャンプテーブル + 状態エンコード**: 基本ブロックをジャンプテーブル（`jmp *%rax`）+ アフィン変換（`index * 37 + 0xCAFE`）で符号化した状態変数の dispatch ループに変換。IDA Pro の CFG 復元を破壊する
+- [x] **ジャンクコード挿入**: N命令ごと（`--obf-junk-freq` で設定可能）に実行結果に影響しない dead computation（3命令）を挿入し、逆コンパイラの解析量を増やす
+- [x] **不透明述語（Opaque Predicates）多様化**: 4種類の数学的恒等式（連続整数の積、x²+1>0、代数恒等式、連続3整数の積）をN回に1回（`--obf-pred-freq` で設定可能）ローテーションし、パターンマッチによる自動除去を防ぐ
+- [x] **制御フロー平坦化（CFF）+ ジャンプテーブル + 状態エンコード**: 基本ブロックをジャンプテーブル（`jmp *%rax`）+ アフィン変換で符号化した状態変数の dispatch ループに変換。IDA Pro の CFG 復元を破壊する
 - [x] **文字列暗号化**: 文字列リテラルを加算暗号化して `.data` に配置し、main() の先頭でアンロール復号コードを挿入
 
 ASM レベル（2パス、レジスタ割り当て後に適用）:
 - [x] **反逆アセンブリ（Anti-Disassembly）**: 無条件ジャンプ直後に `0xE8`（call opcode）を挿入し、リニアスイープ型逆アセンブラの命令境界認識を破壊する
 - [x] **関数呼び出しの間接化（Indirect Calls）**: `call func` → `lea func(%rip), %r10; call *%r10` に変換し、静的解析でのコールグラフ復元を妨害する
+
+パラメータ化:
+- [x] **難易度レベル制御（`--obf-level=1..4`）**: 段階的に難読化強度を上げたバイナリを生成可能。ベンチマークやデオブフスケーター評価に活用
+- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-anti-disasm`, `--obf-no-indirect-calls` で各パスを個別に無効化
+- [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N` でジャンクコード・不透明述語の挿入頻度を調整
 
 未実装の候補:
 - [ ] **関数のインライン展開/アウトライン化**: 関数境界を攪乱し、元の関数構造の復元を困難にする

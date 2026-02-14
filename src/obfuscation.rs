@@ -1,0 +1,122 @@
+//! 難読化設定（ObfuscationConfig）
+//!
+//! 各難読化パスの有効/無効およびパラメータを管理する。
+//! `--fobfuscate` と `--obf-level=N` で制御する。
+
+/// 難読化パスの設定。パイプライン全体で共有される。
+#[derive(Debug, Clone)]
+pub struct ObfuscationConfig {
+    // ── パス有効/無効 ──
+
+    /// Pass 1: 定数の間接化（即値を a*b+c に分解）
+    pub constant_encoding: bool,
+    /// Pass 2: ジャンクコード挿入
+    pub junk_code: bool,
+    /// Pass 3: 不透明述語
+    pub opaque_predicates: bool,
+    /// Pass 4: 制御フロー平坦化
+    pub cff: bool,
+    /// Pass 5: 文字列暗号化
+    pub string_encryption: bool,
+    /// Pass 6: 反逆アセンブリ（ゴミバイト挿入）
+    pub anti_disassembly: bool,
+    /// Pass 7: 関数呼び出しの間接化
+    pub indirect_calls: bool,
+
+    // ── 頻度パラメータ ──
+
+    /// ジャンクコード挿入頻度（N命令ごとに挿入）
+    pub junk_freq: usize,
+    /// 不透明述語頻度（N個の値生成命令ごとに適用）
+    pub pred_freq: usize,
+
+    // ── CFF パラメータ ──
+
+    /// 状態エンコード乗数 (encoded = index * cff_a + cff_b)
+    pub cff_a: i32,
+    /// 状態エンコードバイアス
+    pub cff_b: i32,
+
+    // ── 文字列暗号化パラメータ ──
+
+    /// 暗号化キー（加算ベース）
+    pub string_key: u8,
+}
+
+impl ObfuscationConfig {
+    /// レベルに応じたプリセット設定を生成する。
+    ///
+    /// | Level | 概要 |
+    /// |-------|------|
+    /// | 1     | 軽量: 定数+ジャンク+述語のみ、低頻度 |
+    /// | 2     | 標準: 全TACKYパス有効（現在のデフォルト相当） |
+    /// | 3     | 強力: 全7パス有効 |
+    /// | 4     | 最大: 全パス有効、高頻度 |
+    pub fn from_level(level: u8) -> Self {
+        match level {
+            1 => ObfuscationConfig {
+                constant_encoding: true,
+                junk_code: true,
+                opaque_predicates: true,
+                cff: false,
+                string_encryption: false,
+                anti_disassembly: false,
+                indirect_calls: false,
+                junk_freq: 8,
+                pred_freq: 10,
+                cff_a: 37,
+                cff_b: 0xCAFE,
+                string_key: 0x5A,
+            },
+            2 => ObfuscationConfig {
+                constant_encoding: true,
+                junk_code: true,
+                opaque_predicates: true,
+                cff: true,
+                string_encryption: false,
+                anti_disassembly: false,
+                indirect_calls: false,
+                junk_freq: 4,
+                pred_freq: 5,
+                cff_a: 37,
+                cff_b: 0xCAFE,
+                string_key: 0x5A,
+            },
+            3 => ObfuscationConfig {
+                constant_encoding: true,
+                junk_code: true,
+                opaque_predicates: true,
+                cff: true,
+                string_encryption: true,
+                anti_disassembly: true,
+                indirect_calls: true,
+                junk_freq: 4,
+                pred_freq: 5,
+                cff_a: 37,
+                cff_b: 0xCAFE,
+                string_key: 0x5A,
+            },
+            // level >= 4: 最大
+            _ => ObfuscationConfig {
+                constant_encoding: true,
+                junk_code: true,
+                opaque_predicates: true,
+                cff: true,
+                string_encryption: true,
+                anti_disassembly: true,
+                indirect_calls: true,
+                junk_freq: 2,
+                pred_freq: 2,
+                cff_a: 37,
+                cff_b: 0xCAFE,
+                string_key: 0x5A,
+            },
+        }
+    }
+
+    /// 現在のデフォルト設定（Level 3 相当 = 従来の --fobfuscate と同等）
+    #[allow(dead_code)]
+    pub fn default_all() -> Self {
+        Self::from_level(3)
+    }
+}

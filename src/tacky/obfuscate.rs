@@ -25,6 +25,7 @@
 
 use super::tacky_ast::*;
 use crate::parse::ast::Type;
+use crate::obfuscation::ObfuscationConfig;
 
 /// 難読化コンテキスト — temp 変数とラベルのカウンタを管理
 struct ObfCtx {
@@ -59,7 +60,7 @@ impl ObfCtx {
 ///
 /// 各関数に対し Pass 1→4 を適用した後、プログラム全体に Pass 5（文字列暗号化）を適用する。
 /// Pass 5 を最後にすることで、復号コードが他のパス（特に CFF）で破壊されるのを防ぐ。
-pub fn obfuscate(program: TackyProgram) -> TackyProgram {
+pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProgram {
     let mut program = program;
 
     let mut ctx = ObfCtx::new();
@@ -67,25 +68,37 @@ pub fn obfuscate(program: TackyProgram) -> TackyProgram {
     for func in &mut program.functions {
 
         // Pass 1: 定数の間接化
-        func.body = constant_encoding(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types);
+        if config.constant_encoding {
+            func.body = constant_encoding(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types);
+        }
 
         // Pass 2: ジャンクコード挿入
-        func.body = junk_code_insertion(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types);
+        if config.junk_code {
+            func.body = junk_code_insertion(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types, config.junk_freq);
+        }
 
         // Pass 3: 不透明述語（多様化パターン）
-        func.body = opaque_predicates(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types);
+        if config.opaque_predicates {
+            func.body = opaque_predicates(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types, config.pred_freq);
+        }
 
         // Pass 4: 制御フロー平坦化（ジャンプテーブル + 状態エンコード）
-        func.body = control_flow_flattening(
-            std::mem::take(&mut func.body),
-            &mut ctx,
-            &mut func.var_types,
-            &mut program.static_vars,
-        );
+        if config.cff {
+            func.body = control_flow_flattening(
+                std::mem::take(&mut func.body),
+                &mut ctx,
+                &mut func.var_types,
+                &mut program.static_vars,
+                config.cff_a,
+                config.cff_b,
+            );
+        }
     }
 
     // Pass 5: 文字列暗号化（他のパスの後に適用 — 復号コードが CFF 等で壊されるのを防ぐ）
-    string_encryption(&mut program, &mut ctx);
+    if config.string_encryption {
+        string_encryption(&mut program, &mut ctx, config.string_key);
+    }
 
     program
 }
@@ -94,16 +107,13 @@ pub fn obfuscate(program: TackyProgram) -> TackyProgram {
 // Pass 5: String Encryption（文字列暗号化）
 // ─────────────────────────────────────────────────────────────
 
-/// 暗号化キー（加算ベース — XOR が TACKY IR にないため）
-const STRING_ENCRYPT_KEY: u8 = 0x5A;
-
 /// 文字列定数を暗号化し、main() の先頭に復号コードを挿入する。
 ///
 /// 1. static_constants から StringInit を抽出し、バイト列を加算暗号化
 /// 2. 暗号化バイト列を ByteArrayInit として static_vars に移動（.data、書き込み可能）
 /// 3. main() の先頭にアンロール復号コードを挿入:
 ///    各バイトを Load → Subtract(key) → Store で復号
-fn string_encryption(program: &mut TackyProgram, ctx: &mut ObfCtx) {
+fn string_encryption(program: &mut TackyProgram, ctx: &mut ObfCtx, key: u8) {
     // 暗号化対象の文字列定数を収集
     let mut encrypted_strings: Vec<(String, Vec<u8>, usize)> = Vec::new(); // (label, encrypted_bytes, original_len_with_null)
 
@@ -111,10 +121,10 @@ fn string_encryption(program: &mut TackyProgram, ctx: &mut ObfCtx) {
         if let TackyStaticInit::StringInit(content, byte_len) = &sc.init {
             // 各バイトをキーで加算暗号化（null 終端含む）
             let mut encrypted: Vec<u8> = content.as_bytes().iter()
-                .map(|b| b.wrapping_add(STRING_ENCRYPT_KEY))
+                .map(|b| b.wrapping_add(key))
                 .collect();
             // null 終端も暗号化
-            encrypted.push(0u8.wrapping_add(STRING_ENCRYPT_KEY));
+            encrypted.push(0u8.wrapping_add(key));
 
             encrypted_strings.push((sc.name.clone(), encrypted, *byte_len));
             false // static_constants から除去
@@ -188,7 +198,7 @@ fn string_encryption(program: &mut TackyProgram, ctx: &mut ObfCtx) {
                 decrypt_instrs.push(TackyInstruction::Binary {
                     op: TackyBinaryOp::Subtract,
                     left: TackyVal::Var(enc_int),
-                    right: TackyVal::Constant(TackyConst::Int(STRING_ENCRYPT_KEY as i32)),
+                    right: TackyVal::Constant(TackyConst::Int(key as i32)),
                     dst: TackyVal::Var(dec_int.clone()),
                 });
 
@@ -372,19 +382,20 @@ fn decompose_value(value: i64) -> (i64, i64, i64) {
 // Pass 2: Junk Code Insertion（ジャンクコード挿入）
 // ─────────────────────────────────────────────────────────────
 
-/// 4命令ごとに dead computation（結果が使われない計算）を挿入する。
+/// N命令ごとに dead computation（結果が使われない計算）を挿入する。
 /// Label の直前には挿入しない。
 fn junk_code_insertion(
     instrs: Vec<TackyInstruction>,
     ctx: &mut ObfCtx,
     var_types: &mut std::collections::HashMap<String, Type>,
+    freq: usize,
 ) -> Vec<TackyInstruction> {
     let mut result = Vec::new();
     let mut count = 0;
 
     for (i, instr) in instrs.iter().enumerate() {
-        // 4命令ごとにジャンクコードを挿入（ただし Label の直前は避ける）
-        if count > 0 && count % 4 == 0 {
+        // N命令ごとにジャンクコードを挿入（ただし Label の直前は避ける）
+        if count > 0 && count % freq == 0 {
             let next_is_label = instrs.get(i).map_or(false, |next| matches!(next, TackyInstruction::Label(_)));
             if !next_is_label {
                 result.extend(generate_junk(ctx, var_types));
@@ -432,12 +443,13 @@ fn generate_junk(
 // Pass 3: Opaque Predicates（不透明述語）
 // ─────────────────────────────────────────────────────────────
 
-/// 5回に1回、値生成命令を常に真の条件分岐で囲む。
+/// N回に1回、値生成命令を常に真の条件分岐で囲む。
 /// `x * (x + 1) % 2 == 0` は任意の整数 x で常に真（連続整数の積は偶数）。
 fn opaque_predicates(
     instrs: Vec<TackyInstruction>,
     ctx: &mut ObfCtx,
     var_types: &mut std::collections::HashMap<String, Type>,
+    freq: usize,
 ) -> Vec<TackyInstruction> {
     let mut result = Vec::new();
     let mut candidate_count = 0;
@@ -445,7 +457,7 @@ fn opaque_predicates(
     for instr in instrs {
         if is_value_producing(&instr) {
             candidate_count += 1;
-            if candidate_count % 5 == 0 {
+            if candidate_count % freq == 0 {
                 result.extend(wrap_with_opaque_predicate(instr, ctx, var_types));
                 continue;
             }
@@ -766,12 +778,6 @@ fn generate_predicate_3(
 // Pass 4: Control Flow Flattening（制御フロー平坦化）
 // ─────────────────────────────────────────────────────────────
 
-/// CFF 状態エンコード定数
-/// エンコード: `encoded = index * CFF_A + CFF_B`
-/// デコード: `index = (encoded - CFF_B) / CFF_A`
-const CFF_A: i32 = 37;
-const CFF_B: i32 = 0xCAFE_u16 as i32;
-
 /// 関数本体を基本ブロックに分割し、ジャンプテーブル + 状態エンコードの dispatch ループに変換する。
 ///
 /// Feature 1: ジャンプテーブルによる間接ジャンプ（IDA の CFG 復元を破壊）
@@ -791,6 +797,8 @@ fn control_flow_flattening(
     ctx: &mut ObfCtx,
     var_types: &mut std::collections::HashMap<String, Type>,
     static_vars: &mut Vec<TackyStaticVar>,
+    cff_a: i32,
+    cff_b: i32,
 ) -> Vec<TackyInstruction> {
     if instrs.is_empty() {
         return instrs;
@@ -838,7 +846,7 @@ fn control_flow_flattening(
 
     // ── エンコード関数: index → index * A + B ──
     let encode = |index: usize| -> i32 {
-        (index as i32).wrapping_mul(CFF_A).wrapping_add(CFF_B)
+        (index as i32).wrapping_mul(cff_a).wrapping_add(cff_b)
     };
 
     // obf_state = encode(0) = 0 * A + B = B
@@ -862,13 +870,13 @@ fn control_flow_flattening(
     result.push(TackyInstruction::Binary {
         op: TackyBinaryOp::Subtract,
         left: TackyVal::Var(state_var.clone()),
-        right: TackyVal::Constant(TackyConst::Int(CFF_B)),
+        right: TackyVal::Constant(TackyConst::Int(cff_b)),
         dst: TackyVal::Var(tmp_sub.clone()),
     });
     result.push(TackyInstruction::Binary {
         op: TackyBinaryOp::Divide,
         left: TackyVal::Var(tmp_sub),
-        right: TackyVal::Constant(TackyConst::Int(CFF_A)),
+        right: TackyVal::Constant(TackyConst::Int(cff_a)),
         dst: TackyVal::Var(decoded_index.clone()),
     });
 
@@ -1188,7 +1196,7 @@ mod tests {
         let mut ctx = ObfCtx::new();
         let mut var_types = make_var_types(&["a", "b", "c", "d"]);
 
-        let result = junk_code_insertion(instrs, &mut ctx, &mut var_types);
+        let result = junk_code_insertion(instrs, &mut ctx, &mut var_types, 4);
 
         assert!(result.len() > original_len, "junk code should increase instruction count");
     }
@@ -1207,7 +1215,7 @@ mod tests {
         let mut ctx = ObfCtx::new();
         let mut var_types = make_var_types(&["a", "b", "c", "d", "e"]);
 
-        let result = opaque_predicates(instrs, &mut ctx, &mut var_types);
+        let result = opaque_predicates(instrs, &mut ctx, &mut var_types, 5);
 
         // JumpIfZero（不透明述語の分岐）が挿入されていること
         let has_jump_if_zero = result.iter().any(|i| matches!(i, TackyInstruction::JumpIfZero { .. }));
@@ -1242,7 +1250,7 @@ mod tests {
         let mut var_types = make_var_types(&["x", "r"]);
         let mut static_vars = Vec::new();
 
-        let result = control_flow_flattening(instrs, &mut ctx, &mut var_types, &mut static_vars);
+        let result = control_flow_flattening(instrs, &mut ctx, &mut var_types, &mut static_vars, 37, 0xCAFE);
 
         // dispatch ラベル（.Lobf_）が存在すること
         let has_dispatch_label = result.iter().any(|i| {
@@ -1309,9 +1317,11 @@ mod tests {
     #[test]
     fn test_state_encoding_consistency() {
         // Feature 4: エンコード/デコードの一貫性を検証
+        let cff_a: i32 = 37;
+        let cff_b: i32 = 0xCAFE;
         for i in 0..20 {
-            let encoded = (i as i32).wrapping_mul(CFF_A).wrapping_add(CFF_B);
-            let decoded = (encoded.wrapping_sub(CFF_B)) / CFF_A;
+            let encoded = (i as i32).wrapping_mul(cff_a).wrapping_add(cff_b);
+            let decoded = (encoded.wrapping_sub(cff_b)) / cff_a;
             assert_eq!(decoded, i as i32, "encode/decode should be consistent for index {i}");
         }
     }

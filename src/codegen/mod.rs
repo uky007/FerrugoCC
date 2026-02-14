@@ -18,15 +18,16 @@ pub mod regalloc;
 pub use asm_ast::{AsmProgram, AsmFunction};
 
 use crate::error::Result;
+use crate::obfuscation::ObfuscationConfig;
 use crate::tacky::tacky_ast::TackyProgram;
 use asm_ast::{Instruction, Operand, Reg};
 
 /// TACKY プログラムをアセンブリ AST に変換する（Chapter 20: レジスタ割り当て統合）。
 ///
-/// `obfuscate` が true の場合、regalloc + fixup の後に ASM レベルの難読化パスを適用する:
+/// `obf_config` が Some の場合、regalloc + fixup の後に ASM レベルの難読化パスを適用する:
 /// - 反逆アセンブリ（ゴミバイト挿入）
 /// - 関数呼び出しの間接化
-pub fn generate(program: &TackyProgram, obfuscate: bool) -> Result<AsmProgram> {
+pub fn generate(program: &TackyProgram, obf_config: Option<&ObfuscationConfig>) -> Result<AsmProgram> {
     // 1. Pseudo 付きの Asm を生成
     let (results, static_vars, static_constants) = generator::generate(program)?;
 
@@ -50,9 +51,13 @@ pub fn generate(program: &TackyProgram, obfuscate: bool) -> Result<AsmProgram> {
     }
 
     // 3. ASM レベル難読化（fixup 後に適用）
-    if obfuscate {
-        insert_anti_disassembly(&mut functions);
-        indirect_calls(&mut functions);
+    if let Some(config) = obf_config {
+        if config.anti_disassembly {
+            insert_anti_disassembly(&mut functions);
+        }
+        if config.indirect_calls {
+            indirect_calls(&mut functions);
+        }
     }
 
     Ok(AsmProgram {

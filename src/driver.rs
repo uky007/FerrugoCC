@@ -11,6 +11,7 @@
 //!
 //! - デフォルト: TACKY IR 最適化パス（定数畳み込み・コピー伝播・不要コード除去）
 //! - `--fobfuscate`: 難読化パス（定数間接化・ジャンクコード・不透明述語・CFF・文字列暗号化）
+//! - `--obf-level=N`: 難読化強度レベル（1=軽量, 2=標準, 3=全パス有効, 4=最大）
 //!
 //! `--lex`, `--parse`, `--validate`, `--tacky`, `--codegen`, `-S` フラグで途中のステージで停止できる。
 //! これは本のテストスイートとの互換性のために必要。
@@ -25,6 +26,7 @@ use crate::typecheck;
 use crate::tacky;
 use crate::codegen;
 use crate::emit;
+use crate::obfuscation::ObfuscationConfig;
 
 /// コンパイルをどのステージまで実行するかを指定する列挙型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,8 +52,8 @@ pub enum Stage {
 /// `source_path` のCソースファイルを読み込み、`stage` で指定された
 /// ステージまで処理を行う。
 ///
-/// `obfuscate` が true の場合、TACKY IR 最適化の代わりに難読化パスを適用する。
-pub fn run(source_path: &Path, stage: Stage, obfuscate: bool) -> Result<()> {
+/// `obf_config` が Some の場合、TACKY IR 最適化の代わりに難読化パスを適用する。
+pub fn run(source_path: &Path, stage: Stage, obf_config: Option<ObfuscationConfig>) -> Result<()> {
     let source = std::fs::read_to_string(source_path)?;
 
     // ── Stage 1: 字句解析 ──
@@ -79,14 +81,14 @@ pub fn run(source_path: &Path, stage: Stage, obfuscate: bool) -> Result<()> {
     }
 
     // ── Stage 3.5: TACKY 最適化 or 難読化 ──
-    let tacky_program = if obfuscate {
-        tacky::obfuscate(tacky_program)
+    let tacky_program = if let Some(ref config) = obf_config {
+        tacky::obfuscate(tacky_program, config)
     } else {
         tacky::optimize(tacky_program)
     };
 
     // ── Stage 4: コード生成（TACKY → Asm AST）──
-    let asm_program = codegen::generate(&tacky_program, obfuscate)?;
+    let asm_program = codegen::generate(&tacky_program, obf_config.as_ref())?;
     if stage == Stage::Codegen {
         return Ok(());
     }
