@@ -15,7 +15,21 @@
 //! 3. 保守的 Coalescing（Briggs/George 基準で Mov 辺のノードを合体、冗長 Mov 除去）
 //! 4. Chaitin-Briggs アルゴリズムでグラフ彩色（レジスタ割り当て）
 //! 5. Pseudo オペランドを Register または Stack(spill) に置換
-//! 6. Fixup パスで無効なオペランド組み合わせを修正 + プロローグ/エピローグ生成
+//! 6. Fixup パスで無効なオペランド組み合わせを修正（Truncate 含む）+ プロローグ/エピローグ生成
+//!
+//! # スタックフレームレイアウト
+//! ```text
+//! push %rbp                    ← RBP 保存
+//! movq %rsp, %rbp
+//! push %rbx                   ← callee-saved (使用時のみ)
+//! push %r12                   ← callee-saved (使用時のみ)
+//! subq $N, %rsp               ← spill + ローカル変数領域
+//! ──────────────────────
+//!  -8(%rbp)  : callee-saved push 領域 (push %rbx 等)
+//!  -(8+callee_bytes)(%rbp) 以降 : spill スロット・ローカル変数
+//! ```
+//! Fixup 時に全ての負オフセット Stack オペランドを callee-saved push 分だけ
+//! 下方にシフトし、push 領域との重複を防ぐ（shift_stack_offsets）。
 
 use std::collections::{HashMap, HashSet};
 
@@ -1174,6 +1188,22 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
         }
 
+        // Truncate: memory,memory → via R10
+        Instruction::Truncate { ref src, ref dst }
+            if is_memory_operand(src) && is_memory_operand(dst) =>
+        {
+            out.push(Instruction::Mov { asm_type: AsmType::Longword, src: src.clone(), dst: Operand::Register(Reg::R10) });
+            out.push(Instruction::Mov { asm_type: AsmType::Longword, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        }
+
+        // Truncate: memory dst → via R10
+        Instruction::Truncate { ref src, ref dst }
+            if is_memory_operand(dst) =>
+        {
+            out.push(Instruction::Truncate { src: src.clone(), dst: Operand::Register(Reg::R10) });
+            out.push(Instruction::Mov { asm_type: AsmType::Longword, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        }
+
         // Lea: memory,memory → via R10
         Instruction::Lea { ref src, ref dst }
             if is_memory_operand(dst) =>
@@ -1255,6 +1285,17 @@ fn insert_prologue_epilogue(
     let aligned_total = (total + 15) & !15;
     let alloc_size = aligned_total - callee_bytes;
 
+    // ── スタックオフセット補正 ──
+    // Spill 変数と強制スタック変数は -8(%rbp), -16(%rbp), ... に割り当てられるが、
+    // callee-saved レジスタの push も同じ領域を使う。
+    // callee_bytes 分だけ下にシフトして衝突を回避する。
+    let shift = -(callee_bytes as i32);
+    let instructions: Vec<Instruction> = if callee_bytes > 0 {
+        instructions.into_iter().map(|instr| shift_stack_offsets(instr, shift)).collect()
+    } else {
+        instructions
+    };
+
     let mut result = Vec::new();
 
     // プロローグ
@@ -1289,6 +1330,100 @@ fn insert_prologue_epilogue(
     }
 
     result
+}
+
+/// Stack(offset) の負オフセットを shift 分だけずらす。
+/// 正オフセット（スタック渡し引数）はそのまま維持する。
+fn shift_stack_op(op: Operand, shift: i32) -> Operand {
+    match op {
+        Operand::Stack(offset) if offset < 0 => Operand::Stack(offset + shift),
+        other => other,
+    }
+}
+
+fn shift_stack_offsets(instr: Instruction, shift: i32) -> Instruction {
+    match instr {
+        Instruction::Mov { asm_type, src, dst } => Instruction::Mov {
+            asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::Unary { asm_type, op, operand } => Instruction::Unary {
+            asm_type, op,
+            operand: shift_stack_op(operand, shift),
+        },
+        Instruction::Cmp { asm_type, src, dst } => Instruction::Cmp {
+            asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::SetCC { condition, operand } => Instruction::SetCC {
+            condition,
+            operand: shift_stack_op(operand, shift),
+        },
+        Instruction::Binary { asm_type, op, src, dst } => Instruction::Binary {
+            asm_type, op,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::Idiv { asm_type, operand } => Instruction::Idiv {
+            asm_type,
+            operand: shift_stack_op(operand, shift),
+        },
+        Instruction::Div { asm_type, operand } => Instruction::Div {
+            asm_type,
+            operand: shift_stack_op(operand, shift),
+        },
+        Instruction::Movsx { src, dst } => Instruction::Movsx {
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::MovsxByte { asm_type, src, dst } => Instruction::MovsxByte {
+            asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::MovZeroExtend { src, dst } => Instruction::MovZeroExtend {
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::MovZeroExtendByte { asm_type, src, dst } => Instruction::MovZeroExtendByte {
+            asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::Truncate { src, dst } => Instruction::Truncate {
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::Push(op) => Instruction::Push(shift_stack_op(op, shift)),
+        Instruction::Pop(op) => Instruction::Pop(shift_stack_op(op, shift)),
+        Instruction::Cvtsi2sd { asm_type, src, dst } => Instruction::Cvtsi2sd {
+            asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::Cvttsd2si { asm_type, src, dst } => Instruction::Cvttsd2si {
+            asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::Lea { src, dst } => Instruction::Lea {
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::JmpIndirect(op, targets) => Instruction::JmpIndirect(shift_stack_op(op, shift), targets),
+        Instruction::CallIndirect(op) => Instruction::CallIndirect(shift_stack_op(op, shift)),
+        instr @ (Instruction::SignExtend(_)
+            | Instruction::Jmp(_)
+            | Instruction::JmpCC(_, _)
+            | Instruction::Label(_)
+            | Instruction::AllocateStack(_)
+            | Instruction::DeallocateStack(_)
+            | Instruction::Call(_)
+            | Instruction::Ret
+            | Instruction::RawBytes(_)) => instr,
+    }
 }
 
 // ────────────────────────────────────────────

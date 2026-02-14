@@ -1,0 +1,10 @@
+constant_return:42
+arithmetic:30
+conditional:77
+loop_sum:55
+nested_loops:101
+function_calls:120
+pointers:90
+strings:44
+structs:46
+mixed_complex:37

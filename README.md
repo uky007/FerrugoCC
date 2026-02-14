@@ -46,6 +46,48 @@ cargo run -- --fobfuscate --obf-pred-freq=3 source.c    # 3回に1回不透明�
 cargo test
 ```
 
+## ベンチマークスイート
+
+難読化の効果を定量評価するためのベンチマークスイート。
+10本のCプログラムをLevel 0（通常）〜Level 4（最大難読化）の5段階でコンパイルし、
+正しい実行結果の検証とバイナリサイズの比較を行う。
+
+```bash
+bash benchmark/generate.sh
+```
+
+50バイナリ（10プログラム × 5レベル）+ 50アセンブリファイルを生成し、
+exit code による正当性検証とサイズ集計を自動実行する。
+
+### ベンチマークプログラム
+
+| # | ファイル | 内容 | 期待exit code |
+|---|---------|------|:---:|
+| 01 | `constant_return.c` | 定数return | 42 |
+| 02 | `arithmetic.c` | 四則演算 + 型変換 | 30 |
+| 03 | `conditional.c` | if/else チェーン | 77 |
+| 04 | `loop_sum.c` | for ループで合計 | 55 |
+| 05 | `nested_loops.c` | 二重ループ（バブルソート風） | 101 |
+| 06 | `function_calls.c` | 複数関数 + 再帰 | 120 |
+| 07 | `pointers.c` | ポインタ演算 + 配列 | 90 |
+| 08 | `strings.c` | 文字列リテラル操作 | 44 |
+| 09 | `structs.c` | 構造体 + ポインタ | 46 |
+| 10 | `mixed_complex.c` | 全機能組合せ | 37 |
+
+### バイナリサイズ（難読化レベル別）
+
+```
+Level 0 (normal):       44,416 bytes  (1.0x)
+Level 1 (light):        46,024 bytes  (1.04x)
+Level 2 (standard):    109,592 bytes  (2.47x)
+Level 3 (full):        109,592 bytes  (2.47x)
+Level 4 (maximum):     205,432 bytes  (4.63x)
+```
+
+出力先: `benchmark/output/level_N/<name>` (バイナリ), `benchmark/output/level_N/<name>.s` (アセンブリ)
+
+デオブフスケーター（D-810, SATURN等）での定量評価に利用する。
+
 ## 実装の進捗
 
 | Chapter | 内容 | 状態 |
@@ -109,6 +151,7 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 - **Fixup パス**: レジスタ割り当て後に生じる無効なオペランド組み合わせを修正
   - `movl Stack, Stack` → scratch レジスタ（R10 or XMM15）経由の2命令に展開
   - `imul` のメモリ dst → R11 経由に展開
+  - `Truncate` のメモリ-メモリ → R10 経由に展開（難読化で spill 増加時に発生）
   - `movslq $imm, reg` → `movq $imm, reg` に変換（即値の符号拡張は不要）
   - 同一レジスタ間の `mov` を除去（noop 最適化）
 - **プロローグ/エピローグ自動生成**: 使用した callee-saved レジスタのみ push/pop する
@@ -119,6 +162,8 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
   push %r12              # callee-saved（使用した場合のみ）
   subq $N, %rsp          # spill スロット確保（16バイトアラインメント調整済み）
   ```
+- **スタックオフセット補正**: callee-saved レジスタの push が `%rbp` 直下のスタック領域を使用するため、
+  spill/ローカル変数のオフセットを callee-saved push 分だけ下方にシフトし、重複を防ぐ
 - **スタックアラインメント**: `callee_saved_count * 8 + alloc_size ≡ 0 (mod 16)` を保証
   ```rust
   let callee_bytes = callee_count * 8;
@@ -763,6 +808,11 @@ ASM レベル（2パス、レジスタ割り当て後に適用）:
 未実装の候補:
 - [ ] **関数のインライン展開/アウトライン化**: 関数境界を攪乱し、元の関数構造の復元を困難にする
 - [ ] **レジスタ割り当ての撹乱**: 不要なレジスタ間 mov や register rotation を挿入し、データフロー解析を妨害する
+
+### ベンチマーク・評価
+
+- [x] **難読化ベンチマークスイート**: 10本のCプログラム × 5難読化レベル = 50バイナリの自動生成・検証スクリプト（`benchmark/generate.sh`）。バイナリサイズの比較とデオブフスケーター評価基盤
+- [ ] **デオブフスケーター定量評価**: D-810, SATURN 等での復元成功率測定
 
 ### コード品質
 
