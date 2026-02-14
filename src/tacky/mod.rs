@@ -6,7 +6,7 @@
 //! C AST → [TackyGen] → TACKY IR → [Optimize or Obfuscate] → TACKY IR → [Codegen] → Asm AST
 //! ```
 //!
-//! - `optimize`: 定数畳み込み・コピー伝播・不要コード除去（デフォルト）
+//! - `optimize`: 代数的簡略化・定数畳み込み・到達不能コード除去・コピー伝播・共通部分式除去・生存解析ベース死コード除去（デフォルト）
 //! - `obfuscate`: 関数インライン展開・定数間接化・算術置換・ジャンクコード・不透明述語・関数アウトライン化・CFF・文字列暗号化 + ASM レベルのスタックフレーム難読化・レジスタシャッフル・命令置換等（`--fobfuscate`）
 
 pub mod tacky_ast;

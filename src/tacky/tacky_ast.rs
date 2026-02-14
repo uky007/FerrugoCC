@@ -115,7 +115,7 @@ pub enum TackyConst {
 }
 
 /// TACKY 単項演算子
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TackyUnaryOp {
     /// `~` — ビット反転
     Complement,
@@ -126,7 +126,7 @@ pub enum TackyUnaryOp {
 }
 
 /// TACKY 二項演算子
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TackyBinaryOp {
     // 整数演算
     Add,
