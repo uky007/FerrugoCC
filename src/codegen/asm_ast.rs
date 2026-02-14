@@ -40,6 +40,8 @@
 //!   新しい AST バリアントは不要（`Mov { Quadword, Register, Register }` で表現）。
 //! - スタックフレーム難読化: 既存の `Mov` + `Stack(offset)` で偽スタック操作を挿入。
 //!   `AllocateStack`/`DeallocateStack` のサイズを拡張し、偽スロットへの read/write を追加。
+//! - 命令置換: 既存の `Binary`/`Unary`/`Mov` を意味的に等価な命令列に置換。
+//!   新しい AST バリアントは不要（既存の命令バリアントの組み合わせで表現）。
 //!
 //! # Chapter 20: レジスタ割り当て
 //! - `Operand::Pseudo(String)`: 割り当て前の疑似レジスタ。コード生成で変数に使用され、

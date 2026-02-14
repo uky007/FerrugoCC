@@ -23,6 +23,7 @@
 //! # ASM レベル難読化（codegen/mod.rs で適用、レジスタ割り当て後）
 //! - **Stack Frame Obfuscation**: 偽のスタックスロットと偽の read/write 操作を挿入し偽ローカル変数を生成
 //! - **Register Shuffle**: dead な `movq` を挿入し偽のレジスタ間依存関係を生成（R10/R11 使用）
+//! - **Instruction Substitution**: 命令を意味的に等価な別の命令列に置換しパターンマッチングを妨害
 //! - **Anti-Disassembly**: 無条件ジャンプ直後に `0xE8`（call opcode）を挿入し命令境界認識を破壊
 //! - **Indirect Calls**: `call func` を `lea func(%rip), %r10; call *%r10` に変換
 

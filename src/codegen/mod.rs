@@ -20,13 +20,14 @@ pub use asm_ast::{AsmProgram, AsmFunction};
 use crate::error::Result;
 use crate::obfuscation::ObfuscationConfig;
 use crate::tacky::tacky_ast::TackyProgram;
-use asm_ast::{AsmType, Instruction, Operand, Reg};
+use asm_ast::{AsmBinaryOp, AsmType, AsmUnaryOp, Instruction, Operand, Reg};
 
 /// TACKY プログラムをアセンブリ AST に変換する（Chapter 20: レジスタ割り当て統合）。
 ///
 /// `obf_config` が Some の場合、regalloc + fixup の後に ASM レベルの難読化パスを適用する:
 /// - スタックフレーム難読化（偽スタックスロット挿入）
 /// - レジスタシャッフル（dead mov 挿入）
+/// - 命令置換（同等命令列への置換）
 /// - 反逆アセンブリ（ゴミバイト挿入）
 /// - 関数呼び出しの間接化
 pub fn generate(program: &TackyProgram, obf_config: Option<&ObfuscationConfig>) -> Result<AsmProgram> {
@@ -59,6 +60,9 @@ pub fn generate(program: &TackyProgram, obf_config: Option<&ObfuscationConfig>) 
         }
         if config.reg_shuffle {
             register_shuffle(&mut functions, config.reg_shuffle_freq);
+        }
+        if config.instr_subst {
+            instruction_substitution(&mut functions, config.instr_subst_freq);
         }
         if config.anti_disassembly {
             insert_anti_disassembly(&mut functions);
@@ -359,6 +363,161 @@ fn register_shuffle(functions: &mut [AsmFunction], freq: usize) {
         }
         func.instructions = new_instrs;
     }
+}
+
+/// 命令置換: 特定の命令パターンを意味的に等価な別の命令列に置換する。
+///
+/// regalloc + fixup 後の命令列に対し、x86-64 命令を意味的に等価だが
+/// パターンの異なる命令列に置換する。デコンパイラ・逆アセンブラの
+/// パターンマッチングを妨害する。
+///
+/// 4種のパターンをローテーション:
+/// - パターン0: Add→Sub 即値スワップ（`addl $42, %eax` → `subl $-42, %eax`）
+/// - パターン1: Sub→Add 即値スワップ（`subl $10, %ecx` → `addl $-10, %ecx`）
+/// - パターン2: Neg 展開（`negl %edx` → `notl %edx; addl $1, %edx`）
+/// - パターン3: Mov 即値分割（`movl $100, %eax` → `movl $142, %eax; subl $42, %eax`）
+fn instruction_substitution(functions: &mut [AsmFunction], freq: usize) {
+    let freq = if freq == 0 { 4 } else { freq };
+    for func in functions {
+        let mut new_instrs = Vec::new();
+        let mut counter: usize = 0;
+        let mut pattern_idx: usize = 0;
+        let orig = &func.instructions;
+        for (i, instr) in orig.iter().enumerate() {
+            counter += 1;
+            if counter < freq {
+                new_instrs.push(instr.clone());
+                continue;
+            }
+            // 安全な置換位置か判定
+            let next = orig.get(i + 1);
+            if !is_safe_subst_point(instr, next) {
+                new_instrs.push(instr.clone());
+                continue;
+            }
+            let pat = pattern_idx % 4;
+            let substituted = match (pat, instr) {
+                // パターン0: Add Imm → Sub -Imm
+                (0, Instruction::Binary { asm_type, op: AsmBinaryOp::Add, src: Operand::Imm(n), dst })
+                    if *asm_type != AsmType::Double =>
+                {
+                    let neg_n = -(*n);
+                    if neg_n >= i32::MIN as i64 && neg_n <= i32::MAX as i64 {
+                        new_instrs.push(Instruction::Binary {
+                            asm_type: *asm_type,
+                            op: AsmBinaryOp::Sub,
+                            src: Operand::Imm(neg_n),
+                            dst: dst.clone(),
+                        });
+                        true
+                    } else {
+                        false
+                    }
+                }
+                // パターン1: Sub Imm → Add -Imm
+                (1, Instruction::Binary { asm_type, op: AsmBinaryOp::Sub, src: Operand::Imm(n), dst })
+                    if *asm_type != AsmType::Double =>
+                {
+                    let neg_n = -(*n);
+                    if neg_n >= i32::MIN as i64 && neg_n <= i32::MAX as i64 {
+                        new_instrs.push(Instruction::Binary {
+                            asm_type: *asm_type,
+                            op: AsmBinaryOp::Add,
+                            src: Operand::Imm(neg_n),
+                            dst: dst.clone(),
+                        });
+                        true
+                    } else {
+                        false
+                    }
+                }
+                // パターン2: Neg → Not + Add 1
+                (2, Instruction::Unary { asm_type, op: AsmUnaryOp::Neg, operand })
+                    if *asm_type != AsmType::Double =>
+                {
+                    new_instrs.push(Instruction::Unary {
+                        asm_type: *asm_type,
+                        op: AsmUnaryOp::Not,
+                        operand: operand.clone(),
+                    });
+                    new_instrs.push(Instruction::Binary {
+                        asm_type: *asm_type,
+                        op: AsmBinaryOp::Add,
+                        src: Operand::Imm(1),
+                        dst: operand.clone(),
+                    });
+                    true
+                }
+                // パターン3: Mov Imm → Mov (N+K) + Sub K
+                (3, Instruction::Mov { asm_type, src: Operand::Imm(n), dst })
+                    if *asm_type != AsmType::Double && *n != 0 =>
+                {
+                    let k = ((pattern_idx * 7 + 3) % 127 + 1) as i64;
+                    let n_plus_k = *n + k;
+                    if n_plus_k >= i32::MIN as i64 && n_plus_k <= i32::MAX as i64 {
+                        new_instrs.push(Instruction::Mov {
+                            asm_type: *asm_type,
+                            src: Operand::Imm(n_plus_k),
+                            dst: dst.clone(),
+                        });
+                        new_instrs.push(Instruction::Binary {
+                            asm_type: *asm_type,
+                            op: AsmBinaryOp::Sub,
+                            src: Operand::Imm(k),
+                            dst: dst.clone(),
+                        });
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            if substituted {
+                counter = 0;
+                pattern_idx += 1;
+            } else {
+                new_instrs.push(instr.clone());
+            }
+        }
+        func.instructions = new_instrs;
+    }
+}
+
+/// 命令置換の安全な位置か判定する。
+///
+/// 以下をすべて満たす場合に true:
+/// 1. 現在の命令が Cmp/SetCC でない（フラグ操作命令は置換しない）
+/// 2. プロローグ/エピローグ命令でない（Push/Pop/AllocateStack/DeallocateStack/Ret）
+/// 3. 次の命令が Label でない
+/// 4. 次の命令が JmpCC/SetCC でない（フラグ読み取り保護）
+fn is_safe_subst_point(current: &Instruction, next: Option<&Instruction>) -> bool {
+    // 条件1: Cmp/SetCC はスキップ
+    if matches!(current, Instruction::Cmp { .. } | Instruction::SetCC { .. }) {
+        return false;
+    }
+    // 条件2: プロローグ/エピローグ命令はスキップ
+    if matches!(
+        current,
+        Instruction::Push(_)
+            | Instruction::Pop(_)
+            | Instruction::AllocateStack(_)
+            | Instruction::DeallocateStack(_)
+            | Instruction::Ret
+    ) {
+        return false;
+    }
+    if let Some(next_instr) = next {
+        // 条件3: 次が Label なら置換しない
+        if matches!(next_instr, Instruction::Label(_)) {
+            return false;
+        }
+        // 条件4: 次の命令が JmpCC/SetCC ならフラグを読むため置換しない
+        if matches!(next_instr, Instruction::JmpCC(..) | Instruction::SetCC { .. }) {
+            return false;
+        }
+    }
+    true
 }
 
 /// 安全な挿入位置か判定する。

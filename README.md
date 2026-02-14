@@ -35,6 +35,7 @@ cargo run -- --fobfuscate --obf-no-indirect-calls source.c    # 間接呼び出�
 cargo run -- --fobfuscate --obf-no-arith-subst source.c      # 算術置換を無効化
 cargo run -- --fobfuscate --obf-no-reg-shuffle source.c      # レジスタシャッフルを無効化
 cargo run -- --fobfuscate --obf-no-stack-frame source.c     # スタックフレーム難読化を無効化
+cargo run -- --fobfuscate --obf-no-instr-subst source.c    # 命令置換を無効化
 
 # 頻度パラメータの調整
 cargo run -- --fobfuscate --obf-junk-freq=2 source.c   # 2命令ごとにジャンク挿入
@@ -43,6 +44,7 @@ cargo run -- --fobfuscate --obf-arith-freq=2 source.c   # 2回に1回算術置�
 cargo run -- --fobfuscate --obf-reg-shuffle-freq=3 source.c  # 3命令ごとにレジスタシャッフル挿入
 cargo run -- --fobfuscate --obf-stack-padding=8 source.c    # 偽スタックスロット数を8に
 cargo run -- --fobfuscate --obf-stack-fake-freq=4 source.c  # 4命令ごとに偽スタック操作を挿入
+cargo run -- --fobfuscate --obf-instr-subst-freq=2 source.c # 2命令ごとに命令置換を試行
 ```
 
 アセンブリから実行ファイルへの変換には、システムに `gcc` が必要。
@@ -88,7 +90,7 @@ Level 0 (normal):       44,416 bytes  (1.0x)
 Level 1 (light):        46,024 bytes  (1.04x)
 Level 2 (standard):    111,088 bytes  (2.50x)
 Level 3 (full):        128,944 bytes  (2.90x)
-Level 4 (maximum):     313,488 bytes  (7.06x)
+Level 4 (maximum):     313,480 bytes  (7.06x)
 ```
 
 出力先: `benchmark/output/level_N/<name>` (バイナリ), `benchmark/output/level_N/<name>.s` (アセンブリ)
@@ -185,19 +187,19 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 
 書籍全20章の完了後、追加機能としてコード難読化パスを実装した。
 `--fobfuscate` フラグで最適化の代わりに難読化パスを適用する。
-TACKY IR レベルの6パスと ASM レベルの4パスの計10パスで構成される。
+TACKY IR レベルの6パスと ASM レベルの5パスの計11パスで構成される。
 
 `--obf-level=N` で難読化の強度を段階的に制御できる:
 
-| Level | 有効パス | ジャンク頻度 | 述語頻度 | 算術置換頻度 | シャッフル頻度 | 偽スロット数 | 偽操作頻度 | 用途 |
-|-------|---------|------------|---------|------------|-------------|------------|-----------|------|
-| 1 | 定数間接化, ジャンク, 述語 | 8命令ごと | 10回に1回 | なし | なし | なし | なし | 軽量：基本的な難読化 |
-| 2 | Level 1 + CFF, 算術置換 | 4命令ごと | 5回に1回 | 5回に1回 | なし | なし | なし | 標準：制御フロー平坦化+算術置換追加 |
-| 3 | Level 2 + 文字列暗号化, Anti-Disasm, 間接呼出, レジスタシャッフル, スタックフレーム難読化 | 4命令ごと | 5回に1回 | 3回に1回 | 5命令ごと | 4 | 8命令ごと | 全パス有効（デフォルト） |
-| 4 | 全パス | 2命令ごと | 2回に1回 | 2回に1回 | 3命令ごと | 8 | 4命令ごと | 最大：高頻度で全パス適用 |
+| Level | 有効パス | ジャンク頻度 | 述語頻度 | 算術置換頻度 | シャッフル頻度 | 偽スロット数 | 偽操作頻度 | 命令置換頻度 | 用途 |
+|-------|---------|------------|---------|------------|-------------|------------|-----------|------------|------|
+| 1 | 定数間接化, ジャンク, 述語 | 8命令ごと | 10回に1回 | なし | なし | なし | なし | なし | 軽量：基本的な難読化 |
+| 2 | Level 1 + CFF, 算術置換 | 4命令ごと | 5回に1回 | 5回に1回 | なし | なし | なし | なし | 標準：制御フロー平坦化+算術置換追加 |
+| 3 | Level 2 + 文字列暗号化, Anti-Disasm, 間接呼出, レジスタシャッフル, スタックフレーム難読化, 命令置換 | 4命令ごと | 5回に1回 | 3回に1回 | 5命令ごと | 4 | 8命令ごと | 4命令ごと | 全パス有効（デフォルト） |
+| 4 | 全パス | 2命令ごと | 2回に1回 | 2回に1回 | 3命令ごと | 8 | 4命令ごと | 2命令ごと | 最大：高頻度で全パス適用 |
 
-各パスは `--obf-no-cff`, `--obf-no-strings`, `--obf-no-arith-subst`, `--obf-no-reg-shuffle`, `--obf-no-stack-frame` 等で個別に無効化でき、
-`--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N`, `--obf-reg-shuffle-freq=N`, `--obf-stack-padding=N`, `--obf-stack-fake-freq=N` で頻度を直接指定することも可能。
+各パスは `--obf-no-cff`, `--obf-no-strings`, `--obf-no-arith-subst`, `--obf-no-reg-shuffle`, `--obf-no-stack-frame`, `--obf-no-instr-subst` 等で個別に無効化でき、
+`--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N`, `--obf-reg-shuffle-freq=N`, `--obf-stack-padding=N`, `--obf-stack-fake-freq=N`, `--obf-instr-subst-freq=N` で頻度を直接指定することも可能。
 
 #### TACKY IR レベル（6パス）
 
@@ -251,7 +253,7 @@ TACKY IR レベルの6パスと ASM レベルの4パスの計10パスで構成�
   main() の先頭にアンロール復号コード（Load → Subtract(key) → Store）を挿入
   - Pass 6 は Pass 1〜5 の後に適用する。復号コードが CFF 等で破壊されるのを防ぐため
 
-#### ASM レベル（4パス、レジスタ割り当て+fixup 後に適用）
+#### ASM レベル（5パス、レジスタ割り当て+fixup 後に適用）
 
 - **Pass 7 — 反逆アセンブリ（Anti-Disassembly）**: 無条件ジャンプ（`Jmp`, `JmpIndirect`）の直後に
   `0xE8`（x86 の `call rel32` オペコード）を `.byte` として挿入。リニアスイープ型逆アセンブラが
@@ -282,6 +284,17 @@ TACKY IR レベルの6パスと ASM レベルの4パスの計10パスで構成�
   movq %rax, -56(%rbp)    # 偽の quad store → long/pointer 型の偽変数を生成
   movl -48(%rbp), %r10d   # 偽の load → 偽変数の「使用」を生成
   ```
+- **Pass 11 — 命令置換（Instruction Substitution）**: x86-64 命令を意味的に等価だがパターンの異なる命令列に置換し、
+  デコンパイラ・逆アセンブラのパターンマッチングを妨害する。4パターンをローテーション:
+  Add→Sub 即値スワップ、Sub→Add 即値スワップ、Neg 展開（`not+add $1`）、Mov 即値分割（`mov (N+K); sub K`）
+  ```asm
+  # Add → Sub 即値スワップ
+  addl $42, %eax    →    subl $-42, %eax
+  # Neg 展開（二の補数: -x = ~x + 1）
+  negl %edx         →    notl %edx; addl $1, %edx
+  # Mov 即値分割
+  movl $100, %eax   →    movl $142, %eax; subl $42, %eax
+  ```
 
 #### パス適用順序の設計
 
@@ -293,9 +306,10 @@ TACKY IR パスの適用順序は意図的に設計されている:
 5. **CFF** → 全体の制御構造を破壊。他のパスの後でないと構造が残らない
 6. **文字列暗号化** → 復号コードが他のパスで壊されないよう最後に適用
 
-ASM レベルパスはレジスタ割り当て後に適用する（適用順: スタックフレーム難読化 → レジスタシャッフル → 反逆アセンブリ → 間接コール）:
+ASM レベルパスはレジスタ割り当て後に適用する（適用順: スタックフレーム難読化 → レジスタシャッフル → 命令置換 → 反逆アセンブリ → 間接コール）:
 - スタックフレーム難読化はフレーム構造を変更するため最初に適用。後続のレジスタシャッフルが挿入する dead mov が偽スタック操作の近傍に散在することで解析をさらに困難にする
 - レジスタシャッフルは dead mov を挿入し R10/R11 scratch を使用。fixup シーケンスの中間を避けるため安全
+- 命令置換はシャッフル後に適用。シャッフルで挿入された dead mov の近傍で命令置換が行われることでデータフロー解析をさらに困難にする
 - 反逆アセンブリはジャンプ命令の位置を変えないため安全
 - 間接コール変換は R10（caller-saved scratch）を使用し、Call の直前に挿入するため安全
 
@@ -788,7 +802,7 @@ Chapter 7 では以下の機能を追加した:
      ▼
 ┌──────────┐
 │ ASM Obf   │  src/codegen/       ASM レベル難読化（--fobfuscate 指定時）
-│          │  mod.rs              スタックフレーム難読化・レジスタシャッフル・反逆アセンブリ・間接コール変換
+│          │  mod.rs              スタックフレーム難読化・レジスタシャッフル・命令置換・反逆アセンブリ・間接コール変換
 └────┬─────┘
      ▼
 ┌──────────┐
@@ -824,7 +838,7 @@ Chapter 7 では以下の機能を追加した:
 ### コード難読化（Anti-Reverse Engineering）
 
 コンパイラレベルでの難読化変換。元のソースコードと等価だが、逆コンパイル・逆アセンブル時に解析を困難にする。
-`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計10パスを適用する。
+`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計11パスを適用する。
 
 TACKY IR レベル（6パス）:
 - [x] **定数の間接化（Constant Encoding）**: 即値をランタイム計算に置換（`42` → `6 * 7`, `0` → `a - a` 等）。Double は精度問題のためスキップ
@@ -834,16 +848,17 @@ TACKY IR レベル（6パス）:
 - [x] **制御フロー平坦化（CFF）+ ジャンプテーブル + 状態エンコード**: 基本ブロックをジャンプテーブル（`jmp *%rax`）+ アフィン変換で符号化した状態変数の dispatch ループに変換。IDA Pro の CFG 復元を破壊する
 - [x] **文字列暗号化**: 文字列リテラルを加算暗号化して `.data` に配置し、main() の先頭でアンロール復号コードを挿入
 
-ASM レベル（4パス、レジスタ割り当て後に適用）:
+ASM レベル（5パス、レジスタ割り当て後に適用）:
 - [x] **反逆アセンブリ（Anti-Disassembly）**: 無条件ジャンプ直後に `0xE8`（call opcode）を挿入し、リニアスイープ型逆アセンブラの命令境界認識を破壊する
 - [x] **関数呼び出しの間接化（Indirect Calls）**: `call func` → `lea func(%rip), %r10; call *%r10` に変換し、静的解析でのコールグラフ復元を妨害する
 - [x] **レジスタシャッフル（Register Shuffle）**: dead な `movq` をN命令ごとに挿入し、R10/R11 への偽コピーでデータフロー解析を妨害する
 - [x] **スタックフレーム難読化（Stack Frame Obfuscation）**: スタックフレームを拡張して偽スタックスロットを追加し、偽の store/load 操作を挿入してデコンパイラに偽のローカル変数を生成させる
+- [x] **命令置換（Instruction Substitution）**: x86-64 命令を意味的に等価な別の命令列に置換（Add⇄Sub即値スワップ、Neg展開、Mov即値分割）し、デコンパイラのパターンマッチングを妨害する
 
 パラメータ化:
 - [x] **難易度レベル制御（`--obf-level=1..4`）**: 段階的に難読化強度を上げたバイナリを生成可能。ベンチマークやデオブフスケーター評価に活用
-- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-anti-disasm`, `--obf-no-indirect-calls`, `--obf-no-arith-subst`, `--obf-no-reg-shuffle`, `--obf-no-stack-frame` で各パスを個別に無効化
-- [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N`, `--obf-reg-shuffle-freq=N`, `--obf-stack-padding=N`, `--obf-stack-fake-freq=N` でジャンクコード・不透明述語・算術置換・レジスタシャッフル・スタックフレーム難読化の挿入頻度を調整
+- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-anti-disasm`, `--obf-no-indirect-calls`, `--obf-no-arith-subst`, `--obf-no-reg-shuffle`, `--obf-no-stack-frame`, `--obf-no-instr-subst` で各パスを個別に無効化
+- [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N`, `--obf-arith-freq=N`, `--obf-reg-shuffle-freq=N`, `--obf-stack-padding=N`, `--obf-stack-fake-freq=N`, `--obf-instr-subst-freq=N` でジャンクコード・不透明述語・算術置換・レジスタシャッフル・スタックフレーム難読化・命令置換の挿入頻度を調整
 
 未実装の候補:
 - [ ] **関数のインライン展開/アウトライン化**: 関数境界を攪乱し、元の関数構造の復元を困難にする
