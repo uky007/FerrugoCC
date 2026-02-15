@@ -2,7 +2,7 @@
 //!
 //! 各難読化パスの有効/無効およびパラメータを管理する。
 //! `--fobfuscate` と `--obf-level=N` で制御する。
-//! 全14パス（TACKY IR 9パス + ASM 5パス）。
+//! 全15パス（TACKY IR 10パス + ASM 5パス）。
 
 /// 難読化パスの設定。パイプライン全体で共有される。
 #[derive(Debug, Clone)]
@@ -37,6 +37,8 @@ pub struct ObfuscationConfig {
     pub func_outline: bool,
     /// Pass 14 (TACKY): VM仮想化（コード仮想化）
     pub vm_virtualize: bool,
+    /// Pass 15 (TACKY): ライブラリ関数難読化
+    pub lib_obfuscate: bool,
 
     // ── 頻度パラメータ ──
 
@@ -99,6 +101,7 @@ impl ObfuscationConfig {
                 func_inline: false,
                 func_outline: false,
                 vm_virtualize: false,
+                lib_obfuscate: true,
                 junk_freq: 8,
                 pred_freq: 10,
                 arith_freq: 3,
@@ -127,6 +130,7 @@ impl ObfuscationConfig {
                 func_inline: false,
                 func_outline: false,
                 vm_virtualize: false,
+                lib_obfuscate: true,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 5,
@@ -155,6 +159,7 @@ impl ObfuscationConfig {
                 func_inline: true,
                 func_outline: true,
                 vm_virtualize: false,
+                lib_obfuscate: true,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 3,
@@ -184,6 +189,7 @@ impl ObfuscationConfig {
                 func_inline: true,
                 func_outline: true,
                 vm_virtualize: true,
+                lib_obfuscate: true,
                 junk_freq: 2,
                 pred_freq: 2,
                 arith_freq: 2,

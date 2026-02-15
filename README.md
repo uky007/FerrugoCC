@@ -192,6 +192,10 @@ Consists of 9 TACKY IR-level passes and 5 ASM-level passes (14 total).
   //   handler_1: Binary(Add, dst, b, result); jmp dispatch
   //   handler_2: Return(result)  // direct return
   ```
+- **Pass 15 -- Library Function Obfuscation**: Replaces calls to known library functions (`strlen`, etc.) with
+  equivalent custom TACKY IR implementations (`_obf_strlen`). Applied before all other passes so the custom
+  implementations get fully obfuscated by the entire pipeline, defeating IDA Pro's FLIRT signature matching.
+  `--obf-no-lib-obfuscate` to disable (enabled at all levels)
 - **Pass 5 -- Control Flow Flattening (CFF)**: Transforms basic blocks into a jump-table + state-encoded
   dispatch loop, destroying CFG recovery in IDA Pro etc.
   - **Jump table**: Places block label array (`PointerArrayInit`) in `.data`, dispatches via `JumpIndirect` (`jmp *%rax`)
@@ -232,15 +236,16 @@ Consists of 9 TACKY IR-level passes and 5 ASM-level passes (14 total).
 ### Pass Ordering
 
 TACKY IR pass ordering is intentionally designed:
-1. **Function Inlining** first -- inlined code gets all subsequent passes applied
-2. **Constant Encoding** -- constants added by later passes need not be encoded
-3. **Arithmetic Substitution** -- further complicates expressions from constant encoding
-4. **Junk Code** -- doesn't alter control flow, safe before CFF
-5. **Opaque Predicates** -- adds branches that CFF will flatten
-6. **Function Outlining** -- extracts already-obfuscated code into decoy functions
-7. **VM Virtualization** -- converts functions to bytecode+VM interpreter; before CFF for double indirection
-8. **CFF** -- flattens all functions including VM dispatch loops
-9. **String Encryption** -- applied last so decryption code isn't destroyed by other passes
+1. **Library Function Obfuscation** first -- custom implementations get all subsequent passes applied
+2. **Function Inlining** -- inlined code gets all subsequent passes applied
+3. **Constant Encoding** -- constants added by later passes need not be encoded
+4. **Arithmetic Substitution** -- further complicates expressions from constant encoding
+5. **Junk Code** -- doesn't alter control flow, safe before CFF
+6. **Opaque Predicates** -- adds branches that CFF will flatten
+7. **Function Outlining** -- extracts already-obfuscated code into decoy functions
+8. **VM Virtualization** -- converts functions to bytecode+VM interpreter; before CFF for double indirection
+9. **CFF** -- flattens all functions including VM dispatch loops
+10. **String Encryption** -- applied last so decryption code isn't destroyed by other passes
 
 ASM-level passes are applied after register allocation (order: Stack Frame Obf -> Register Shuffle -> Instruction Substitution -> Anti-Disassembly -> Indirect Calls).
 
@@ -433,6 +438,10 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
   //   handler_1: Binary(Add, dst, b, result); jmp dispatch
   //   handler_2: Return(result)  // 直接リターン
   ```
+- **Pass 15 — ライブラリ関数難読化（Library Function Obfuscation）**: `strlen` 等の既知ライブラリ関数の呼び出しを
+  等価な自前実装（`_obf_strlen` 等）に差し替える。全パスの最初に適用することで、自前実装が後続の全パイプラインで
+  難読化され、IDA Pro の FLIRT シグネチャマッチングを無効化する。
+  `--obf-no-lib-obfuscate` で無効化可能（全レベルでデフォルト有効）
 - **Pass 5 — 制御フロー平坦化（CFF）**: 関数内の基本ブロックをジャンプテーブル + 状態エンコードの
   dispatch ループに変換し、IDA Pro 等の CFG 復元を破壊する
   - **ジャンプテーブル**: `.data` セクションにブロックラベルの配列（`PointerArrayInit`）を配置し、
@@ -506,15 +515,16 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 #### パス適用順序の設計
 
 TACKY IR パスの適用順序は意図的に設計されている:
-1. **関数インライン展開**が最初 → インラインされたコードに後続の全パスが適用される
-2. **定数の間接化** → 後続パスが追加する定数はエンコード不要
-3. **算術置換** → 定数間接化で展開された式をさらに複雑にしつつ、後続パスでさらにノイズを加える
-4. **ジャンクコード** → 制御フローを変えないので CFF の解析に影響しない
-5. **不透明述語** → 分岐を追加。CFF がこれも含めて平坦化する
-6. **関数アウトライン化** → Pass 1-4 で難読化済みのコードが切り出され、解析者が見る関数は意味不明な断片
-7. **VM仮想化** → 適格な関数をバイトコード＋VMインタプリタに変換。CFF の前に適用することで二重間接化
-8. **CFF** → VMディスパッチループを含む全関数に適用。コード＋データの相関解析が必要な二重の間接化
-9. **文字列暗号化** → 復号コードが他のパスで壊されないよう最後に適用
+1. **ライブラリ関数難読化**が最初 → 自前実装が後続の全パスで難読化される（FLIRT 対策）
+2. **関数インライン展開** → インラインされたコードに後続の全パスが適用される
+3. **定数の間接化** → 後続パスが追加する定数はエンコード不要
+4. **算術置換** → 定数間接化で展開された式をさらに複雑にしつつ、後続パスでさらにノイズを加える
+5. **ジャンクコード** → 制御フローを変えないので CFF の解析に影響しない
+6. **不透明述語** → 分岐を追加。CFF がこれも含めて平坦化する
+7. **関数アウトライン化** → Pass 1-4 で難読化済みのコードが切り出され、解析者が見る関数は意味不明な断片
+8. **VM仮想化** → 適格な関数をバイトコード＋VMインタプリタに変換。CFF の前に適用することで二重間接化
+9. **CFF** → VMディスパッチループを含む全関数に適用。コード＋データの相関解析が必要な二重の間接化
+10. **文字列暗号化** → 復号コードが他のパスで壊されないよう最後に適用
 
 ASM レベルパスはレジスタ割り当て後に適用する（適用順: スタックフレーム難読化 → レジスタシャッフル → 命令置換 → 反逆アセンブリ → 間接コール）:
 - スタックフレーム難読化はフレーム構造を変更するため最初に適用。後続のレジスタシャッフルが挿入する dead mov が偽スタック操作の近傍に散在することで解析をさらに困難にする
@@ -693,9 +703,9 @@ Chapter 12 では以下の機能を追加した:
 
 ### コード難読化（Anti-Reverse Engineering）
 
-コンパイラレベルでの難読化変換。`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計14パスを適用する。
+コンパイラレベルでの難読化変換。`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計15パスを適用する。
 
-TACKY IR レベル（9パス）:
+TACKY IR レベル（10パス）:
 - [x] **定数の間接化（Constant Encoding）**
 - [x] **算術置換（Arithmetic Substitution）**
 - [x] **ジャンクコード挿入**
@@ -703,6 +713,7 @@ TACKY IR レベル（9パス）:
 - [x] **制御フロー平坦化（CFF）+ ジャンプテーブル + 状態エンコード**
 - [x] **文字列暗号化**
 - [x] **VM仮想化（VM-Based Code Virtualization）**
+- [x] **ライブラリ関数難読化（Library Function Obfuscation）**
 
 ASM レベル（5パス）:
 - [x] **反逆アセンブリ（Anti-Disassembly）**

@@ -451,3 +451,149 @@ fn test_vm_type_conversion() {
     let vm = compile_and_run_with_level(source, 4);
     assert_eq!(vm, 42, "vm level 4: expected 42, got {vm}");
 }
+
+// ─────────────────────────────────────────────────────────────
+// Pass 15: ライブラリ関数難読化テスト
+// ─────────────────────────────────────────────────────────────
+
+/// テストヘルパー: カスタムフラグで難読化コンパイルして実行し、終了コードを返す。
+fn compile_and_run_with_flags(source: &str, extra_flags: &[&str]) -> i32 {
+    let dir = TempDir::new().unwrap();
+    let src_path = dir.path().join("test.c");
+    let asm_path = dir.path().join("test.s");
+    let bin_path = dir.path().join("test");
+
+    std::fs::write(&src_path, source).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrugocc"));
+    cmd.arg("--fobfuscate");
+    for flag in extra_flags {
+        cmd.arg(flag);
+    }
+    cmd.arg("-S").arg(&src_path);
+
+    let output = cmd.output().expect("failed to run compiler");
+    assert!(
+        output.status.success(),
+        "compilation failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(asm_path.exists(), "assembly file not generated");
+
+    if cfg!(target_os = "macos") {
+        let asm = std::fs::read_to_string(&asm_path).unwrap();
+        let asm = fixup_asm_for_macos(&asm);
+        std::fs::write(&asm_path, asm).unwrap();
+    }
+
+    let gcc_output = if cfg!(target_arch = "x86_64") {
+        Command::new("gcc")
+            .arg(&asm_path).arg("-o").arg(&bin_path)
+            .output().expect("failed to run gcc")
+    } else {
+        Command::new("arch")
+            .args(["-x86_64", "gcc"])
+            .arg(&asm_path).arg("-o").arg(&bin_path)
+            .output().expect("failed to run arch -x86_64 gcc")
+    };
+    assert!(
+        gcc_output.status.success(),
+        "gcc failed:\nstderr: {}",
+        String::from_utf8_lossy(&gcc_output.stderr),
+    );
+
+    let run_output = if cfg!(target_arch = "x86_64") {
+        Command::new(&bin_path).output().expect("failed to run binary")
+    } else {
+        Command::new("arch").arg("-x86_64").arg(&bin_path)
+            .output().expect("failed to run binary via arch -x86_64")
+    };
+
+    run_output.status.code().unwrap_or(-1)
+}
+
+/// テストヘルパー: 難読化コンパイルしてアセンブリ文字列を返す。
+fn compile_to_asm(source: &str, extra_flags: &[&str]) -> String {
+    let dir = TempDir::new().unwrap();
+    let src_path = dir.path().join("test.c");
+    let asm_path = dir.path().join("test.s");
+
+    std::fs::write(&src_path, source).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrugocc"));
+    cmd.arg("--fobfuscate");
+    for flag in extra_flags {
+        cmd.arg(flag);
+    }
+    cmd.arg("-S").arg(&src_path);
+
+    let output = cmd.output().expect("failed to run compiler");
+    assert!(
+        output.status.success(),
+        "compilation failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    std::fs::read_to_string(&asm_path).unwrap()
+}
+
+#[test]
+fn test_lib_obfuscate_strlen() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strlen("hello") == 5 → exit code 5
+    let source = r#"
+        long strlen(char *s);
+        int main(void) {
+            long n = strlen("hello");
+            return (int)n;
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 5, "strlen(\"hello\") should be 5, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strlen_empty() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strlen("") == 0 → exit code 0
+    let source = r#"
+        long strlen(char *s);
+        int main(void) {
+            long n = strlen("");
+            return (int)n;
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 0, "strlen(\"\") should be 0, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strlen_no_libc_call() {
+    // アセンブリに `call strlen` が存在しないことを確認
+    let source = r#"
+        long strlen(char *s);
+        int main(void) {
+            long n = strlen("hello");
+            return (int)n;
+        }
+    "#;
+    let asm = compile_to_asm(source, &["--obf-level=1"]);
+    // `call strlen` or `call _strlen` should NOT appear
+    assert!(
+        !asm.contains("call strlen") && !asm.contains("call _strlen"),
+        "assembly should not contain 'call strlen': found libc call in output"
+    );
+    // `_obf_strlen` SHOULD appear
+    assert!(
+        asm.contains("_obf_strlen"),
+        "assembly should contain '_obf_strlen': obfuscated implementation missing"
+    );
+}

@@ -8,7 +8,7 @@
 //!          → [Codegen] → [RegAlloc+Coalescing] → [Fixup] → [Emit] → source.s → [gcc] → binary
 //! ```
 //!
-//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（14パス）を適用する。
+//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（15パス）を適用する。
 //! `--obf-level=N` で難読化強度を段階的に制御可能（1=軽量〜4=最大）。
 //!
 //! # 使い方
@@ -29,6 +29,7 @@
 //! ferrugocc --fobfuscate --obf-no-instr-subst <source.c> # 命令置換無効化
 //! ferrugocc --fobfuscate --obf-no-func-inline <source.c> # 関数インライン展開無効化
 //! ferrugocc --fobfuscate --obf-no-func-outline <source.c> # 関数アウトライン化無効化
+//! ferrugocc --fobfuscate --obf-no-lib-obfuscate <source.c> # ライブラリ関数難読化無効化
 //! ferrugocc --fobfuscate --obf-junk-freq=2 <source.c>   # ジャンク頻度変更
 //! ferrugocc --fobfuscate --obf-reg-shuffle-freq=3 <source.c> # シャッフル頻度変更
 //! ferrugocc --fobfuscate --obf-inline-freq=2 <source.c>  # インライン頻度変更
@@ -144,6 +145,10 @@ struct Cli {
     #[arg(long = "obf-no-vm-virtualize")]
     obf_no_vm_virtualize: bool,
 
+    /// ライブラリ関数難読化を無効化
+    #[arg(long = "obf-no-lib-obfuscate")]
+    obf_no_lib_obfuscate: bool,
+
     /// 算術置換頻度（N回に1回適用）
     #[arg(long = "obf-arith-freq")]
     obf_arith_freq: Option<usize>,
@@ -212,6 +217,7 @@ fn main() {
         if cli.obf_no_func_inline { config.func_inline = false; }
         if cli.obf_no_func_outline { config.func_outline = false; }
         if cli.obf_no_vm_virtualize { config.vm_virtualize = false; }
+        if cli.obf_no_lib_obfuscate { config.lib_obfuscate = false; }
 
         // 頻度オーバーライド
         if let Some(freq) = cli.obf_junk_freq { config.junk_freq = freq; }

@@ -4,25 +4,27 @@
 //! `--fobfuscate` フラグで有効化される。
 //!
 //! # パス適用順序（TACKY IR レベル）
-//! 1. **Function Inlining**（関数インライン展開）— 呼び出し先の本体を呼び出し元に埋め込む
-//! 2. **Constant Encoding**（定数の間接化）— 即値を `a * b + c` の実行時計算に置換
-//! 3. **Arithmetic Substitution**（算術置換）— Add/Subtract を多段計算に展開
-//! 4. **Junk Code Insertion**（ジャンクコード挿入）— 4命令ごとに dead computation を挿入
-//! 5. **Opaque Predicates**（不透明述語）— 4パターンの常真条件分岐で値生成命令を囲む
+//! 1. **Library Function Obfuscation**（ライブラリ関数難読化）— `strlen` 等の既知ライブラリ関数を
+//!    等価な自前実装に差し替え、FLIRT シグネチャマッチングを無効化する
+//! 2. **Function Inlining**（関数インライン展開）— 呼び出し先の本体を呼び出し元に埋め込む
+//! 3. **Constant Encoding**（定数の間接化）— 即値を `a * b + c` の実行時計算に置換
+//! 4. **Arithmetic Substitution**（算術置換）— Add/Subtract を多段計算に展開
+//! 5. **Junk Code Insertion**（ジャンクコード挿入）— 4命令ごとに dead computation を挿入
+//! 6. **Opaque Predicates**（不透明述語）— 4パターンの常真条件分岐で値生成命令を囲む
 //!    - パターン 0: `x*(x+1) % 2 == 0`（連続整数の積は偶数）
 //!    - パターン 1: `!(x² + 1 > 0)`（x²+1 は常に正）
 //!    - パターン 2: `(x+1)² - x² - 1 - 2x == 0`（代数恒等式）
 //!    - パターン 3: `(x³ - x) % 3 == 0`（連続3整数の積は3の倍数）
-//! 6. **Function Outlining**（関数アウトライン化）— コード断片を新しい関数に切り出す
-//! 7. **VM Virtualization**（VM仮想化）— 適格な関数をバイトコード＋VMインタプリタに変換。
+//! 7. **Function Outlining**（関数アウトライン化）— コード断片を新しい関数に切り出す
+//! 8. **VM Virtualization**（VM仮想化）— 適格な関数をバイトコード＋VMインタプリタに変換。
 //!    `.data` にバイトコード配列とハンドラテーブルを配置し、ディスパッチループで間接実行
-//! 8. **Control Flow Flattening**（制御フロー平坦化）— 基本ブロックをジャンプテーブル
+//! 9. **Control Flow Flattening**（制御フロー平坦化）— 基本ブロックをジャンプテーブル
 //!    + 状態エンコードの dispatch ループに変換。IDA 等の CFG 復元を破壊する。
 //!    - ジャンプテーブル: `.data` セクションにブロックラベルの配列を配置し `jmp *%rax` で分岐
 //!    - 状態エンコード: `encoded = index * 37 + 0xCAFE` のアフィン変換で状態変数を符号化
-//! 9. **String Encryption**（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
+//! 10. **String Encryption**（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
 //!
-//! Pass 9 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
+//! Pass 10 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
 //!
 //! # ASM レベル難読化（codegen/mod.rs で適用、レジスタ割り当て後）
 //! - **Stack Frame Obfuscation**: 偽のスタックスロットと偽の read/write 操作を挿入し偽ローカル変数を生成
@@ -75,16 +77,22 @@ impl ObfCtx {
 /// 難読化パスのエントリポイント
 ///
 /// パス適用順序:
-/// 1. Pass 12: 関数インライン展開（インラインされたコードが後続パスで難読化される）
-/// 2. Pass 1-4: 定数間接化・算術置換・ジャンクコード・不透明述語
-/// 3. Pass 13: 関数アウトライン化（難読化済みコードが関数に切り出される）
-/// 4. Pass 14: VM仮想化（適格な関数をバイトコード＋VMインタプリタに変換）
-/// 5. Pass 5: CFF（VMディスパッチループを含む全関数に適用 → 二重間接化）
-/// 6. Pass 6: 文字列暗号化（復号コードが CFF 等で破壊されるのを防ぐ）
+/// 1. Pass 15: ライブラリ関数難読化（自前実装が後続の全パスで難読化される）
+/// 2. Pass 12: 関数インライン展開（インラインされたコードが後続パスで難読化される）
+/// 3. Pass 1-4: 定数間接化・算術置換・ジャンクコード・不透明述語
+/// 4. Pass 13: 関数アウトライン化（難読化済みコードが関数に切り出される）
+/// 5. Pass 14: VM仮想化（適格な関数をバイトコード＋VMインタプリタに変換）
+/// 6. Pass 5: CFF（VMディスパッチループを含む全関数に適用 → 二重間接化）
+/// 7. Pass 6: 文字列暗号化（復号コードが CFF 等で破壊されるのを防ぐ）
 pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProgram {
     let mut program = program;
 
     let mut ctx = ObfCtx::new();
+
+    // Pass 15: ライブラリ関数難読化（全パスの前 → 自前実装が後続の全パスで難読化される）
+    if config.lib_obfuscate {
+        replace_library_functions(&mut program, &mut ctx);
+    }
 
     // Pass 12: 関数インライン展開（全パスの前 → インラインされたコードが後続で難読化される）
     if config.func_inline {
@@ -145,6 +153,146 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
     }
 
     program
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pass 15: Library Function Obfuscation（ライブラリ関数難読化）
+// ─────────────────────────────────────────────────────────────
+
+/// ライブラリ関数の呼び出しを自前実装に差し替える。
+///
+/// FLIRT シグネチャ対策: `strlen` 等の既知ライブラリ関数を等価な
+/// TACKY IR 実装に置換し、後続の難読化パスで認識不能にする。
+fn replace_library_functions(program: &mut TackyProgram, ctx: &mut ObfCtx) {
+    /// 差し替え対象のライブラリ関数名
+    const TARGET_FUNCTIONS: &[&str] = &["strlen"];
+
+    // 全 FunCall を走査し、対象関数名を収集
+    let mut needed: HashSet<String> = HashSet::new();
+    for func in &program.functions {
+        for instr in &func.body {
+            if let TackyInstruction::FunCall { name, .. } = instr {
+                if TARGET_FUNCTIONS.contains(&name.as_str()) {
+                    needed.insert(name.clone());
+                }
+            }
+        }
+    }
+
+    if needed.is_empty() {
+        return;
+    }
+
+    // 対象ごとに自前実装を生成
+    let mut generated: HashMap<String, String> = HashMap::new(); // original -> obf name
+    let mut new_functions: Vec<TackyFunction> = Vec::new();
+
+    for name in &needed {
+        match name.as_str() {
+            "strlen" => {
+                let obf_name = "_obf_strlen".to_string();
+                new_functions.push(generate_strlen(ctx, &obf_name));
+                generated.insert(name.clone(), obf_name);
+            }
+            _ => {}
+        }
+    }
+
+    // FunCall のターゲットを差し替え
+    for func in &mut program.functions {
+        for instr in &mut func.body {
+            if let TackyInstruction::FunCall { name, .. } = instr {
+                if let Some(obf_name) = generated.get(name) {
+                    *name = obf_name.clone();
+                }
+            }
+        }
+    }
+
+    // 生成した関数を追加
+    program.functions.extend(new_functions);
+}
+
+/// `strlen` の等価な TACKY IR 実装を生成する。
+///
+/// ```c
+/// long _obf_strlen(const char *s) {
+///     long len = 0;
+///     while (s[len] != '\0')
+///         len = len + 1;
+///     return len;
+/// }
+/// ```
+fn generate_strlen(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
+    let p = "p".to_string();
+    let len = ctx.fresh_tmp();    // loop counter (Long)
+    let ptr = ctx.fresh_tmp();    // ptr = s + len (Pointer(Char))
+    let ch = ctx.fresh_tmp();     // *ptr (Char)
+    let ci = ctx.fresh_tmp();     // zero-extended to Int
+
+    let loop_start = ctx.fresh_label();
+    let loop_end = ctx.fresh_label();
+
+    let mut var_types = HashMap::new();
+    var_types.insert(p.clone(), Type::Pointer(Box::new(Type::Char)));
+    var_types.insert(len.clone(), Type::Long);
+    var_types.insert(ptr.clone(), Type::Pointer(Box::new(Type::Char)));
+    var_types.insert(ch.clone(), Type::Char);
+    var_types.insert(ci.clone(), Type::Int);
+
+    let body = vec![
+        // len = 0
+        TackyInstruction::Copy {
+            src: TackyVal::Constant(TackyConst::Long(0)),
+            dst: TackyVal::Var(len.clone()),
+        },
+        // loop_start:
+        TackyInstruction::Label(loop_start.clone()),
+        // ptr = s + len
+        TackyInstruction::AddPtr {
+            ptr: TackyVal::Var(p.clone()),
+            index: TackyVal::Var(len.clone()),
+            scale: 1,
+            dst: TackyVal::Var(ptr.clone()),
+        },
+        // ch = *ptr
+        TackyInstruction::Load {
+            src_ptr: TackyVal::Var(ptr.clone()),
+            dst: TackyVal::Var(ch.clone()),
+        },
+        // ci = (int)ch
+        TackyInstruction::ZeroExtend {
+            src: TackyVal::Var(ch.clone()),
+            dst: TackyVal::Var(ci.clone()),
+        },
+        // if ci == 0, break
+        TackyInstruction::JumpIfZero {
+            condition: TackyVal::Var(ci.clone()),
+            target: loop_end.clone(),
+        },
+        // len = len + 1
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: TackyVal::Var(len.clone()),
+            right: TackyVal::Constant(TackyConst::Long(1)),
+            dst: TackyVal::Var(len.clone()),
+        },
+        // goto loop_start
+        TackyInstruction::Jump(loop_start),
+        // loop_end:
+        TackyInstruction::Label(loop_end),
+        // return len
+        TackyInstruction::Return(TackyVal::Var(len)),
+    ];
+
+    TackyFunction {
+        name: name.to_string(),
+        global: true,
+        params: vec![p],
+        body,
+        return_type: Type::Long,
+        var_types,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
