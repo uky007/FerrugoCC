@@ -67,7 +67,7 @@ use crate::parse::ast::{
 #[derive(Debug, Clone)]
 enum SymbolType {
     Variable(Type),
-    Function { return_type: Type, param_types: Vec<Type> },
+    Function { return_type: Type, param_types: Vec<Type>, is_variadic: bool },
 }
 
 /// 型検査のエントリポイント。AST を in-place で変換する。
@@ -130,8 +130,8 @@ fn typecheck_function_decl(
 
     // 既存の宣言との互換性チェック
     if let Some(existing) = symbols.get(&func.name) {
-        if let SymbolType::Function { return_type, param_types: existing_params } = existing {
-            if *return_type != func.return_type || *existing_params != param_types {
+        if let SymbolType::Function { return_type, param_types: existing_params, is_variadic } = existing {
+            if *return_type != func.return_type || *existing_params != param_types || *is_variadic != func.is_variadic {
                 return Err(CompileError::TypeError(format!(
                     "conflicting types for function '{}'", func.name
                 )));
@@ -142,6 +142,7 @@ fn typecheck_function_decl(
     symbols.insert(func.name.clone(), SymbolType::Function {
         return_type: func.return_type.clone(),
         param_types: param_types.clone(),
+        is_variadic: func.is_variadic,
     });
 
     if let Some(body) = &mut func.body {
@@ -932,22 +933,33 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         }
 
         Expr::FunctionCall(name, args) => {
-            let (return_type, param_types) = match symbols.get(name) {
-                Some(SymbolType::Function { return_type, param_types }) => {
-                    (return_type.clone(), param_types.clone())
+            let (return_type, param_types, is_variadic) = match symbols.get(name) {
+                Some(SymbolType::Function { return_type, param_types, is_variadic }) => {
+                    (return_type.clone(), param_types.clone(), *is_variadic)
                 }
                 _ => return Err(CompileError::TypeError(format!(
                     "undeclared function '{}'", name
                 ))),
             };
 
-            if args.len() != param_types.len() {
-                return Err(CompileError::TypeError(format!(
-                    "function '{}' expects {} arguments, got {}",
-                    name, param_types.len(), args.len()
-                )));
+            if is_variadic {
+                // 可変長関数: 名前付きパラメータ以上の引数があれば OK
+                if args.len() < param_types.len() {
+                    return Err(CompileError::TypeError(format!(
+                        "function '{}' requires at least {} arguments, got {}",
+                        name, param_types.len(), args.len()
+                    )));
+                }
+            } else {
+                if args.len() != param_types.len() {
+                    return Err(CompileError::TypeError(format!(
+                        "function '{}' expects {} arguments, got {}",
+                        name, param_types.len(), args.len()
+                    )));
+                }
             }
 
+            // 名前付きパラメータの型チェック+キャスト
             for (arg, expected_type) in args.iter_mut().zip(param_types.iter()) {
                 let arg_type = typecheck_expr(arg, symbols)?;
                 if arg_type != *expected_type {
@@ -966,6 +978,21 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                         source_type: arg_type,
                         expr: Box::new(old_arg),
                     };
+                }
+            }
+
+            // 可変長引数部分: デフォルト引数昇格（char → int）
+            if is_variadic {
+                for arg in args.iter_mut().skip(param_types.len()) {
+                    let arg_type = typecheck_expr(arg, symbols)?;
+                    if arg_type.is_character() {
+                        let old_arg = std::mem::replace(arg, Expr::Constant(0));
+                        *arg = Expr::Cast {
+                            target_type: Type::Int,
+                            source_type: arg_type,
+                            expr: Box::new(old_arg),
+                        };
+                    }
                 }
             }
 
@@ -1208,6 +1235,7 @@ mod tests {
                     BlockItem::Statement(Statement::Return(Some(Expr::Constant(42)))),
                 ]),
                 storage_class: None,
+                is_variadic: false,
             })],
         };
         typecheck(&mut program).unwrap();
@@ -1231,6 +1259,7 @@ mod tests {
                     BlockItem::Statement(Statement::Return(Some(Expr::Constant(8589934592)))), // 2^33
                 ]),
                 storage_class: None,
+                is_variadic: false,
             })],
         };
         typecheck(&mut program).unwrap();
@@ -1253,6 +1282,7 @@ mod tests {
                     BlockItem::Statement(Statement::Return(Some(Expr::ConstantLong(42)))),
                 ]),
                 storage_class: None,
+                is_variadic: false,
             })],
         };
         typecheck(&mut program).unwrap();
@@ -1292,6 +1322,7 @@ mod tests {
                     )))),
                 ]),
                 storage_class: None,
+                is_variadic: false,
             })],
         };
         typecheck(&mut program).unwrap();

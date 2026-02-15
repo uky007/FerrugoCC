@@ -17,7 +17,7 @@
 //!                    | "char" | "void"                         ← Ch16, Ch17
 //!                    | "struct" <identifier> ("{" <member_decl>* "}")?  ← Ch18: 構造体型
 //! <storage_class>  ::= "static" | "extern"
-//! <params>         ::= "void" | <type> <declarator> ("," <type> <declarator>)*
+//! <params>         ::= "void" | <type> <declarator> ("," <type> <declarator>)* ("," "...")?
 //! <block_item>     ::= <statement> | <declaration>
 //! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ";"
 //! <initializer>    ::= <assignment> | "{" <assignment> ("," <assignment>)* ","? "}"  ← Ch18: 複合初期化子
@@ -259,6 +259,7 @@ pub struct Program {
 /// - `params`: パラメータの (型, 名前) のリスト（Chapter 11）
 /// - `body`: `Some(...)` なら関数定義、`None` なら前方宣言（プロトタイプ）
 /// - `storage_class`: オプショナルのストレージクラス指定子（Chapter 10）
+/// - `is_variadic`: 可変長引数関数かどうか（`...` を含む）
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDecl {
     pub name: String,
@@ -266,6 +267,7 @@ pub struct FunctionDecl {
     pub params: Vec<(Type, String)>,
     pub body: Option<Vec<BlockItem>>,
     pub storage_class: Option<StorageClass>,
+    pub is_variadic: bool,
 }
 
 /// ブロック要素（Chapter 5 で追加）。

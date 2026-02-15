@@ -114,7 +114,7 @@ Intended for quantitative evaluation with deobfuscators (D-810, SATURN, etc.).
 | 6 | if/else, ternary, compound statements (`if/else`, `?:`, `{}`) | Done |
 | 7 | Compound assignment, increment/decrement, comma operator | Done |
 | 8 | Loop statements (`while`, `do-while`, `for`) with `break`/`continue` | Done |
-| 9 | Functions (declaration, definition, calls, parameters) | Done |
+| 9 | Functions (declaration, definition, calls, parameters, variadic `...`) | Done |
 | 10 | File-scope variables & storage classes (`static`, `extern`) | Done |
 | 11 | Long integers (`long`, type checking pass, implicit conversions) | Done |
 | 12 | Unsigned integers (`unsigned int`, `unsigned long`, usual arithmetic conversions) | Done |
@@ -668,6 +668,18 @@ Chapter 12 では以下の機能を追加した:
 - **再帰**: 関数の再帰呼び出しに対応
 - **最大6引数のレジスタ渡し**: System V AMD64 ABI 準拠
 - **7引数以上のスタック渡し**: 16バイトアラインメント対応
+- **可変長引数関数の呼び出し**: `printf`, `sprintf` 等の可変長引数関数を呼び出せる
+  - `...` トークンのレキシング、パラメータリスト末尾の `, ...` パース
+  - 可変長関数呼び出し時に `%al` に XMM レジスタ引数数をセット（System V ABI 準拠）
+  - デフォルト引数昇格（`char` → `int`）
+  - 可変長引数関数の **定義**（`va_list`/`va_start`/`va_arg`/`va_end`）は未対応
+  ```c
+  int printf(char *fmt, ...);
+  int main(void) {
+      printf("%d %.2f %s\n", 42, 3.14, "hello");
+      return 0;
+  }
+  ```
 
 ### Chapter 8 の詳細
 
@@ -698,6 +710,8 @@ Chapter 12 では以下の機能を追加した:
 
 ### 言語機能の拡充
 
+- [x] **可変長引数関数の呼び出し**: `printf(fmt, ...)` 等の外部可変長引数関数を呼び出し可能に
+- [ ] **可変長引数関数の定義**: `va_list`/`va_start`/`va_arg`/`va_end`
 - [ ] **配列初期化子リスト**: `int arr[3] = {1, 2, 3};`
 - [ ] **カンマ区切り複数宣言**: `int a = 1, b = 2, c = 3;`
 - [ ] **switch 文**: `switch`/`case`/`default`

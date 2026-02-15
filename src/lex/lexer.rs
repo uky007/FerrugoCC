@@ -193,9 +193,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             continue;
         }
 
-        // ── Chapter 18: `.` 演算子 ──
-        // `.` の後に数字が続かない場合はメンバアクセス演算子
+        // ── Chapter 18: `.` 演算子 / `...` 省略記号 ──
+        // `...` → Ellipsis（3文字消費）、`.` の後に数字が続かない場合はメンバアクセス演算子
         if b == b'.' && !(pos + 1 < bytes.len() && bytes[pos + 1].is_ascii_digit()) {
+            if pos + 2 < bytes.len() && bytes[pos + 1] == b'.' && bytes[pos + 2] == b'.' {
+                tokens.push(Token {
+                    kind: TokenKind::Ellipsis,
+                    span: Span { offset: pos, len: 3, line, column },
+                });
+                pos += 3;
+                column += 3;
+                continue;
+            }
             tokens.push(Token {
                 kind: TokenKind::Dot,
                 span: Span { offset: pos, len: 1, line, column },
@@ -947,6 +956,32 @@ mod tests {
                 &TokenKind::IntLiteral(42),
                 &TokenKind::CloseParen,
                 &TokenKind::Semicolon,
+            ]
+        );
+    }
+
+    /// `...` トークンの字句解析
+    #[test]
+    fn lex_ellipsis() {
+        let tokens = lex("int printf(const char *, ...);").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        // "const" は Identifier（キーワード未対応）
+        assert!(kinds.contains(&&TokenKind::Ellipsis));
+    }
+
+    /// `.` と `...` の区別
+    #[test]
+    fn lex_dot_vs_ellipsis() {
+        let tokens = lex("a.b, ...").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &TokenKind::Identifier("a".to_string()),
+                &TokenKind::Dot,
+                &TokenKind::Identifier("b".to_string()),
+                &TokenKind::Comma,
+                &TokenKind::Ellipsis,
             ]
         );
     }

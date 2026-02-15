@@ -607,8 +607,8 @@ fn generate_instruction(
             instrs.push(Instruction::Label(label.clone()));
         }
 
-        TackyInstruction::FunCall { name, args, dst, dst_type } => {
-            generate_function_call(name, args, dst, dst_type, static_vars, stack_vars, instrs, double_constants, &mut const_counter, var_types)?;
+        TackyInstruction::FunCall { name, args, dst, dst_type, is_variadic } => {
+            generate_function_call(name, args, dst, dst_type, *is_variadic, static_vars, stack_vars, instrs, double_constants, &mut const_counter, var_types)?;
         }
 
         TackyInstruction::SignExtend { src, dst } => {
@@ -1263,6 +1263,7 @@ fn generate_function_call(
     args: &[TackyVal],
     dst: &TackyVal,
     dst_type: &Type,
+    is_variadic: bool,
     static_vars: &HashMap<String, String>,
     stack_vars: &HashMap<String, i32>,
     instrs: &mut Vec<Instruction>,
@@ -1359,6 +1360,16 @@ fn generate_function_call(
         for &(_, reg_idx) in &xmm_reg_args {
             instrs.push(Instruction::Pop(Operand::Register(XMM_ARG_REGISTERS[reg_idx])));
         }
+    }
+
+    // System V ABI: 可変長関数では %al に XMM レジスタ引数の数をセット
+    if is_variadic {
+        let xmm_count = xmm_reg_args.len() as i64;
+        instrs.push(Instruction::Mov {
+            asm_type: AsmType::Longword,
+            src: Operand::Imm(xmm_count),
+            dst: Operand::Register(Reg::AX),
+        });
     }
 
     instrs.push(Instruction::Call(name.to_string()));

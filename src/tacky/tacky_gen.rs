@@ -26,6 +26,7 @@ struct FunctionInfo {
     defined: bool,
     return_type: Type,
     param_types: Vec<Type>,
+    is_variadic: bool,
 }
 
 /// 変数の種別
@@ -250,6 +251,7 @@ pub fn generate_tacky(program: &Program) -> Result<TackyProgram> {
                     defined: false,
                     return_type: func_decl.return_type.clone(),
                     param_types: param_types.clone(),
+                    is_variadic: func_decl.is_variadic,
                 });
                 if has_body {
                     entry.defined = true;
@@ -1346,7 +1348,14 @@ impl TackyGenerator {
         func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
         if let Some(info) = func_table.get(name) {
-            if info.param_count != args.len() {
+            if info.is_variadic {
+                if args.len() < info.param_count {
+                    return Err(CompileError::CodegenError(format!(
+                        "function '{}' requires at least {} arguments, got {}",
+                        name, info.param_count, args.len()
+                    )));
+                }
+            } else if info.param_count != args.len() {
                 return Err(CompileError::CodegenError(format!(
                     "function '{}' expects {} arguments, got {}",
                     name, info.param_count, args.len()
@@ -1365,12 +1374,17 @@ impl TackyGenerator {
             arg_vals.push(val);
         }
 
+        let is_variadic = func_table.get(name)
+            .map(|info| info.is_variadic)
+            .unwrap_or(false);
+
         let dst = self.new_temp(return_type.clone());
         instrs.push(TackyInstruction::FunCall {
             name: name.to_string(),
             args: arg_vals,
             dst: dst.clone(),
             dst_type: return_type.clone(),
+            is_variadic,
         });
 
         Ok((dst, return_type))

@@ -160,6 +160,8 @@ pub enum TokenKind {
     Dot,
     /// `->` — ポインタメンバアクセス演算子（Chapter 18）
     Arrow,
+    /// `...` — 省略記号（可変長引数）
+    Ellipsis,
 }
 
 /// ソースコード中の位置情報。

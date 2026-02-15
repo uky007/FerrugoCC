@@ -23,7 +23,7 @@
 //!                    | "char" | "void"                         ← Ch16, Ch17
 //!                    | "struct" <identifier> ("{" <member_decl>* "}")?  ← Ch18
 //! <storage_class>  ::= "static" | "extern"
-//! <params>         ::= "void" | <type> <declarator> ("," <type> <declarator>)*
+//! <params>         ::= "void" | <type> <declarator> ("," <type> <declarator>)* ("," "...")?
 //! <block_item>     ::= <statement> | <declaration>
 //! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ";"
 //! <initializer>    ::= <assignment> | "{" <assignment> ("," <assignment>)* ","? "}"  ← Ch18
@@ -532,6 +532,7 @@ impl<'a> Parser<'a> {
             // 関数宣言/定義
             self.expect(&TokenKind::OpenParen)?;
 
+            let mut is_variadic = false;
             let params = if self.peek()?.kind == TokenKind::KwVoid
                 && self.pos + 1 < self.tokens.len()
                 && self.tokens[self.pos + 1].kind == TokenKind::CloseParen
@@ -550,6 +551,12 @@ impl<'a> Parser<'a> {
                 params.push((param_type, param_name));
                 while self.peek()?.kind == TokenKind::Comma {
                     self.advance()?;
+                    // `, ...` → 可変長引数
+                    if self.peek()?.kind == TokenKind::Ellipsis {
+                        self.advance()?;
+                        is_variadic = true;
+                        break;
+                    }
                     let param_base = self.parse_type_specifier()?;
                     let (mut param_type, param_name) = self.parse_declarator(param_base)?;
                     if let Type::Array(elem, _) = param_type {
@@ -575,7 +582,7 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            Ok(TopLevelDecl::Function(FunctionDecl { name, return_type: decl_type, params, body, storage_class }))
+            Ok(TopLevelDecl::Function(FunctionDecl { name, return_type: decl_type, params, body, storage_class, is_variadic }))
         } else {
             // 変数宣言
             let init = if self.peek()?.kind == TokenKind::Assign {
@@ -2416,6 +2423,37 @@ mod tests {
                 assert_eq!(decl.var_type, Type::Pointer(Box::new(Type::Int)));
             }
             _ => panic!("expected variable declaration"),
+        }
+    }
+
+    /// 可変長引数関数の宣言: `int printf(char *fmt, ...);`
+    #[test]
+    fn parse_variadic_function_declaration() {
+        let tokens = lex::lex("int printf(char *fmt, ...); int main(void) { return 0; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        match &program.declarations[0] {
+            TopLevelDecl::Function(func) => {
+                assert_eq!(func.name, "printf");
+                assert!(func.is_variadic);
+                assert_eq!(func.params.len(), 1);
+                assert_eq!(func.params[0].0, Type::Pointer(Box::new(Type::Char)));
+            }
+            _ => panic!("expected function declaration"),
+        }
+    }
+
+    /// 非可変長関数は is_variadic == false
+    #[test]
+    fn parse_non_variadic_function() {
+        let tokens = lex::lex("int foo(int a, int b); int main(void) { return 0; }").unwrap();
+        let program = parse(&tokens).unwrap();
+        match &program.declarations[0] {
+            TopLevelDecl::Function(func) => {
+                assert_eq!(func.name, "foo");
+                assert!(!func.is_variadic);
+                assert_eq!(func.params.len(), 2);
+            }
+            _ => panic!("expected function declaration"),
         }
     }
 }

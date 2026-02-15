@@ -58,7 +58,7 @@ pub enum TackyInstruction {
     /// `target:`
     Label(String),
     /// `dst = name(args...)`
-    FunCall { name: String, args: Vec<TackyVal>, dst: TackyVal, dst_type: Type },
+    FunCall { name: String, args: Vec<TackyVal>, dst: TackyVal, dst_type: Type, is_variadic: bool },
     /// `dst = sign_extend(src)`
     SignExtend { src: TackyVal, dst: TackyVal },
     /// `dst = zero_extend(src)`

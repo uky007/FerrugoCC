@@ -1450,7 +1450,7 @@ fn inline_functions(program: &mut TackyProgram, ctx: &mut ObfCtx, freq: usize) {
         let mut eligible_count = 0usize;
 
         for instr in std::mem::take(&mut func.body) {
-            if let TackyInstruction::FunCall { ref name, ref args, ref dst, ref dst_type } = instr {
+            if let TackyInstruction::FunCall { ref name, ref args, ref dst, ref dst_type, is_variadic: _ } = instr {
                 if let Some(callee) = callee_map.get(name) {
                     if is_inline_eligible(callee, name, dst_type, &static_names) {
                         eligible_count += 1;
@@ -1643,11 +1643,12 @@ fn rename_instruction(
             condition: rv(condition), target: rl(target),
         },
         TackyInstruction::Label(name) => TackyInstruction::Label(rl(name)),
-        TackyInstruction::FunCall { name, args, dst, dst_type } => TackyInstruction::FunCall {
+        TackyInstruction::FunCall { name, args, dst, dst_type, is_variadic } => TackyInstruction::FunCall {
             name: name.clone(), // 関数名はリネームしない
             args: args.iter().map(|a| rv(a)).collect(),
             dst: rv(dst),
             dst_type: dst_type.clone(),
+            is_variadic: *is_variadic,
         },
         TackyInstruction::SignExtend { src, dst } => TackyInstruction::SignExtend {
             src: rv(src), dst: rv(dst),
@@ -1757,6 +1758,7 @@ fn outline_functions(program: &mut TackyProgram, ctx: &mut ObfCtx, min_block_siz
                                     args: call_args,
                                     dst: TackyVal::Var(output_name),
                                     dst_type: output_type,
+                                    is_variadic: false,
                                 });
 
                                 new_functions.push(outlined_func);

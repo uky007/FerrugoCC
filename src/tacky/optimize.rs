@@ -637,9 +637,9 @@ fn replace_uses(instr: TackyInstruction, copies: &HashMap<String, TackyVal>) -> 
         TackyInstruction::CopyToOffset { src, dst, offset } => TackyInstruction::CopyToOffset { src: sub(&src, copies), dst, offset },
         TackyInstruction::CopyFromOffset { src, offset, dst } => TackyInstruction::CopyFromOffset { src, offset, dst },
         TackyInstruction::CopyStruct { src, dst, size } => TackyInstruction::CopyStruct { src: sub(&src, copies), dst, size },
-        TackyInstruction::FunCall { name, args, dst, dst_type } => {
+        TackyInstruction::FunCall { name, args, dst, dst_type, is_variadic } => {
             let args = args.iter().map(|a| sub(a, copies)).collect();
-            TackyInstruction::FunCall { name, args, dst, dst_type }
+            TackyInstruction::FunCall { name, args, dst, dst_type, is_variadic }
         }
         TackyInstruction::JumpIndirect { target, possible_targets } => {
             TackyInstruction::JumpIndirect { target: sub(&target, copies), possible_targets }
