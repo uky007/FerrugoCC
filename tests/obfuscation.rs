@@ -248,6 +248,27 @@ fn test_string_literal() {
 }
 
 #[test]
+fn test_pointer_aliasing() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+
+    let source = r#"
+        int main(void) {
+            int x = 5;
+            int *p = &x;
+            *p = 100;
+            return x;
+        }
+    "#;
+
+    // 最適化後もポインタ経由の書き込みが正しく反映されることを検証
+    let normal = compile_and_run(source, false);
+    assert_eq!(normal, 100, "pointer aliasing: expected 100, got {normal}");
+}
+
+#[test]
 fn test_nested_control_flow() {
     assert_obfuscation_preserves_behavior(
         r#"

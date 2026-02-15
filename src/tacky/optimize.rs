@@ -561,6 +561,7 @@ fn unreachable_code_elimination(instrs: Vec<TackyInstruction>) -> Vec<TackyInstr
 fn copy_propagation(instrs: Vec<TackyInstruction>) -> Vec<TackyInstruction> {
     // Simple single-pass copy propagation
     // Track active copies: dst -> src
+    let address_taken = collect_address_taken(&instrs);
     let mut copies: HashMap<String, TackyVal> = HashMap::new();
 
     instrs.into_iter().map(|instr| {
@@ -584,9 +585,18 @@ fn copy_propagation(instrs: Vec<TackyInstruction>) -> Vec<TackyInstruction> {
                     });
                 }
                 // Labels and function calls invalidate all copies (conservative)
+                // Store invalidates copies for address-taken variables
                 match &instr {
                     TackyInstruction::Label(_) => { copies.clear(); }
                     TackyInstruction::FunCall { .. } => { copies.clear(); }
+                    TackyInstruction::Store { .. } => {
+                        copies.retain(|k, v| {
+                            !address_taken.contains(k) && match v {
+                                TackyVal::Var(vn) => !address_taken.contains(vn),
+                                _ => true,
+                            }
+                        });
+                    }
                     _ => {}
                 }
             }
