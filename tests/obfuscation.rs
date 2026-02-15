@@ -856,3 +856,366 @@ fn test_lib_obfuscate_memset_no_libc_call() {
         "assembly should contain '_obf_memset'"
     );
 }
+
+// ===== memcmp テスト =====
+
+#[test]
+fn test_lib_obfuscate_memcmp_equal() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // memcmp("abc", "abc", 3) == 0
+    let source = r#"
+        int memcmp(char *s1, char *s2, long n);
+        int main(void) {
+            return memcmp("abc", "abc", 3);
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 0, "memcmp(\"abc\", \"abc\", 3) should be 0, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_memcmp_less() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // memcmp("abc", "abd", 3) < 0 → negative
+    let source = r#"
+        int memcmp(char *s1, char *s2, long n);
+        int main(void) {
+            int r = memcmp("abc", "abd", 3);
+            if (r < 0) return 1;
+            return 0;
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 1, "memcmp(\"abc\", \"abd\", 3) should be negative");
+}
+
+#[test]
+fn test_lib_obfuscate_memcmp_greater() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // memcmp("abd", "abc", 3) > 0 → positive
+    let source = r#"
+        int memcmp(char *s1, char *s2, long n);
+        int main(void) {
+            int r = memcmp("abd", "abc", 3);
+            if (r > 0) return 1;
+            return 0;
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 1, "memcmp(\"abd\", \"abc\", 3) should be positive");
+}
+
+#[test]
+fn test_lib_obfuscate_memcmp_no_libc_call() {
+    let source = r#"
+        int memcmp(char *s1, char *s2, long n);
+        int main(void) {
+            return memcmp("abc", "abc", 3);
+        }
+    "#;
+    let asm = compile_to_asm(source, &["--obf-level=1"]);
+    assert!(
+        !asm.contains("call memcmp") && !asm.contains("call _memcmp"),
+        "assembly should not contain 'call memcmp'"
+    );
+    assert!(
+        asm.contains("_obf_memcmp"),
+        "assembly should contain '_obf_memcmp'"
+    );
+}
+
+// ===== strncmp テスト =====
+
+#[test]
+fn test_lib_obfuscate_strncmp_equal() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strncmp("abcX", "abcY", 3) == 0 (最初の3文字だけ比較)
+    let source = r#"
+        int strncmp(char *s1, char *s2, long n);
+        int main(void) {
+            return strncmp("abcX", "abcY", 3);
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 0, "strncmp(\"abcX\", \"abcY\", 3) should be 0, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strncmp_differ() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strncmp("abc", "abd", 3) < 0
+    let source = r#"
+        int strncmp(char *s1, char *s2, long n);
+        int main(void) {
+            int r = strncmp("abc", "abd", 3);
+            if (r < 0) return 1;
+            return 0;
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 1, "strncmp(\"abc\", \"abd\", 3) should be negative");
+}
+
+#[test]
+fn test_lib_obfuscate_strncmp_zero_len() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strncmp("abc", "xyz", 0) == 0 (0文字比較は常に等しい)
+    let source = r#"
+        int strncmp(char *s1, char *s2, long n);
+        int main(void) {
+            return strncmp("abc", "xyz", 0);
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 0, "strncmp with n=0 should be 0, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strncmp_no_libc_call() {
+    let source = r#"
+        int strncmp(char *s1, char *s2, long n);
+        int main(void) {
+            return strncmp("abc", "abc", 3);
+        }
+    "#;
+    let asm = compile_to_asm(source, &["--obf-level=1"]);
+    assert!(
+        !asm.contains("call strncmp") && !asm.contains("call _strncmp"),
+        "assembly should not contain 'call strncmp'"
+    );
+    assert!(
+        asm.contains("_obf_strncmp"),
+        "assembly should contain '_obf_strncmp'"
+    );
+}
+
+// ===== strncpy テスト =====
+
+#[test]
+fn test_lib_obfuscate_strncpy() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strncpy でコピーし、コピー先の先頭文字を検証
+    let source = r#"
+        char *strncpy(char *dst, char *src, long n);
+        int main(void) {
+            char buf[6];
+            strncpy(buf, "Hi", 6);
+            return buf[0];
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    // 'H' == 72
+    assert_eq!(result, 72, "strncpy: buf[0] should be 'H' (72), got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strncpy_pad() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strncpy は src が短い場合、残りを '\0' で埋める
+    let source = r#"
+        char *strncpy(char *dst, char *src, long n);
+        int main(void) {
+            char buf[4];
+            buf[2] = 88;
+            strncpy(buf, "A", 4);
+            return buf[2];
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    // buf[2] should be '\0' (0) due to zero-padding
+    assert_eq!(result, 0, "strncpy should zero-pad: buf[2] should be 0, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strncpy_no_libc_call() {
+    let source = r#"
+        char *strncpy(char *dst, char *src, long n);
+        int main(void) {
+            char buf[4];
+            strncpy(buf, "Hi", 4);
+            return buf[0];
+        }
+    "#;
+    let asm = compile_to_asm(source, &["--obf-level=1"]);
+    assert!(
+        !asm.contains("call strncpy") && !asm.contains("call _strncpy"),
+        "assembly should not contain 'call strncpy'"
+    );
+    assert!(
+        asm.contains("_obf_strncpy"),
+        "assembly should contain '_obf_strncpy'"
+    );
+}
+
+// ===== strchr テスト =====
+
+#[test]
+fn test_lib_obfuscate_strchr_found() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strchr("hello", 'l') should return pointer to first 'l' → *p == 'l' == 108
+    let source = r#"
+        char *strchr(char *s, int c);
+        int main(void) {
+            char *p = strchr("hello", 108);
+            if (p == 0) return 0;
+            return *p;
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 108, "strchr('hello','l') should find 'l' (108), got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strchr_not_found() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strchr("hello", 'z') should return NULL → 0
+    let source = r#"
+        char *strchr(char *s, int c);
+        int main(void) {
+            char *p = strchr("hello", 122);
+            if (p == 0) return 1;
+            return 0;
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 1, "strchr('hello','z') should return NULL");
+}
+
+#[test]
+fn test_lib_obfuscate_strchr_null_char() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strchr("hi", '\0') should find the null terminator → *p == 0
+    let source = r#"
+        char *strchr(char *s, int c);
+        int main(void) {
+            char *p = strchr("hi", 0);
+            if (p == 0) return 99;
+            return *p;
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 0, "strchr('hi','\\0') should find null terminator, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strchr_no_libc_call() {
+    let source = r#"
+        char *strchr(char *s, int c);
+        int main(void) {
+            char *p = strchr("hello", 108);
+            if (p == 0) return 0;
+            return *p;
+        }
+    "#;
+    let asm = compile_to_asm(source, &["--obf-level=1"]);
+    assert!(
+        !asm.contains("call strchr") && !asm.contains("call _strchr"),
+        "assembly should not contain 'call strchr'"
+    );
+    assert!(
+        asm.contains("_obf_strchr"),
+        "assembly should contain '_obf_strchr'"
+    );
+}
+
+// ===== strcat テスト =====
+
+#[test]
+fn test_lib_obfuscate_strcat() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strcat で文字列連結し、連結後の文字を検証
+    let source = r#"
+        char *strcpy(char *dst, char *src);
+        char *strcat(char *dst, char *src);
+        int main(void) {
+            char buf[6];
+            strcpy(buf, "Hi");
+            strcat(buf, "!");
+            return buf[2];
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    // '!' == 33
+    assert_eq!(result, 33, "strcat: buf[2] should be '!' (33), got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strcat_empty() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strcat で空文字列を連結 → 変わらない
+    let source = r#"
+        char *strcpy(char *dst, char *src);
+        char *strcat(char *dst, char *src);
+        int main(void) {
+            char buf[6];
+            strcpy(buf, "AB");
+            strcat(buf, "");
+            return buf[0];
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    // 'A' == 65
+    assert_eq!(result, 65, "strcat with empty: buf[0] should be 'A' (65), got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strcat_no_libc_call() {
+    let source = r#"
+        char *strcat(char *dst, char *src);
+        char *strcpy(char *dst, char *src);
+        int main(void) {
+            char buf[6];
+            strcpy(buf, "A");
+            strcat(buf, "B");
+            return buf[0];
+        }
+    "#;
+    let asm = compile_to_asm(source, &["--obf-level=1"]);
+    assert!(
+        !asm.contains("call strcat") && !asm.contains("call _strcat"),
+        "assembly should not contain 'call strcat'"
+    );
+    assert!(
+        asm.contains("_obf_strcat"),
+        "assembly should contain '_obf_strcat'"
+    );
+}

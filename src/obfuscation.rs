@@ -82,8 +82,8 @@ impl ObfuscationConfig {
     /// |-------|------|
     /// | 1     | 軽量: 定数+ジャンク+述語のみ、低頻度 |
     /// | 2     | 標準: +CFF+算術置換 |
-    /// | 3     | 強力: 全13パス有効（VM仮想化除く） |
-    /// | 4     | 最大: 全14パス有効、高頻度 |
+    /// | 3     | 強力: 全14パス有効（VM仮想化除く） |
+    /// | 4     | 最大: 全15パス有効、高頻度 |
     pub fn from_level(level: u8) -> Self {
         match level {
             1 => ObfuscationConfig {

@@ -131,7 +131,7 @@ Intended for quantitative evaluation with deobfuscators (D-810, SATURN, etc.).
 
 After completing all 20 chapters, code obfuscation passes were implemented as an additional feature.
 The `--fobfuscate` flag applies obfuscation passes instead of optimization.
-Consists of 9 TACKY IR-level passes and 5 ASM-level passes (14 total).
+Consists of 10 TACKY IR-level passes and 5 ASM-level passes (15 total).
 
 ### Obfuscation Levels
 
@@ -142,9 +142,9 @@ Consists of 9 TACKY IR-level passes and 5 ASM-level passes (14 total).
 | 1 | Constant encoding, junk code, opaque predicates | No | Light: basic obfuscation |
 | 2 | Level 1 + CFF, arithmetic substitution | No | Standard: adds control flow flattening |
 | 3 | Level 2 + inlining, outlining, string encryption, anti-disasm, indirect calls, register shuffle, stack frame obf, instruction substitution | No | Full: all passes except VM (default) |
-| 4 | All 14 passes (+ VM virtualization), high frequency | Yes | Maximum: VM virtualization + all passes at high frequency |
+| 4 | All 15 passes (+ VM virtualization), high frequency | Yes | Maximum: VM virtualization + all passes at high frequency |
 
-### TACKY IR Level (9 passes)
+### TACKY IR Level (10 passes)
 
 - **Pass 12 -- Function Inlining**: Embeds callee function bodies at call sites, destroying the call graph.
   Renames variables/labels with `_inline_{N}_{name}`, converts `Return` to `Copy + Jump`.
@@ -193,7 +193,8 @@ Consists of 9 TACKY IR-level passes and 5 ASM-level passes (14 total).
   //   handler_2: Return(result)  // direct return
   ```
 - **Pass 15 -- Library Function Obfuscation**: Replaces calls to known library functions (`strlen`, `strcmp`,
-  `strcpy`, `memcpy`, `memset`) with equivalent custom TACKY IR implementations (`_obf_strlen`, etc.).
+  `strcpy`, `memcpy`, `memset`, `memcmp`, `strncmp`, `strncpy`, `strchr`, `strcat`) with equivalent custom
+  TACKY IR implementations (`_obf_strlen`, etc.).
   Applied before all other passes so the custom implementations get fully obfuscated by the entire pipeline,
   defeating IDA Pro's FLIRT signature matching.
   `--obf-no-lib-obfuscate` to disable (enabled at all levels)
@@ -379,7 +380,7 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 
 ### コード難読化の詳細
 
-#### TACKY IR レベル（9パス）
+#### TACKY IR レベル（10パス）
 
 - **Pass 12 — 関数インライン展開（Function Inlining）**: 呼び出し先の関数本体を呼び出し元に埋め込み、コールグラフを破壊する。
   変数・ラベルを `_inline_{N}_{name}` でリネームし、`Return` を `Copy + Jump` に変換。
@@ -440,7 +441,8 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
   //   handler_2: Return(result)  // 直接リターン
   ```
 - **Pass 15 — ライブラリ関数難読化（Library Function Obfuscation）**: `strlen`, `strcmp`, `strcpy`,
-  `memcpy`, `memset` の既知ライブラリ関数の呼び出しを等価な自前実装（`_obf_strlen` 等）に差し替える。
+  `memcpy`, `memset`, `memcmp`, `strncmp`, `strncpy`, `strchr`, `strcat` の既知ライブラリ関数の
+  呼び出しを等価な自前実装（`_obf_strlen` 等）に差し替える。
   全パスの最初に適用することで、自前実装が後続の全パイプラインで難読化され、
   IDA Pro の FLIRT シグネチャマッチングを無効化する。
   `--obf-no-lib-obfuscate` で無効化可能（全レベルでデフォルト有効）
