@@ -192,9 +192,10 @@ Consists of 9 TACKY IR-level passes and 5 ASM-level passes (14 total).
   //   handler_1: Binary(Add, dst, b, result); jmp dispatch
   //   handler_2: Return(result)  // direct return
   ```
-- **Pass 15 -- Library Function Obfuscation**: Replaces calls to known library functions (`strlen`, etc.) with
-  equivalent custom TACKY IR implementations (`_obf_strlen`). Applied before all other passes so the custom
-  implementations get fully obfuscated by the entire pipeline, defeating IDA Pro's FLIRT signature matching.
+- **Pass 15 -- Library Function Obfuscation**: Replaces calls to known library functions (`strlen`, `strcmp`,
+  `strcpy`, `memcpy`, `memset`) with equivalent custom TACKY IR implementations (`_obf_strlen`, etc.).
+  Applied before all other passes so the custom implementations get fully obfuscated by the entire pipeline,
+  defeating IDA Pro's FLIRT signature matching.
   `--obf-no-lib-obfuscate` to disable (enabled at all levels)
 - **Pass 5 -- Control Flow Flattening (CFF)**: Transforms basic blocks into a jump-table + state-encoded
   dispatch loop, destroying CFG recovery in IDA Pro etc.
@@ -438,9 +439,10 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
   //   handler_1: Binary(Add, dst, b, result); jmp dispatch
   //   handler_2: Return(result)  // 直接リターン
   ```
-- **Pass 15 — ライブラリ関数難読化（Library Function Obfuscation）**: `strlen` 等の既知ライブラリ関数の呼び出しを
-  等価な自前実装（`_obf_strlen` 等）に差し替える。全パスの最初に適用することで、自前実装が後続の全パイプラインで
-  難読化され、IDA Pro の FLIRT シグネチャマッチングを無効化する。
+- **Pass 15 — ライブラリ関数難読化（Library Function Obfuscation）**: `strlen`, `strcmp`, `strcpy`,
+  `memcpy`, `memset` の既知ライブラリ関数の呼び出しを等価な自前実装（`_obf_strlen` 等）に差し替える。
+  全パスの最初に適用することで、自前実装が後続の全パイプラインで難読化され、
+  IDA Pro の FLIRT シグネチャマッチングを無効化する。
   `--obf-no-lib-obfuscate` で無効化可能（全レベルでデフォルト有効）
 - **Pass 5 — 制御フロー平坦化（CFF）**: 関数内の基本ブロックをジャンプテーブル + 状態エンコードの
   dispatch ループに変換し、IDA Pro 等の CFG 復元を破壊する

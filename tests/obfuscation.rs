@@ -731,3 +731,128 @@ fn test_lib_obfuscate_strcpy_no_libc_call() {
         "assembly should contain '_obf_strcpy'"
     );
 }
+
+// ── memcpy テスト ──
+
+#[test]
+fn test_lib_obfuscate_memcpy() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // memcpy で3バイトコピーし、先頭文字を検証
+    let source = r#"
+        char *memcpy(char *dst, char *src, long n);
+        int main(void) {
+            char buf[4];
+            memcpy(buf, "XY", 3);
+            return buf[0];
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    // 'X' == 88
+    assert_eq!(result, 88, "memcpy: buf[0] should be 'X' (88), got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_memcpy_zero_length() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // memcpy with n=0 should not modify destination
+    let source = r#"
+        char *memcpy(char *dst, char *src, long n);
+        int main(void) {
+            char buf[4];
+            buf[0] = 42;
+            memcpy(buf, "ZZ", 0);
+            return buf[0];
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 42, "memcpy(n=0): buf[0] should remain 42, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_memcpy_no_libc_call() {
+    let source = r#"
+        char *memcpy(char *dst, char *src, long n);
+        int main(void) {
+            char buf[4];
+            memcpy(buf, "AB", 3);
+            return buf[0];
+        }
+    "#;
+    let asm = compile_to_asm(source, &["--obf-level=1"]);
+    assert!(
+        !asm.contains("call memcpy") && !asm.contains("call _memcpy"),
+        "assembly should not contain 'call memcpy'"
+    );
+    assert!(
+        asm.contains("_obf_memcpy"),
+        "assembly should contain '_obf_memcpy'"
+    );
+}
+
+// ── memset テスト ──
+
+#[test]
+fn test_lib_obfuscate_memset() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // memset(buf, 65, 3) → buf[0..2] = 'A' (65)
+    let source = r#"
+        char *memset(char *s, int c, long n);
+        int main(void) {
+            char buf[4];
+            memset(buf, 65, 3);
+            return buf[0];
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 65, "memset(65): buf[0] should be 65 ('A'), got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_memset_zero() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // memset(buf, 0, 4) → buf をゼロクリア
+    let source = r#"
+        char *memset(char *s, int c, long n);
+        int main(void) {
+            char buf[4];
+            buf[0] = 99;
+            memset(buf, 0, 4);
+            return buf[0];
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 0, "memset(0): buf[0] should be 0, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_memset_no_libc_call() {
+    let source = r#"
+        char *memset(char *s, int c, long n);
+        int main(void) {
+            char buf[4];
+            memset(buf, 0, 4);
+            return buf[0];
+        }
+    "#;
+    let asm = compile_to_asm(source, &["--obf-level=1"]);
+    assert!(
+        !asm.contains("call memset") && !asm.contains("call _memset"),
+        "assembly should not contain 'call memset'"
+    );
+    assert!(
+        asm.contains("_obf_memset"),
+        "assembly should contain '_obf_memset'"
+    );
+}

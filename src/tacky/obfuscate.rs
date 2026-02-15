@@ -4,8 +4,8 @@
 //! `--fobfuscate` フラグで有効化される。
 //!
 //! # パス適用順序（TACKY IR レベル）
-//! 1. **Library Function Obfuscation**（ライブラリ関数難読化）— `strlen` 等の既知ライブラリ関数を
-//!    等価な自前実装に差し替え、FLIRT シグネチャマッチングを無効化する
+//! 1. **Library Function Obfuscation**（ライブラリ関数難読化）— `strlen`, `strcmp`, `strcpy`,
+//!    `memcpy`, `memset` 等の既知ライブラリ関数を等価な自前実装に差し替え、FLIRT シグネチャマッチングを無効化する
 //! 2. **Function Inlining**（関数インライン展開）— 呼び出し先の本体を呼び出し元に埋め込む
 //! 3. **Constant Encoding**（定数の間接化）— 即値を `a * b + c` の実行時計算に置換
 //! 4. **Arithmetic Substitution**（算術置換）— Add/Subtract を多段計算に展開
@@ -165,7 +165,7 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
 /// TACKY IR 実装に置換し、後続の難読化パスで認識不能にする。
 fn replace_library_functions(program: &mut TackyProgram, ctx: &mut ObfCtx) {
     /// 差し替え対象のライブラリ関数名
-    const TARGET_FUNCTIONS: &[&str] = &["strlen", "strcmp", "strcpy"];
+    const TARGET_FUNCTIONS: &[&str] = &["strlen", "strcmp", "strcpy", "memcpy", "memset"];
 
     // 全 FunCall を走査し、対象関数名を収集
     let mut needed: HashSet<String> = HashSet::new();
@@ -202,6 +202,16 @@ fn replace_library_functions(program: &mut TackyProgram, ctx: &mut ObfCtx) {
             "strcpy" => {
                 let obf_name = "_obf_strcpy".to_string();
                 new_functions.push(generate_strcpy(ctx, &obf_name));
+                generated.insert(name.clone(), obf_name);
+            }
+            "memcpy" => {
+                let obf_name = "_obf_memcpy".to_string();
+                new_functions.push(generate_memcpy(ctx, &obf_name));
+                generated.insert(name.clone(), obf_name);
+            }
+            "memset" => {
+                let obf_name = "_obf_memset".to_string();
+                new_functions.push(generate_memset(ctx, &obf_name));
                 generated.insert(name.clone(), obf_name);
             }
             _ => {}
@@ -529,6 +539,206 @@ fn generate_strcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         name: name.to_string(),
         global: true,
         params: vec![dst, src],
+        body,
+        return_type: Type::Pointer(Box::new(Type::Char)),
+        var_types,
+    }
+}
+
+/// `memcpy` の等価な TACKY IR 実装を生成する。
+///
+/// ```c
+/// void *_obf_memcpy(void *dst, void *src, long n) {
+///     long i = 0;
+///     while (i < n) {
+///         ((char *)dst)[i] = ((char *)src)[i];
+///         i = i + 1;
+///     }
+///     return dst;
+/// }
+/// ```
+fn generate_memcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
+    let dst = "p_dst".to_string();
+    let src = "p_src".to_string();
+    let n = "p_n".to_string();
+    let idx = ctx.fresh_tmp();      // loop index (Long)
+    let src_ptr = ctx.fresh_tmp();  // src + idx
+    let dst_ptr = ctx.fresh_tmp();  // dst + idx
+    let byte = ctx.fresh_tmp();     // loaded byte (Char)
+    let cmp = ctx.fresh_tmp();      // idx < n (Int)
+
+    let loop_start = ctx.fresh_label();
+    let loop_end = ctx.fresh_label();
+
+    let ptr_char = Type::Pointer(Box::new(Type::Char));
+    let mut var_types = HashMap::new();
+    var_types.insert(dst.clone(), ptr_char.clone());
+    var_types.insert(src.clone(), ptr_char.clone());
+    var_types.insert(n.clone(), Type::Long);
+    var_types.insert(idx.clone(), Type::Long);
+    var_types.insert(src_ptr.clone(), ptr_char.clone());
+    var_types.insert(dst_ptr.clone(), ptr_char);
+    var_types.insert(byte.clone(), Type::Char);
+    var_types.insert(cmp.clone(), Type::Int);
+
+    let body = vec![
+        // idx = 0
+        TackyInstruction::Copy {
+            src: TackyVal::Constant(TackyConst::Long(0)),
+            dst: TackyVal::Var(idx.clone()),
+        },
+        // loop_start:
+        TackyInstruction::Label(loop_start.clone()),
+        // cmp = (idx < n)
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::LessThan,
+            left: TackyVal::Var(idx.clone()),
+            right: TackyVal::Var(n.clone()),
+            dst: TackyVal::Var(cmp.clone()),
+        },
+        // if cmp == 0, break
+        TackyInstruction::JumpIfZero {
+            condition: TackyVal::Var(cmp.clone()),
+            target: loop_end.clone(),
+        },
+        // src_ptr = src + idx
+        TackyInstruction::AddPtr {
+            ptr: TackyVal::Var(src.clone()),
+            index: TackyVal::Var(idx.clone()),
+            scale: 1,
+            dst: TackyVal::Var(src_ptr.clone()),
+        },
+        // byte = *src_ptr
+        TackyInstruction::Load {
+            src_ptr: TackyVal::Var(src_ptr.clone()),
+            dst: TackyVal::Var(byte.clone()),
+        },
+        // dst_ptr = dst + idx
+        TackyInstruction::AddPtr {
+            ptr: TackyVal::Var(dst.clone()),
+            index: TackyVal::Var(idx.clone()),
+            scale: 1,
+            dst: TackyVal::Var(dst_ptr.clone()),
+        },
+        // *dst_ptr = byte
+        TackyInstruction::Store {
+            src: TackyVal::Var(byte.clone()),
+            dst_ptr: TackyVal::Var(dst_ptr.clone()),
+        },
+        // idx++
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: TackyVal::Var(idx.clone()),
+            right: TackyVal::Constant(TackyConst::Long(1)),
+            dst: TackyVal::Var(idx.clone()),
+        },
+        TackyInstruction::Jump(loop_start),
+        // loop_end:
+        TackyInstruction::Label(loop_end),
+        // return dst
+        TackyInstruction::Return(TackyVal::Var(dst.clone())),
+    ];
+
+    TackyFunction {
+        name: name.to_string(),
+        global: true,
+        params: vec![dst, src, n],
+        body,
+        return_type: Type::Pointer(Box::new(Type::Char)),
+        var_types,
+    }
+}
+
+/// `memset` の等価な TACKY IR 実装を生成する。
+///
+/// ```c
+/// void *_obf_memset(void *s, int c, long n) {
+///     char b = (char)c;
+///     long i = 0;
+///     while (i < n) {
+///         ((char *)s)[i] = b;
+///         i = i + 1;
+///     }
+///     return s;
+/// }
+/// ```
+fn generate_memset(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
+    let s = "p_s".to_string();
+    let c = "p_c".to_string();
+    let n = "p_n".to_string();
+    let b = ctx.fresh_tmp();        // truncated byte (Char)
+    let idx = ctx.fresh_tmp();      // loop index (Long)
+    let dst_ptr = ctx.fresh_tmp();  // s + idx
+    let cmp = ctx.fresh_tmp();      // idx < n (Int)
+
+    let loop_start = ctx.fresh_label();
+    let loop_end = ctx.fresh_label();
+
+    let ptr_char = Type::Pointer(Box::new(Type::Char));
+    let mut var_types = HashMap::new();
+    var_types.insert(s.clone(), ptr_char.clone());
+    var_types.insert(c.clone(), Type::Int);
+    var_types.insert(n.clone(), Type::Long);
+    var_types.insert(b.clone(), Type::Char);
+    var_types.insert(idx.clone(), Type::Long);
+    var_types.insert(dst_ptr.clone(), ptr_char);
+    var_types.insert(cmp.clone(), Type::Int);
+
+    let body = vec![
+        // b = (char)c
+        TackyInstruction::Truncate {
+            src: TackyVal::Var(c.clone()),
+            dst: TackyVal::Var(b.clone()),
+        },
+        // idx = 0
+        TackyInstruction::Copy {
+            src: TackyVal::Constant(TackyConst::Long(0)),
+            dst: TackyVal::Var(idx.clone()),
+        },
+        // loop_start:
+        TackyInstruction::Label(loop_start.clone()),
+        // cmp = (idx < n)
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::LessThan,
+            left: TackyVal::Var(idx.clone()),
+            right: TackyVal::Var(n.clone()),
+            dst: TackyVal::Var(cmp.clone()),
+        },
+        // if cmp == 0, break
+        TackyInstruction::JumpIfZero {
+            condition: TackyVal::Var(cmp.clone()),
+            target: loop_end.clone(),
+        },
+        // dst_ptr = s + idx
+        TackyInstruction::AddPtr {
+            ptr: TackyVal::Var(s.clone()),
+            index: TackyVal::Var(idx.clone()),
+            scale: 1,
+            dst: TackyVal::Var(dst_ptr.clone()),
+        },
+        // *dst_ptr = b
+        TackyInstruction::Store {
+            src: TackyVal::Var(b.clone()),
+            dst_ptr: TackyVal::Var(dst_ptr.clone()),
+        },
+        // idx++
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: TackyVal::Var(idx.clone()),
+            right: TackyVal::Constant(TackyConst::Long(1)),
+            dst: TackyVal::Var(idx.clone()),
+        },
+        TackyInstruction::Jump(loop_start),
+        // loop_end:
+        TackyInstruction::Label(loop_end),
+        // return s
+        TackyInstruction::Return(TackyVal::Var(s.clone())),
+    ];
+
+    TackyFunction {
+        name: name.to_string(),
+        global: true,
+        params: vec![s, c, n],
         body,
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
