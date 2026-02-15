@@ -170,6 +170,78 @@ fn fixup_asm_for_macos(asm: &str) -> String {
     result.join("\n") + "\n"
 }
 
+/// テストヘルパー: 指定レベルで難読化コンパイルして実行し、終了コードを返す。
+fn compile_and_run_with_level(source: &str, level: u8) -> i32 {
+    let dir = TempDir::new().unwrap();
+    let src_path = dir.path().join("test.c");
+    let asm_path = dir.path().join("test.s");
+    let bin_path = dir.path().join("test");
+
+    std::fs::write(&src_path, source).unwrap();
+
+    // Step 1: FerrugoCC で .s を生成（指定レベルで難読化）
+    let output = Command::new(env!("CARGO_BIN_EXE_ferrugocc"))
+        .arg("--fobfuscate")
+        .arg(format!("--obf-level={level}"))
+        .arg("-S")
+        .arg(&src_path)
+        .output()
+        .expect("failed to run compiler");
+    assert!(
+        output.status.success(),
+        "compilation failed (level={level}):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    assert!(asm_path.exists(), "assembly file not generated");
+
+    if cfg!(target_os = "macos") {
+        let asm = std::fs::read_to_string(&asm_path).unwrap();
+        let asm = fixup_asm_for_macos(&asm);
+        std::fs::write(&asm_path, asm).unwrap();
+    }
+
+    // Step 2: gcc でバイナリ化
+    let gcc_output = if cfg!(target_arch = "x86_64") {
+        Command::new("gcc")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run gcc")
+    } else {
+        Command::new("arch")
+            .args(["-x86_64", "gcc"])
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run arch -x86_64 gcc")
+    };
+
+    assert!(
+        gcc_output.status.success(),
+        "gcc failed (level={level}):\nstderr: {}",
+        String::from_utf8_lossy(&gcc_output.stderr),
+    );
+
+    // Step 3: 実行
+    let run_output = if cfg!(target_arch = "x86_64") {
+        Command::new(&bin_path)
+            .output()
+            .expect("failed to run binary")
+    } else {
+        Command::new("arch")
+            .arg("-x86_64")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run binary via arch -x86_64")
+    };
+
+    run_output.status.code().unwrap_or(-1)
+}
+
 /// テストヘルパー: 通常コンパイルと難読化コンパイルの結果を比較。
 fn assert_obfuscation_preserves_behavior(source: &str, expected_exit_code: i32) {
     if !can_run_x86_64() {
@@ -285,4 +357,97 @@ fn test_nested_control_flow() {
         "#,
         4,
     );
+}
+
+// ─────────────────────────────────────────────────────────────
+// VM仮想化テスト（Level 4）
+// ─────────────────────────────────────────────────────────────
+
+#[test]
+fn test_vm_simple_arithmetic() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    let source = r#"
+        int add(int a, int b) { return a + b; }
+        int main(void) { return add(20, 22); }
+    "#;
+    let normal = compile_and_run(source, false);
+    assert_eq!(normal, 42, "normal: expected 42, got {normal}");
+    let vm = compile_and_run_with_level(source, 4);
+    assert_eq!(vm, 42, "vm level 4: expected 42, got {vm}");
+}
+
+#[test]
+fn test_vm_conditional() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    let source = r#"
+        int check(int x) {
+            if (x > 10) return x + 32;
+            else return x;
+        }
+        int main(void) { return check(10); }
+    "#;
+    let normal = compile_and_run(source, false);
+    assert_eq!(normal, 10, "normal: expected 10, got {normal}");
+    let vm = compile_and_run_with_level(source, 4);
+    assert_eq!(vm, 10, "vm level 4: expected 10, got {vm}");
+}
+
+#[test]
+fn test_vm_loop() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    let source = r#"
+        int sum(int n) {
+            int s = 0;
+            for (int i = 0; i < n; i = i + 1)
+                s = s + i;
+            return s;
+        }
+        int main(void) { return sum(10); }
+    "#;
+    let normal = compile_and_run(source, false);
+    assert_eq!(normal, 45, "normal: expected 45, got {normal}");
+    let vm = compile_and_run_with_level(source, 4);
+    assert_eq!(vm, 45, "vm level 4: expected 45, got {vm}");
+}
+
+#[test]
+fn test_vm_nested_calls() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    let source = r#"
+        int double_val(int x) { return x + x; }
+        int add_doubled(int a, int b) { return double_val(a) + double_val(b); }
+        int main(void) { return add_doubled(10, 10); }
+    "#;
+    let normal = compile_and_run(source, false);
+    assert_eq!(normal, 40, "normal: expected 40, got {normal}");
+    let vm = compile_and_run_with_level(source, 4);
+    assert_eq!(vm, 40, "vm level 4: expected 40, got {vm}");
+}
+
+#[test]
+fn test_vm_type_conversion() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    let source = r#"
+        int narrow(long x) { return (int)x; }
+        int main(void) { long v = 42; return narrow(v); }
+    "#;
+    let normal = compile_and_run(source, false);
+    assert_eq!(normal, 42, "normal: expected 42, got {normal}");
+    let vm = compile_and_run_with_level(source, 4);
+    assert_eq!(vm, 42, "vm level 4: expected 42, got {vm}");
 }

@@ -14,13 +14,15 @@
 //!    - パターン 2: `(x+1)² - x² - 1 - 2x == 0`（代数恒等式）
 //!    - パターン 3: `(x³ - x) % 3 == 0`（連続3整数の積は3の倍数）
 //! 6. **Function Outlining**（関数アウトライン化）— コード断片を新しい関数に切り出す
-//! 7. **Control Flow Flattening**（制御フロー平坦化）— 基本ブロックをジャンプテーブル
+//! 7. **VM Virtualization**（VM仮想化）— 適格な関数をバイトコード＋VMインタプリタに変換。
+//!    `.data` にバイトコード配列とハンドラテーブルを配置し、ディスパッチループで間接実行
+//! 8. **Control Flow Flattening**（制御フロー平坦化）— 基本ブロックをジャンプテーブル
 //!    + 状態エンコードの dispatch ループに変換。IDA 等の CFG 復元を破壊する。
 //!    - ジャンプテーブル: `.data` セクションにブロックラベルの配列を配置し `jmp *%rax` で分岐
 //!    - 状態エンコード: `encoded = index * 37 + 0xCAFE` のアフィン変換で状態変数を符号化
-//! 8. **String Encryption**（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
+//! 9. **String Encryption**（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
 //!
-//! Pass 8 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
+//! Pass 9 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
 //!
 //! # ASM レベル難読化（codegen/mod.rs で適用、レジスタ割り当て後）
 //! - **Stack Frame Obfuscation**: 偽のスタックスロットと偽の read/write 操作を挿入し偽ローカル変数を生成
@@ -41,6 +43,7 @@ struct ObfCtx {
     label_counter: usize,
     inline_counter: usize,
     outline_counter: usize,
+    vm_counter: usize,
 }
 
 impl ObfCtx {
@@ -50,6 +53,7 @@ impl ObfCtx {
             label_counter: 0,
             inline_counter: 0,
             outline_counter: 0,
+            vm_counter: 0,
         }
     }
 
@@ -74,8 +78,9 @@ impl ObfCtx {
 /// 1. Pass 12: 関数インライン展開（インラインされたコードが後続パスで難読化される）
 /// 2. Pass 1-4: 定数間接化・算術置換・ジャンクコード・不透明述語
 /// 3. Pass 13: 関数アウトライン化（難読化済みコードが関数に切り出される）
-/// 4. Pass 5: CFF（切り出された新関数を含む全関数に適用）
-/// 5. Pass 6: 文字列暗号化（復号コードが CFF 等で破壊されるのを防ぐ）
+/// 4. Pass 14: VM仮想化（適格な関数をバイトコード＋VMインタプリタに変換）
+/// 5. Pass 5: CFF（VMディスパッチループを含む全関数に適用 → 二重間接化）
+/// 6. Pass 6: 文字列暗号化（復号コードが CFF 等で破壊されるのを防ぐ）
 pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProgram {
     let mut program = program;
 
@@ -115,7 +120,12 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
         outline_functions(&mut program, &mut ctx, config.func_outline_min_block);
     }
 
-    // Pass 5: CFF（切り出された新関数を含む全関数に適用）
+    // Pass 14: VM仮想化（適格な関数をバイトコード＋VMインタプリタに変換）
+    if config.vm_virtualize {
+        vm_virtualize(&mut program, &mut ctx);
+    }
+
+    // Pass 5: CFF（VMディスパッチループを含む全関数に適用 → 二重間接化）
     for func in &mut program.functions {
         if config.cff {
             func.body = control_flow_flattening(
@@ -433,10 +443,9 @@ fn outline_functions(program: &mut TackyProgram, ctx: &mut ObfCtx, min_block_siz
             if outline_count < MAX_OUTLINES_PER_FUNC {
                 if let Some(block_len) = find_outline_candidate(&body, i, min_block_size) {
                     let block = &body[i..i + block_len];
-                    let rest = &body[i + block_len..];
 
                     if let Some((inputs, output_name, intermediates)) =
-                        analyze_block(block, rest, &func.var_types)
+                        analyze_block(block, &body, i, &func.var_types)
                     {
                         // 入力変数 ≤ 6（整数レジスタ呼出規約の上限）
                         if inputs.len() <= 6 {
@@ -514,9 +523,14 @@ fn find_outline_candidate(body: &[TackyInstruction], pos: usize, min_size: usize
 /// ブロックの入出力を解析する。
 /// 成功時: (入力変数名リスト, 出力変数名, 中間変数名集合) を返す。
 /// 安全でない場合は None を返す。
+///
+/// `full_body` は関数本体全体、`block_start` はブロックの開始位置。
+/// 安全性チェックではブロック外の全命令（ブロック前+ブロック後）を走査する。
+/// これによりループの後方ジャンプで使われる変数も正しく検出される。
 fn analyze_block(
     block: &[TackyInstruction],
-    rest_of_body: &[TackyInstruction],
+    full_body: &[TackyInstruction],
+    block_start: usize,
     var_types: &HashMap<String, Type>,
 ) -> Option<(Vec<String>, String, HashSet<String>)> {
     let mut inputs: Vec<String> = Vec::new();
@@ -546,9 +560,15 @@ fn analyze_block(
     let mut intermediates = written;
     intermediates.remove(&output);
 
-    // 安全性チェック: 中間変数がブロック以降で使われていないか
+    // 安全性チェック: 中間変数がブロック外（前方+後方）で使われていないか
+    // ループの後方ジャンプで参照される変数を見逃さないよう全体を走査する
     if !intermediates.is_empty() {
-        for instr in rest_of_body {
+        let block_end = block_start + block.len();
+        for (idx, instr) in full_body.iter().enumerate() {
+            // ブロック内の命令はスキップ
+            if idx >= block_start && idx < block_end {
+                continue;
+            }
             for operand in instruction_all_operands(instr) {
                 if let TackyVal::Var(name) = operand {
                     if intermediates.contains(name) {
@@ -1703,6 +1723,275 @@ fn generate_predicate_3(
 }
 
 // ─────────────────────────────────────────────────────────────
+// Pass 14: VM Virtualization（VM仮想化 — コード仮想化）
+// ─────────────────────────────────────────────────────────────
+
+/// VM仮想化の適格性を判定する。
+///
+/// 以下の条件をすべて満たす関数が適格:
+/// - `main` でない（文字列暗号化の復号コードとの干渉を回避）
+/// - `Double` 型の変数がない
+/// - 浮動小数点変換命令がない（IntToDouble, DoubleToInt, UIntToDouble, DoubleToUInt）
+/// - 構造体操作命令がない（CopyToOffset, CopyFromOffset, CopyStruct）
+/// - 本体が 2 命令以上
+fn is_vm_eligible(func: &TackyFunction) -> bool {
+    if func.name == "main" {
+        return false;
+    }
+    if func.body.len() < 2 {
+        return false;
+    }
+    if func.var_types.values().any(|t| matches!(t, Type::Double)) {
+        return false;
+    }
+    for instr in &func.body {
+        match instr {
+            TackyInstruction::IntToDouble { .. }
+            | TackyInstruction::DoubleToInt { .. }
+            | TackyInstruction::UIntToDouble { .. }
+            | TackyInstruction::DoubleToUInt { .. }
+            | TackyInstruction::CopyToOffset { .. }
+            | TackyInstruction::CopyFromOffset { .. }
+            | TackyInstruction::CopyStruct { .. } => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// 適格な関数をバイトコード＋VMインタプリタに変換する。
+///
+/// 各TACKY命令を個別のハンドラに配置し、バイトコード配列とハンドラテーブルを
+/// `.data` セクションに配置する。ディスパッチループが `bytecode[PC]` をフェッチし
+/// ハンドラテーブルから間接ジャンプすることで元の命令列を実行する。
+///
+/// 元のTACKY変数・型はそのまま保持し、命令単位の細粒度ディスパッチにより
+/// 静的解析でのCFG復元を極めて困難にする。
+fn vm_virtualize(program: &mut TackyProgram, ctx: &mut ObfCtx) {
+    let func_count = program.functions.len();
+    for fi in 0..func_count {
+        if !is_vm_eligible(&program.functions[fi]) {
+            continue;
+        }
+
+        let func = &program.functions[fi];
+        let original_body = func.body.clone();
+        let n = original_body.len();
+        if n == 0 {
+            continue;
+        }
+
+        // Step 1: ラベル → PC マッピング構築
+        let mut label_to_pc: HashMap<String, usize> = HashMap::new();
+        for (i, instr) in original_body.iter().enumerate() {
+            if let TackyInstruction::Label(name) = instr {
+                label_to_pc.insert(name.clone(), i);
+            }
+        }
+
+        // Step 2: ハンドララベル生成
+        let dispatch_label = ctx.fresh_label();
+        let handler_labels: Vec<String> = (0..n).map(|_| ctx.fresh_label()).collect();
+
+        // Step 3: バイトコード配列（ByteArrayInit）
+        // 各命令のハンドラインデックスを u32 LE で格納（初期状態: 命令 i → ハンドラ i）
+        let mut bc_bytes: Vec<u8> = Vec::new();
+        for i in 0..n {
+            bc_bytes.extend_from_slice(&(i as u32).to_le_bytes());
+        }
+        let bc_name = format!(".Lobf_vm_bc_{}", ctx.vm_counter);
+        program.static_vars.push(TackyStaticVar {
+            name: bc_name.clone(),
+            global: false,
+            var_type: Type::Array(Box::new(Type::UChar), bc_bytes.len()),
+            init: TackyStaticInit::ByteArrayInit(bc_bytes),
+        });
+
+        // Step 4: ハンドラテーブル（PointerArrayInit）
+        let jt_name = format!(".Lobf_vm_jt_{}", ctx.vm_counter);
+        program.static_vars.push(TackyStaticVar {
+            name: jt_name.clone(),
+            global: false,
+            var_type: Type::Array(Box::new(Type::Long), n),
+            init: TackyStaticInit::PointerArrayInit(handler_labels.clone()),
+        });
+
+        ctx.vm_counter += 1;
+
+        // Step 5: 新しい関数本体を生成
+        let var_types = &mut program.functions[fi].var_types;
+        let mut new_body: Vec<TackyInstruction> = Vec::new();
+
+        // VM ローカル変数を登録
+        // NOTE: pc_var は Long（64ビット）にする。AddPtr の codegen が index を
+        // 常に Quadword (movq) で読み込むため、Int (32ビット) だとスタック上の
+        // 隣接データをゴミとして読み込んでしまう。
+        let pc_var = ctx.fresh_tmp();
+        let bc_ptr_var = ctx.fresh_tmp();
+        let jt_ptr_var = ctx.fresh_tmp();
+        var_types.insert(pc_var.clone(), Type::Long);
+        var_types.insert(bc_ptr_var.clone(), Type::Pointer(Box::new(Type::UChar)));
+        var_types.insert(jt_ptr_var.clone(), Type::Pointer(Box::new(Type::Long)));
+
+        // ── 初期化 ──
+        // _vm_pc = 0
+        new_body.push(TackyInstruction::Copy {
+            src: TackyVal::Constant(TackyConst::Long(0)),
+            dst: TackyVal::Var(pc_var.clone()),
+        });
+        // _vm_bc_ptr = &bytecode_data
+        new_body.push(TackyInstruction::GetAddress {
+            src: TackyVal::Var(bc_name),
+            dst: TackyVal::Var(bc_ptr_var.clone()),
+        });
+        // _vm_jt_ptr = &handler_table
+        new_body.push(TackyInstruction::GetAddress {
+            src: TackyVal::Var(jt_name),
+            dst: TackyVal::Var(jt_ptr_var.clone()),
+        });
+        // Jump(dispatch)
+        new_body.push(TackyInstruction::Jump(dispatch_label.clone()));
+
+        // ── ディスパッチループ ──
+        new_body.push(TackyInstruction::Label(dispatch_label.clone()));
+
+        // ディスパッチ用一時変数
+        let fetch_ptr_var = ctx.fresh_tmp();
+        let handler_idx_var = ctx.fresh_tmp();
+        let handler_addr_ptr_var = ctx.fresh_tmp();
+        let handler_addr_var = ctx.fresh_tmp();
+        var_types.insert(fetch_ptr_var.clone(), Type::Pointer(Box::new(Type::Int)));
+        var_types.insert(handler_idx_var.clone(), Type::Int);
+        var_types.insert(handler_addr_ptr_var.clone(), Type::Pointer(Box::new(Type::Long)));
+        var_types.insert(handler_addr_var.clone(), Type::Long);
+
+        // fetch_ptr = AddPtr(bc_ptr, pc, scale=4)  — bytecode[pc] のアドレス
+        new_body.push(TackyInstruction::AddPtr {
+            ptr: TackyVal::Var(bc_ptr_var.clone()),
+            index: TackyVal::Var(pc_var.clone()),
+            scale: 4,
+            dst: TackyVal::Var(fetch_ptr_var.clone()),
+        });
+
+        // handler_idx = Load(fetch_ptr)  — u32 ハンドラインデックス
+        new_body.push(TackyInstruction::Load {
+            src_ptr: TackyVal::Var(fetch_ptr_var),
+            dst: TackyVal::Var(handler_idx_var.clone()),
+        });
+
+        // pc = pc + 1
+        new_body.push(TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: TackyVal::Var(pc_var.clone()),
+            right: TackyVal::Constant(TackyConst::Long(1)),
+            dst: TackyVal::Var(pc_var.clone()),
+        });
+
+        // handler_idx は Int (32ビット) なので AddPtr の前に Long に拡張する
+        let handler_idx_long_var = ctx.fresh_tmp();
+        var_types.insert(handler_idx_long_var.clone(), Type::Long);
+        new_body.push(TackyInstruction::SignExtend {
+            src: TackyVal::Var(handler_idx_var),
+            dst: TackyVal::Var(handler_idx_long_var.clone()),
+        });
+
+        // handler_addr_ptr = AddPtr(jt_ptr, handler_idx_long, scale=8)
+        new_body.push(TackyInstruction::AddPtr {
+            ptr: TackyVal::Var(jt_ptr_var.clone()),
+            index: TackyVal::Var(handler_idx_long_var),
+            scale: 8,
+            dst: TackyVal::Var(handler_addr_ptr_var.clone()),
+        });
+
+        // handler_addr = Load(handler_addr_ptr)
+        new_body.push(TackyInstruction::Load {
+            src_ptr: TackyVal::Var(handler_addr_ptr_var),
+            dst: TackyVal::Var(handler_addr_var.clone()),
+        });
+
+        // JumpIndirect(handler_addr, all_handler_labels)
+        new_body.push(TackyInstruction::JumpIndirect {
+            target: TackyVal::Var(handler_addr_var),
+            possible_targets: handler_labels.clone(),
+        });
+
+        // ── ハンドラ群（元の各命令に対応） ──
+        for (i, instr) in original_body.iter().enumerate() {
+            new_body.push(TackyInstruction::Label(handler_labels[i].clone()));
+
+            match instr {
+                // Label: ノーオペ → dispatch に戻る
+                TackyInstruction::Label(_) => {
+                    new_body.push(TackyInstruction::Jump(dispatch_label.clone()));
+                }
+
+                // Jump(target): PC を即値で設定 → dispatch に戻る
+                TackyInstruction::Jump(target) => {
+                    if let Some(&target_pc) = label_to_pc.get(target) {
+                        new_body.push(TackyInstruction::Copy {
+                            src: TackyVal::Constant(TackyConst::Long(target_pc as i64)),
+                            dst: TackyVal::Var(pc_var.clone()),
+                        });
+                    }
+                    new_body.push(TackyInstruction::Jump(dispatch_label.clone()));
+                }
+
+                // JumpIfZero { condition, target }:
+                // condition==0 で target_pc に設定、非ゼロなら PC そのまま
+                TackyInstruction::JumpIfZero { condition, target } => {
+                    if let Some(&target_pc) = label_to_pc.get(target) {
+                        let skip = ctx.fresh_label();
+                        new_body.push(TackyInstruction::JumpIfNotZero {
+                            condition: condition.clone(),
+                            target: skip.clone(),
+                        });
+                        // ゼロ → PC を target_pc に設定
+                        new_body.push(TackyInstruction::Copy {
+                            src: TackyVal::Constant(TackyConst::Long(target_pc as i64)),
+                            dst: TackyVal::Var(pc_var.clone()),
+                        });
+                        new_body.push(TackyInstruction::Label(skip));
+                    }
+                    new_body.push(TackyInstruction::Jump(dispatch_label.clone()));
+                }
+
+                // JumpIfNotZero { condition, target }:
+                // condition!=0 で target_pc に設定、ゼロなら PC そのまま
+                TackyInstruction::JumpIfNotZero { condition, target } => {
+                    if let Some(&target_pc) = label_to_pc.get(target) {
+                        let skip = ctx.fresh_label();
+                        new_body.push(TackyInstruction::JumpIfZero {
+                            condition: condition.clone(),
+                            target: skip.clone(),
+                        });
+                        // 非ゼロ → PC を target_pc に設定
+                        new_body.push(TackyInstruction::Copy {
+                            src: TackyVal::Constant(TackyConst::Long(target_pc as i64)),
+                            dst: TackyVal::Var(pc_var.clone()),
+                        });
+                        new_body.push(TackyInstruction::Label(skip));
+                    }
+                    new_body.push(TackyInstruction::Jump(dispatch_label.clone()));
+                }
+
+                // Return / ReturnVoid: そのまま出力（dispatch に戻らない）
+                TackyInstruction::Return(_) | TackyInstruction::ReturnVoid => {
+                    new_body.push(instr.clone());
+                }
+
+                // その他全命令: そのまま出力 + dispatch に戻る
+                _ => {
+                    new_body.push(instr.clone());
+                    new_body.push(TackyInstruction::Jump(dispatch_label.clone()));
+                }
+            }
+        }
+
+        program.functions[fi].body = new_body;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Pass 5: Control Flow Flattening（制御フロー平坦化）
 // ─────────────────────────────────────────────────────────────
 
@@ -1847,11 +2136,14 @@ fn control_flow_flattening(
     for (i, block) in blocks.iter().enumerate() {
         result.push(TackyInstruction::Label(block_labels[i].clone()));
 
-        // ブロック内の命令を出力（ラベルは新しいブロックラベルに置き換え済みなのでスキップ）
+        // ブロック内の命令を出力
         for instr in block {
             match instr {
-                // 元のラベルはスキップ（ブロックラベルで代替）
-                TackyInstruction::Label(_) => {}
+                // 元のラベルは保持（CFF ブロックラベルに加えて残す。
+                // VM仮想化のハンドラテーブル等 .data セクションから参照される可能性がある）
+                TackyInstruction::Label(_) => {
+                    result.push(instr.clone());
+                }
 
                 // Return はそのまま出力（関数から直接脱出）
                 TackyInstruction::Return(_) | TackyInstruction::ReturnVoid => {

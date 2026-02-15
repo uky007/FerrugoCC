@@ -2,7 +2,7 @@
 //!
 //! 各難読化パスの有効/無効およびパラメータを管理する。
 //! `--fobfuscate` と `--obf-level=N` で制御する。
-//! 全13パス（TACKY IR 8パス + ASM 5パス）。
+//! 全14パス（TACKY IR 9パス + ASM 5パス）。
 
 /// 難読化パスの設定。パイプライン全体で共有される。
 #[derive(Debug, Clone)]
@@ -35,6 +35,8 @@ pub struct ObfuscationConfig {
     pub func_inline: bool,
     /// Pass 13 (TACKY): 関数アウトライン化
     pub func_outline: bool,
+    /// Pass 14 (TACKY): VM仮想化（コード仮想化）
+    pub vm_virtualize: bool,
 
     // ── 頻度パラメータ ──
 
@@ -78,8 +80,8 @@ impl ObfuscationConfig {
     /// |-------|------|
     /// | 1     | 軽量: 定数+ジャンク+述語のみ、低頻度 |
     /// | 2     | 標準: +CFF+算術置換 |
-    /// | 3     | 強力: 全13パス有効 |
-    /// | 4     | 最大: 全パス有効、高頻度 |
+    /// | 3     | 強力: 全13パス有効（VM仮想化除く） |
+    /// | 4     | 最大: 全14パス有効、高頻度 |
     pub fn from_level(level: u8) -> Self {
         match level {
             1 => ObfuscationConfig {
@@ -96,6 +98,7 @@ impl ObfuscationConfig {
                 instr_subst: false,
                 func_inline: false,
                 func_outline: false,
+                vm_virtualize: false,
                 junk_freq: 8,
                 pred_freq: 10,
                 arith_freq: 3,
@@ -123,6 +126,7 @@ impl ObfuscationConfig {
                 instr_subst: false,
                 func_inline: false,
                 func_outline: false,
+                vm_virtualize: false,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 5,
@@ -150,6 +154,7 @@ impl ObfuscationConfig {
                 instr_subst: true,
                 func_inline: true,
                 func_outline: true,
+                vm_virtualize: false,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 3,
@@ -178,6 +183,7 @@ impl ObfuscationConfig {
                 instr_subst: true,
                 func_inline: true,
                 func_outline: true,
+                vm_virtualize: true,
                 junk_freq: 2,
                 pred_freq: 2,
                 arith_freq: 2,

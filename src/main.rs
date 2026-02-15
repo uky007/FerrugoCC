@@ -8,7 +8,7 @@
 //!          → [Codegen] → [RegAlloc+Coalescing] → [Fixup] → [Emit] → source.s → [gcc] → binary
 //! ```
 //!
-//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（13パス）を適用する。
+//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（14パス）を適用する。
 //! `--obf-level=N` で難読化強度を段階的に制御可能（1=軽量〜4=最大）。
 //!
 //! # 使い方
@@ -140,6 +140,10 @@ struct Cli {
     #[arg(long = "obf-no-func-outline")]
     obf_no_func_outline: bool,
 
+    /// VM仮想化を無効化
+    #[arg(long = "obf-no-vm-virtualize")]
+    obf_no_vm_virtualize: bool,
+
     /// 算術置換頻度（N回に1回適用）
     #[arg(long = "obf-arith-freq")]
     obf_arith_freq: Option<usize>,
@@ -207,6 +211,7 @@ fn main() {
         if cli.obf_no_instr_subst { config.instr_subst = false; }
         if cli.obf_no_func_inline { config.func_inline = false; }
         if cli.obf_no_func_outline { config.func_outline = false; }
+        if cli.obf_no_vm_virtualize { config.vm_virtualize = false; }
 
         // 頻度オーバーライド
         if let Some(freq) = cli.obf_junk_freq { config.junk_freq = freq; }
