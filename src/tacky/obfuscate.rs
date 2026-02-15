@@ -165,7 +165,7 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
 /// TACKY IR 実装に置換し、後続の難読化パスで認識不能にする。
 fn replace_library_functions(program: &mut TackyProgram, ctx: &mut ObfCtx) {
     /// 差し替え対象のライブラリ関数名
-    const TARGET_FUNCTIONS: &[&str] = &["strlen"];
+    const TARGET_FUNCTIONS: &[&str] = &["strlen", "strcmp", "strcpy"];
 
     // 全 FunCall を走査し、対象関数名を収集
     let mut needed: HashSet<String> = HashSet::new();
@@ -192,6 +192,16 @@ fn replace_library_functions(program: &mut TackyProgram, ctx: &mut ObfCtx) {
             "strlen" => {
                 let obf_name = "_obf_strlen".to_string();
                 new_functions.push(generate_strlen(ctx, &obf_name));
+                generated.insert(name.clone(), obf_name);
+            }
+            "strcmp" => {
+                let obf_name = "_obf_strcmp".to_string();
+                new_functions.push(generate_strcmp(ctx, &obf_name));
+                generated.insert(name.clone(), obf_name);
+            }
+            "strcpy" => {
+                let obf_name = "_obf_strcpy".to_string();
+                new_functions.push(generate_strcpy(ctx, &obf_name));
                 generated.insert(name.clone(), obf_name);
             }
             _ => {}
@@ -291,6 +301,236 @@ fn generate_strlen(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         params: vec![p],
         body,
         return_type: Type::Long,
+        var_types,
+    }
+}
+
+/// `strcmp` の等価な TACKY IR 実装を生成する。
+///
+/// ```c
+/// int _obf_strcmp(const char *s1, const char *s2) {
+///     long i = 0;
+///     for (;;) {
+///         char c1 = s1[i], c2 = s2[i];
+///         int d = (int)c1 - (int)c2;
+///         if (d != 0) return d;
+///         if (c1 == '\0') return 0;
+///         i = i + 1;
+///     }
+/// }
+/// ```
+fn generate_strcmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
+    let p1 = "p1".to_string();
+    let p2 = "p2".to_string();
+    let idx = ctx.fresh_tmp();     // loop index (Long)
+    let ptr1 = ctx.fresh_tmp();    // s1 + idx
+    let ptr2 = ctx.fresh_tmp();    // s2 + idx
+    let ch1 = ctx.fresh_tmp();     // *ptr1 (Char)
+    let ch2 = ctx.fresh_tmp();     // *ptr2 (Char)
+    let ci1 = ctx.fresh_tmp();     // ZeroExtend ch1 → Int
+    let ci2 = ctx.fresh_tmp();     // ZeroExtend ch2 → Int
+    let diff = ctx.fresh_tmp();    // ci1 - ci2 (Int)
+
+    let loop_start = ctx.fresh_label();
+    let loop_end = ctx.fresh_label();
+    let ret_diff = ctx.fresh_label();
+
+    let ptr_char = Type::Pointer(Box::new(Type::Char));
+    let mut var_types = HashMap::new();
+    var_types.insert(p1.clone(), ptr_char.clone());
+    var_types.insert(p2.clone(), ptr_char.clone());
+    var_types.insert(idx.clone(), Type::Long);
+    var_types.insert(ptr1.clone(), ptr_char.clone());
+    var_types.insert(ptr2.clone(), ptr_char);
+    var_types.insert(ch1.clone(), Type::Char);
+    var_types.insert(ch2.clone(), Type::Char);
+    var_types.insert(ci1.clone(), Type::Int);
+    var_types.insert(ci2.clone(), Type::Int);
+    var_types.insert(diff.clone(), Type::Int);
+
+    let body = vec![
+        // idx = 0
+        TackyInstruction::Copy {
+            src: TackyVal::Constant(TackyConst::Long(0)),
+            dst: TackyVal::Var(idx.clone()),
+        },
+        // loop_start:
+        TackyInstruction::Label(loop_start.clone()),
+        // ptr1 = s1 + idx
+        TackyInstruction::AddPtr {
+            ptr: TackyVal::Var(p1.clone()),
+            index: TackyVal::Var(idx.clone()),
+            scale: 1,
+            dst: TackyVal::Var(ptr1.clone()),
+        },
+        // ptr2 = s2 + idx
+        TackyInstruction::AddPtr {
+            ptr: TackyVal::Var(p2.clone()),
+            index: TackyVal::Var(idx.clone()),
+            scale: 1,
+            dst: TackyVal::Var(ptr2.clone()),
+        },
+        // ch1 = *ptr1
+        TackyInstruction::Load {
+            src_ptr: TackyVal::Var(ptr1.clone()),
+            dst: TackyVal::Var(ch1.clone()),
+        },
+        // ch2 = *ptr2
+        TackyInstruction::Load {
+            src_ptr: TackyVal::Var(ptr2.clone()),
+            dst: TackyVal::Var(ch2.clone()),
+        },
+        // ci1 = (int)ch1
+        TackyInstruction::ZeroExtend {
+            src: TackyVal::Var(ch1.clone()),
+            dst: TackyVal::Var(ci1.clone()),
+        },
+        // ci2 = (int)ch2
+        TackyInstruction::ZeroExtend {
+            src: TackyVal::Var(ch2.clone()),
+            dst: TackyVal::Var(ci2.clone()),
+        },
+        // diff = ci1 - ci2
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Subtract,
+            left: TackyVal::Var(ci1.clone()),
+            right: TackyVal::Var(ci2.clone()),
+            dst: TackyVal::Var(diff.clone()),
+        },
+        // if diff != 0, return diff
+        TackyInstruction::JumpIfNotZero {
+            condition: TackyVal::Var(diff.clone()),
+            target: ret_diff.clone(),
+        },
+        // if ch1 == 0 (null terminator), return 0
+        TackyInstruction::JumpIfZero {
+            condition: TackyVal::Var(ci1.clone()),
+            target: loop_end.clone(),
+        },
+        // idx++
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: TackyVal::Var(idx.clone()),
+            right: TackyVal::Constant(TackyConst::Long(1)),
+            dst: TackyVal::Var(idx.clone()),
+        },
+        TackyInstruction::Jump(loop_start),
+        // ret_diff: return diff
+        TackyInstruction::Label(ret_diff),
+        TackyInstruction::Return(TackyVal::Var(diff)),
+        // loop_end: return 0
+        TackyInstruction::Label(loop_end),
+        TackyInstruction::Return(TackyVal::Constant(TackyConst::Int(0))),
+    ];
+
+    TackyFunction {
+        name: name.to_string(),
+        global: true,
+        params: vec![p1, p2],
+        body,
+        return_type: Type::Int,
+        var_types,
+    }
+}
+
+/// `strcpy` の等価な TACKY IR 実装を生成する。
+///
+/// ```c
+/// char *_obf_strcpy(char *dst, const char *src) {
+///     long i = 0;
+///     for (;;) {
+///         char ch = src[i];
+///         dst[i] = ch;
+///         if (ch == '\0') break;
+///         i = i + 1;
+///     }
+///     return dst;
+/// }
+/// ```
+fn generate_strcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
+    let dst = "p_dst".to_string();
+    let src = "p_src".to_string();
+    let idx = ctx.fresh_tmp();      // loop index (Long)
+    let src_ptr = ctx.fresh_tmp();  // src + idx
+    let dst_ptr = ctx.fresh_tmp();  // dst + idx
+    let ch = ctx.fresh_tmp();       // *src_ptr (Char)
+    let ci = ctx.fresh_tmp();       // ZeroExtend ch → Int
+
+    let loop_start = ctx.fresh_label();
+    let loop_end = ctx.fresh_label();
+
+    let ptr_char = Type::Pointer(Box::new(Type::Char));
+    let mut var_types = HashMap::new();
+    var_types.insert(dst.clone(), ptr_char.clone());
+    var_types.insert(src.clone(), ptr_char.clone());
+    var_types.insert(idx.clone(), Type::Long);
+    var_types.insert(src_ptr.clone(), ptr_char.clone());
+    var_types.insert(dst_ptr.clone(), ptr_char);
+    var_types.insert(ch.clone(), Type::Char);
+    var_types.insert(ci.clone(), Type::Int);
+
+    let body = vec![
+        // idx = 0
+        TackyInstruction::Copy {
+            src: TackyVal::Constant(TackyConst::Long(0)),
+            dst: TackyVal::Var(idx.clone()),
+        },
+        // loop_start:
+        TackyInstruction::Label(loop_start.clone()),
+        // src_ptr = src + idx
+        TackyInstruction::AddPtr {
+            ptr: TackyVal::Var(src.clone()),
+            index: TackyVal::Var(idx.clone()),
+            scale: 1,
+            dst: TackyVal::Var(src_ptr.clone()),
+        },
+        // ch = *src_ptr
+        TackyInstruction::Load {
+            src_ptr: TackyVal::Var(src_ptr.clone()),
+            dst: TackyVal::Var(ch.clone()),
+        },
+        // dst_ptr = dst + idx
+        TackyInstruction::AddPtr {
+            ptr: TackyVal::Var(dst.clone()),
+            index: TackyVal::Var(idx.clone()),
+            scale: 1,
+            dst: TackyVal::Var(dst_ptr.clone()),
+        },
+        // *dst_ptr = ch
+        TackyInstruction::Store {
+            src: TackyVal::Var(ch.clone()),
+            dst_ptr: TackyVal::Var(dst_ptr.clone()),
+        },
+        // ci = (int)ch
+        TackyInstruction::ZeroExtend {
+            src: TackyVal::Var(ch.clone()),
+            dst: TackyVal::Var(ci.clone()),
+        },
+        // if ci == 0, break
+        TackyInstruction::JumpIfZero {
+            condition: TackyVal::Var(ci.clone()),
+            target: loop_end.clone(),
+        },
+        // idx++
+        TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: TackyVal::Var(idx.clone()),
+            right: TackyVal::Constant(TackyConst::Long(1)),
+            dst: TackyVal::Var(idx.clone()),
+        },
+        TackyInstruction::Jump(loop_start),
+        // loop_end:
+        TackyInstruction::Label(loop_end),
+        // return dst
+        TackyInstruction::Return(TackyVal::Var(dst.clone())),
+    ];
+
+    TackyFunction {
+        name: name.to_string(),
+        global: true,
+        params: vec![dst, src],
+        body,
+        return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
     }
 }

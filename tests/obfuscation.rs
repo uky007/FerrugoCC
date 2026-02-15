@@ -597,3 +597,137 @@ fn test_lib_obfuscate_strlen_no_libc_call() {
         "assembly should contain '_obf_strlen': obfuscated implementation missing"
     );
 }
+
+#[test]
+fn test_lib_obfuscate_strcmp_equal() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strcmp("abc", "abc") == 0 → exit code 0
+    let source = r#"
+        int strcmp(char *s1, char *s2);
+        int main(void) {
+            return strcmp("abc", "abc");
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 0, "strcmp(\"abc\", \"abc\") should be 0, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strcmp_less() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strcmp("abc", "abd") < 0 → negative value; use (result < 0) ? 1 : 0
+    let source = r#"
+        int strcmp(char *s1, char *s2);
+        int main(void) {
+            int r = strcmp("abc", "abd");
+            if (r < 0) return 1;
+            return 0;
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 1, "strcmp(\"abc\", \"abd\") should be negative, got non-negative");
+}
+
+#[test]
+fn test_lib_obfuscate_strcmp_greater() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strcmp("abd", "abc") > 0 → positive value
+    let source = r#"
+        int strcmp(char *s1, char *s2);
+        int main(void) {
+            int r = strcmp("abd", "abc");
+            if (r > 0) return 1;
+            return 0;
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 1, "strcmp(\"abd\", \"abc\") should be positive, got non-positive");
+}
+
+#[test]
+fn test_lib_obfuscate_strcmp_no_libc_call() {
+    let source = r#"
+        int strcmp(char *s1, char *s2);
+        int main(void) {
+            return strcmp("abc", "abc");
+        }
+    "#;
+    let asm = compile_to_asm(source, &["--obf-level=1"]);
+    assert!(
+        !asm.contains("call strcmp") && !asm.contains("call _strcmp"),
+        "assembly should not contain 'call strcmp'"
+    );
+    assert!(
+        asm.contains("_obf_strcmp"),
+        "assembly should contain '_obf_strcmp'"
+    );
+}
+
+#[test]
+fn test_lib_obfuscate_strcpy() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strcpy でコピーし、コピー先の先頭文字を検証
+    let source = r#"
+        char *strcpy(char *dst, char *src);
+        int main(void) {
+            char buf[6];
+            strcpy(buf, "Hi");
+            return buf[0];
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    // 'H' == 72
+    assert_eq!(result, 72, "strcpy: buf[0] should be 'H' (72), got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strcpy_empty() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    // strcpy で空文字列をコピー → buf[0] == '\0' == 0
+    let source = r#"
+        char *strcpy(char *dst, char *src);
+        int main(void) {
+            char buf[4];
+            strcpy(buf, "");
+            return buf[0];
+        }
+    "#;
+    let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
+    assert_eq!(result, 0, "strcpy(\"\") should set buf[0]=0, got {result}");
+}
+
+#[test]
+fn test_lib_obfuscate_strcpy_no_libc_call() {
+    let source = r#"
+        char *strcpy(char *dst, char *src);
+        int main(void) {
+            char buf[6];
+            strcpy(buf, "Hi");
+            return buf[0];
+        }
+    "#;
+    let asm = compile_to_asm(source, &["--obf-level=1"]);
+    assert!(
+        !asm.contains("call strcpy") && !asm.contains("call _strcpy"),
+        "assembly should not contain 'call strcpy'"
+    );
+    assert!(
+        asm.contains("_obf_strcpy"),
+        "assembly should contain '_obf_strcpy'"
+    );
+}
