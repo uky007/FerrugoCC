@@ -642,8 +642,10 @@ impl TackyGenerator {
                 let saved_var_map = self.var_map.clone();
 
                 match init {
-                    ForInit::Declaration(decl) => {
-                        self.generate_declaration(decl, instrs, None, func_table)?;
+                    ForInit::Declaration(decls) => {
+                        for decl in decls {
+                            self.generate_declaration(decl, instrs, None, func_table)?;
+                        }
                     }
                     ForInit::Expression(Some(expr)) => {
                         self.generate_expr(expr, instrs, func_table)?;

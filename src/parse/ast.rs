@@ -8,7 +8,7 @@
 //! <program>        ::= <top_level_decl>*                      ← Ch10: 関数+変数
 //! <top_level_decl> ::= <function_decl> | <variable_decl> | <struct_decl>
 //! <function_decl>  ::= <storage_class>? <type> <declarator> "(" <params> ")" ( "{" <block>* "}" | ";" )
-//! <variable_decl>  ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ";"
+//! <variable_decl>  ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ("," <declarator> ("=" <initializer>)?)* ";"
 //! <struct_decl>    ::= "struct" <identifier> "{" <member_decl>* "}" ";"  ← Ch18: 構造体定義のみ
 //! <member_decl>    ::= <type> <declarator> ";"                ← Ch18: 構造体メンバ
 //! <declarator>     ::= "*"* <identifier> ("[" <int> "]")?      ← Ch15: 配列宣言子
@@ -19,7 +19,7 @@
 //! <storage_class>  ::= "static" | "extern"
 //! <params>         ::= "void" | <type> <declarator> ("," <type> <declarator>)* ("," "...")?
 //! <block_item>     ::= <statement> | <declaration>
-//! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ";"
+//! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ("," <declarator> ("=" <initializer>)?)* ";"
 //! <initializer>    ::= <assignment> | "{" <assignment> ("," <assignment>)* ","? "}"  ← Ch18: 複合初期化子
 //! <statement>      ::= "return" <exp> ";"
 //!                    | <exp> ";"
@@ -341,8 +341,8 @@ pub enum Statement {
 /// forループの初期化部（Chapter 8）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ForInit {
-    /// 宣言（例: `int i = 0;`）
-    Declaration(Declaration),
+    /// 宣言（例: `int i = 0;` or `int i = 0, j = 1;`）
+    Declaration(Vec<Declaration>),
     /// 式（例: `i = 0;`）または空（`;`）
     Expression(Option<Expr>),
 }

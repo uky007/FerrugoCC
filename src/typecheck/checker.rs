@@ -388,8 +388,10 @@ fn typecheck_statement(
         Statement::For { init, condition, post, body } => {
             let mut inner_symbols = symbols.clone();
             match init {
-                ForInit::Declaration(decl) => {
-                    typecheck_local_declaration(decl, &mut inner_symbols)?;
+                ForInit::Declaration(decls) => {
+                    for decl in decls.iter_mut() {
+                        typecheck_local_declaration(decl, &mut inner_symbols)?;
+                    }
                 }
                 ForInit::Expression(Some(expr)) => {
                     typecheck_expr(expr, &mut inner_symbols)?;

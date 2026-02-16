@@ -611,6 +611,10 @@ Chapter 15 では以下の機能を追加した:
   - グローバル配列・`static` ローカル配列: `.data` セクションに静的初期値を出力
   - 部分初期化: 明示要素数 < 配列サイズの場合、残りをゼロ初期化
   - 式初期化子: ローカル配列では `int x = 5; int arr[2] = {x, x+1};` が可能
+- **カンマ区切り複数宣言**: `int a = 1, b = 2, *p = &a;` 形式のカンマ区切り宣言に対応
+  - ローカル変数・グローバル変数・for 初期化部すべてで使用可能
+  - ポインタ・配列混在: `int x = 1, *p, arr[3] = {2, 3, 4};` — 各宣言子に同じベース型を渡し、`parse_declarator()` がポインタ/配列を個別に付加
+  - `parse_declaration()` が `Vec<Declaration>` を返し、`parse_block_item()` が `Vec<BlockItem>` に展開
 
 ### Chapter 14 の詳細
 
@@ -717,7 +721,7 @@ Chapter 12 では以下の機能を追加した:
 - [x] **可変長引数関数の呼び出し**: `printf(fmt, ...)` 等の外部可変長引数関数を呼び出し可能に
 - [ ] **可変長引数関数の定義**: `va_list`/`va_start`/`va_arg`/`va_end`
 - [x] **配列初期化子リスト**: `int arr[3] = {1, 2, 3};`
-- [ ] **カンマ区切り複数宣言**: `int a = 1, b = 2, c = 3;`
+- [x] **カンマ区切り複数宣言**: `int a = 1, b = 2, c = 3;`
 - [ ] **switch 文**: `switch`/`case`/`default`
 - [ ] **enum 型**: `enum Color { RED, GREEN, BLUE };`
 - [ ] **typedef**: 型エイリアスの定義

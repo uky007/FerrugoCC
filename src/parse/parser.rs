@@ -14,7 +14,7 @@
 //! <program>        ::= <top_level_decl>*
 //! <top_level_decl> ::= <function_decl> | <variable_decl> | <struct_decl>
 //! <function_decl>  ::= <storage_class>? <type> <declarator> "(" <params> ")" ( "{" <block>* "}" | ";" )
-//! <variable_decl>  ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ";"
+//! <variable_decl>  ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ("," <declarator> ("=" <initializer>)?)* ";"
 //! <struct_decl>    ::= "struct" <identifier> ("{" <member_decl>* "}")? ";"  ← Ch18
 //! <member_decl>    ::= <type> <declarator> ";"                ← Ch18: 構造体メンバ
 //! <declarator>     ::= "*"* <identifier> ("[" <int> "]")?      ← Ch15: 配列宣言子
@@ -25,7 +25,7 @@
 //! <storage_class>  ::= "static" | "extern"
 //! <params>         ::= "void" | <type> <declarator> ("," <type> <declarator>)* ("," "...")?
 //! <block_item>     ::= <statement> | <declaration>
-//! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ";"
+//! <declaration>    ::= <storage_class>? <type> <declarator> ("=" <initializer>)? ("," <declarator> ("=" <initializer>)?)* ";"
 //! <initializer>    ::= <assignment> | "{" <assignment> ("," <assignment>)* ","? "}"  ← Ch18
 //! <statement>      ::= "return" <exp> ";"
 //!                    | <exp> ";"
@@ -501,7 +501,7 @@ impl<'a> Parser<'a> {
     fn parse_program(&mut self) -> Result<Program> {
         let mut declarations = Vec::new();
         while self.pos < self.tokens.len() {
-            declarations.push(self.parse_top_level_decl()?);
+            declarations.extend(self.parse_top_level_decl()?);
         }
         Ok(Program { declarations })
     }
@@ -510,22 +510,23 @@ impl<'a> Parser<'a> {
     ///
     /// トップレベルでの関数 vs 変数の区別:
     /// `[static|extern]? int <id>` の後に `(` → 関数、`=` or `;` → 変数。
-    fn parse_top_level_decl(&mut self) -> Result<TopLevelDecl> {
+    /// カンマ区切り変数宣言をサポート: `int a = 1, b = 2;` → 複数の TopLevelDecl。
+    fn parse_top_level_decl(&mut self) -> Result<Vec<TopLevelDecl>> {
         let storage_class = self.parse_storage_class()?;
         let base_type = self.parse_type_specifier()?;
 
         // Chapter 18: `struct tag { ... };` — 構造体定義のみ（変数宣言なし）
         if base_type.is_struct() && self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
             self.advance()?; // consume ';'
-            return Ok(TopLevelDecl::Variable(Declaration {
+            return Ok(vec![TopLevelDecl::Variable(Declaration {
                 name: String::new(),
                 var_type: base_type,
                 init: None,
                 storage_class,
-            }));
+            })]);
         }
 
-        let (decl_type, name) = self.parse_declarator(base_type)?;
+        let (decl_type, name) = self.parse_declarator(base_type.clone())?;
 
         // `(` → 関数、`=`/`;` → 変数
         if self.peek()?.kind == TokenKind::OpenParen {
@@ -573,7 +574,7 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::OpenBrace)?;
                 let mut items = Vec::new();
                 while self.peek()?.kind != TokenKind::CloseBrace {
-                    items.push(self.parse_block_item()?);
+                    items.extend(self.parse_block_item()?);
                 }
                 self.expect(&TokenKind::CloseBrace)?;
                 Some(items)
@@ -582,12 +583,14 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            Ok(TopLevelDecl::Function(FunctionDecl { name, return_type: decl_type, params, body, storage_class, is_variadic }))
+            Ok(vec![TopLevelDecl::Function(FunctionDecl { name, return_type: decl_type, params, body, storage_class, is_variadic })])
         } else {
-            // 変数宣言
+            // 変数宣言 — カンマ区切り対応
+            let mut declarations = Vec::new();
+
+            // 最初の変数
             let init = if self.peek()?.kind == TokenKind::Assign {
                 self.advance()?;
-                // Chapter 18: 複合初期化子 `{ expr, expr, ... }`
                 if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBrace {
                     Some(self.parse_compound_init()?)
                 } else {
@@ -596,38 +599,55 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+            declarations.push(TopLevelDecl::Variable(Declaration { name, var_type: decl_type, init, storage_class }));
+
+            // カンマ区切りの追加変数
+            while self.peek()?.kind == TokenKind::Comma {
+                self.advance()?; // consume ','
+                let (var_type, name) = self.parse_declarator(base_type.clone())?;
+                let init = if self.peek()?.kind == TokenKind::Assign {
+                    self.advance()?;
+                    if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBrace {
+                        Some(self.parse_compound_init()?)
+                    } else {
+                        Some(self.parse_assignment()?)
+                    }
+                } else {
+                    None
+                };
+                declarations.push(TopLevelDecl::Variable(Declaration { name, var_type, init, storage_class }));
+            }
+
             self.expect(&TokenKind::Semicolon)?;
-            Ok(TopLevelDecl::Variable(Declaration { name, var_type: decl_type, init, storage_class }))
+            Ok(declarations)
         }
     }
 
     /// `<block_item> ::= <statement> | <declaration>`
     ///
     /// 型キーワードまたはストレージクラスで始まれば宣言、それ以外は文。
-    fn parse_block_item(&mut self) -> Result<BlockItem> {
+    /// カンマ区切り宣言は複数の `BlockItem::Declaration` に展開される。
+    fn parse_block_item(&mut self) -> Result<Vec<BlockItem>> {
         match &self.peek()?.kind {
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
             | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
             | TokenKind::KwStatic | TokenKind::KwExtern
             | TokenKind::KwStruct => {
-                // Chapter 18: struct 定義のみ（変数なし）の場合も処理
-                if self.peek()?.kind == TokenKind::KwStruct {
-                    // `struct tag { ... };` — 変数宣言なしの構造体定義の可能性
-                    // 先読み: struct tag { → 構造体定義の可能性
-                    // struct tag id → 変数宣言
-                    // struct tag; → 前方宣言
-                    // 宣言として処理すれば全てカバーされるので parse_declaration に委譲
-                }
-                Ok(BlockItem::Declaration(self.parse_declaration()?))
+                let decls = self.parse_declaration()?;
+                Ok(decls.into_iter().map(BlockItem::Declaration).collect())
             }
             _ => {
-                Ok(BlockItem::Statement(self.parse_statement()?))
+                Ok(vec![BlockItem::Statement(self.parse_statement()?)])
             }
         }
     }
 
-    /// `<declaration> ::= <storage_class>? <type_specifier> <declarator> ("=" <assignment>)? ";"`
-    fn parse_declaration(&mut self) -> Result<Declaration> {
+    /// `<declaration> ::= <storage_class>? <type_specifier> <declarator> ("=" <initializer>)? ("," <declarator> ("=" <initializer>)?)* ";"`
+    ///
+    /// カンマ区切り複数宣言をサポート。例: `int a = 1, b = 2, *p;`
+    /// `base_type.clone()` で各宣言子に同じベース型を渡し、`parse_declarator()` が
+    /// ポインタ・配列を宣言子ごとに付加する。
+    fn parse_declaration(&mut self) -> Result<Vec<Declaration>> {
         let storage_class = self.parse_storage_class()?;
         let base_type = self.parse_type_specifier()?;
 
@@ -635,16 +655,18 @@ impl<'a> Parser<'a> {
         if base_type.is_struct() && self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
             self.advance()?; // consume ';'
             // ダミー宣言を返す（コード生成では無視される）
-            return Ok(Declaration {
+            return Ok(vec![Declaration {
                 name: String::new(),
                 var_type: base_type,
                 init: None,
                 storage_class,
-            });
+            }]);
         }
 
-        let (var_type, name) = self.parse_declarator(base_type)?;
+        let mut declarations = Vec::new();
 
+        // 最初の宣言子
+        let (var_type, name) = self.parse_declarator(base_type.clone())?;
         let init = if self.peek()?.kind == TokenKind::Assign {
             self.advance()?; // consume '='
             // Chapter 18: 複合初期化子 `{ expr, expr, ... }`
@@ -656,9 +678,27 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        declarations.push(Declaration { name, var_type, init, storage_class });
+
+        // カンマ区切りの追加宣言子
+        while self.peek()?.kind == TokenKind::Comma {
+            self.advance()?; // consume ','
+            let (var_type, name) = self.parse_declarator(base_type.clone())?;
+            let init = if self.peek()?.kind == TokenKind::Assign {
+                self.advance()?; // consume '='
+                if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBrace {
+                    Some(self.parse_compound_init()?)
+                } else {
+                    Some(self.parse_assignment()?)
+                }
+            } else {
+                None
+            };
+            declarations.push(Declaration { name, var_type, init, storage_class });
+        }
 
         self.expect(&TokenKind::Semicolon)?;
-        Ok(Declaration { name, var_type, init, storage_class })
+        Ok(declarations)
     }
 
     /// 複合初期化子のパース（Chapter 18）。
@@ -725,7 +765,7 @@ impl<'a> Parser<'a> {
                 self.advance()?; // consume '{'
                 let mut items = Vec::new();
                 while self.peek()?.kind != TokenKind::CloseBrace {
-                    items.push(self.parse_block_item()?);
+                    items.extend(self.parse_block_item()?);
                 }
                 self.expect(&TokenKind::CloseBrace)?;
                 Ok(Statement::Compound(items))
@@ -761,6 +801,7 @@ impl<'a> Parser<'a> {
                     | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
                     | TokenKind::KwStatic | TokenKind::KwExtern
                     | TokenKind::KwStruct => {
+                        // parse_declaration() returns Vec<Declaration> for comma-separated decls
                         ForInit::Declaration(self.parse_declaration()?)
                     }
                     TokenKind::Semicolon => {
@@ -2058,12 +2099,12 @@ mod tests {
         let program = parse(&tokens).unwrap();
         let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
         if let BlockItem::Statement(Statement::For { init, condition, post, body: _ }) = &func.body.as_ref().unwrap()[1] {
-            assert_eq!(*init, ForInit::Declaration(Declaration {
+            assert_eq!(*init, ForInit::Declaration(vec![Declaration {
                 name: "i".to_string(),
                 var_type: Type::Int,
                 init: Some(Expr::Constant(0)),
                 storage_class: None,
-            }));
+            }]));
             assert!(condition.is_some());
             assert!(post.is_some());
         } else {
