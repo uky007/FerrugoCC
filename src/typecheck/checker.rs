@@ -82,6 +82,9 @@ pub fn typecheck(program: &mut Program) -> Result<()> {
             TopLevelDecl::Variable(var_decl) => {
                 typecheck_file_scope_var(var_decl, &mut symbols)?;
             }
+            TopLevelDecl::Typedef { .. } => {
+                // typedef はパース時に解決済み。型チェック不要。
+            }
         }
     }
 
@@ -169,6 +172,7 @@ fn typecheck_block_item(
     match item {
         BlockItem::Statement(stmt) => typecheck_statement(stmt, symbols, return_type),
         BlockItem::Declaration(decl) => typecheck_local_declaration(decl, symbols),
+        BlockItem::Typedef { .. } => Ok(()), // パース時に解決済み
     }
 }
 

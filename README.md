@@ -537,6 +537,28 @@ ASM レベルパスはレジスタ割り当て後に適用する（適用順: �
 - 反逆アセンブリはジャンプ命令の位置を変えないため安全
 - 間接コール変換は R10（caller-saved scratch）を使用し、Call の直前に挿入するため安全
 
+### typedef サポートの詳細
+
+`typedef` による型エイリアス定義を実装した:
+
+- **基本型エイリアス**: `typedef int myint;` — `myint` を `int` の別名として使用可能
+- **ポインタ typedef**: `typedef int *pint;` — `pint` は `int *` のエイリアス
+- **構造体 typedef**: `typedef struct point { int x; int y; } Point;` — 構造体タグと型名を同時に定義
+- **配列 typedef**: `typedef int arr3[3];` — 固定長配列の型名を定義
+- **ネスト typedef**: `typedef pint *ppint;` — typedef 名を使った型を再度 typedef 可能
+- **unsigned 型**: `typedef unsigned long usize_t;` — 複合型指定子のエイリアス
+- **グローバル/ブロックスコープ**: トップレベルおよび関数本体内の両方で typedef 宣言可能
+- **関数パラメータ/戻り値**: typedef 名を関数シグネチャで使用可能
+- **キャスト/sizeof**: `(myint)expr`, `sizeof(myint)` で typedef 名を認識
+- **カンマ区切り**: `typedef int myint, *pint;` で複数の型名を一度に定義
+
+実装方式:
+- パーサーに `typedef_names: HashMap<String, Type>` テーブルを追加（`struct_tags` と同様のフラット方式）
+- `parse_typedef()` が `typedef` キーワードを消費し、ベース型 + 宣言子をパースして型名テーブルに登録
+- `parse_type_specifier()` で識別子が typedef 名テーブルに存在すればその型として解決
+- AST には `TopLevelDecl::Typedef` / `BlockItem::Typedef` ノードを追加（型チェッカー・コード生成ではスキップ）
+- キャスト式・sizeof 式の先読みで typedef 名を型キーワードとして判定
+
 ### Chapter 19 の詳細
 
 Chapter 19 では TACKY IR（三番地コード中間表現）を導入した:
@@ -724,7 +746,7 @@ Chapter 12 では以下の機能を追加した:
 - [x] **カンマ区切り複数宣言**: `int a = 1, b = 2, c = 3;`
 - [ ] **switch 文**: `switch`/`case`/`default`
 - [ ] **enum 型**: `enum Color { RED, GREEN, BLUE };`
-- [ ] **typedef**: 型エイリアスの定義
+- [x] **typedef**: 型エイリアスの定義（`typedef int myint;`, `typedef struct { ... } Point;`, ポインタ・配列・ネスト対応）
 - [ ] **プリプロセッサ**: `#include`, `#define`, `#ifdef` 等
 
 ### コード難読化（Anti-Reverse Engineering）

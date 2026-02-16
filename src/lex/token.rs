@@ -74,6 +74,8 @@ pub enum TokenKind {
     KwChar,
     /// `struct` キーワード — 構造体型（Chapter 18）
     KwStruct,
+    /// `typedef` キーワード — 型エイリアス定義
+    KwTypedef,
 
     // ── 演算子 ──（Chapter 2 で追加）
     /// `-` — 単項マイナス / 二項減算

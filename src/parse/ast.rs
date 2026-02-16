@@ -245,6 +245,8 @@ pub enum TopLevelDecl {
     Function(FunctionDecl),
     /// 変数宣言
     Variable(Declaration),
+    /// typedef 宣言（パース時に型名テーブルに登録済み。コード生成不要）
+    Typedef { name: String, underlying_type: Type },
 }
 
 /// プログラム全体。トップレベル宣言の列を持つ（Chapter 10）。
@@ -279,6 +281,8 @@ pub enum BlockItem {
     Statement(Statement),
     /// 変数宣言
     Declaration(Declaration),
+    /// ブロック内 typedef 宣言（パース時に型名テーブルに登録済み。コード生成不要）
+    Typedef { name: String, underlying_type: Type },
 }
 
 /// 変数宣言（Chapter 5, 10, 11 で拡張）。

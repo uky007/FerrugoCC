@@ -519,6 +519,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "sizeof"   => TokenKind::KwSizeof,
                 "char"     => TokenKind::KwChar,
                 "struct"   => TokenKind::KwStruct,
+                "typedef"  => TokenKind::KwTypedef,
                 _        => TokenKind::Identifier(text.to_string()),
             };
             tokens.push(Token {

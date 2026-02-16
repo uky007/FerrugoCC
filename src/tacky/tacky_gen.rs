@@ -263,6 +263,7 @@ pub fn generate_tacky(program: &Program) -> Result<TackyProgram> {
                     entry.defined = true;
                 }
             }
+            TopLevelDecl::Typedef { .. } => continue,
             TopLevelDecl::Variable(var_decl) => {
                 if var_decl.name.is_empty() {
                     continue;
@@ -429,6 +430,7 @@ impl TackyGenerator {
         match item {
             BlockItem::Statement(stmt) => self.generate_statement(stmt, instrs, loop_labels, func_table),
             BlockItem::Declaration(decl) => self.generate_declaration(decl, instrs, scope_decls, func_table),
+            BlockItem::Typedef { .. } => Ok(()), // No codegen for typedef
         }
     }
 

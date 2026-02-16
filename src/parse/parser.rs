@@ -90,11 +90,13 @@ struct Parser<'a> {
     pos: usize,
     /// 構造体タグテーブル（Chapter 18）。タグ名 → メンバリスト。
     struct_tags: HashMap<String, Vec<MemberDecl>>,
+    /// typedef 名テーブル。typedef 名 → 基底型。
+    typedef_names: HashMap<String, Type>,
 }
 
 impl<'a> Parser<'a> {
     fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0, struct_tags: HashMap::new() }
+        Self { tokens, pos: 0, struct_tags: HashMap::new(), typedef_names: HashMap::new() }
     }
 
     /// 現在位置のトークンを消費せずに参照する（先読み）。
@@ -154,12 +156,27 @@ impl<'a> Parser<'a> {
         if self.pos >= self.tokens.len() {
             return false;
         }
-        matches!(
-            self.tokens[self.pos].kind,
+        match &self.tokens[self.pos].kind {
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
             | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
-            | TokenKind::KwVoid | TokenKind::KwStruct
-        )
+            | TokenKind::KwVoid | TokenKind::KwStruct => true,
+            TokenKind::Identifier(name) => self.typedef_names.contains_key(name),
+            _ => false,
+        }
+    }
+
+    /// 指定位置のトークンが型キーワードまたは typedef 名かどうかを判定する。
+    fn is_type_token_at(&self, pos: usize) -> bool {
+        if pos >= self.tokens.len() {
+            return false;
+        }
+        match &self.tokens[pos].kind {
+            TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
+            | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
+            | TokenKind::KwVoid | TokenKind::KwStruct => true,
+            TokenKind::Identifier(name) => self.typedef_names.contains_key(name),
+            _ => false,
+        }
     }
 
     /// 型指定子をパースする（Chapter 11, 12）。
@@ -338,6 +355,14 @@ impl<'a> Parser<'a> {
                     }
                     return self.parse_struct_type();
                 }
+                TokenKind::Identifier(name) if count == 0 => {
+                    // 他の型キーワードが未出現の場合のみ typedef 名として認識
+                    if let Some(ty) = self.typedef_names.get(name).cloned() {
+                        self.advance()?;
+                        return Ok(ty);
+                    }
+                    break;
+                }
                 _ => break,
             }
         }
@@ -497,6 +522,29 @@ impl<'a> Parser<'a> {
         Ok(ty)
     }
 
+    /// typedef 宣言をパースし、typedef 名テーブルに登録する。
+    /// `typedef <type> <declarator> ("," <declarator>)* ";"`
+    fn parse_typedef(&mut self) -> Result<Vec<(String, Type)>> {
+        self.advance()?; // consume 'typedef'
+        let base_type = self.parse_type_specifier()?;
+
+        let mut results = Vec::new();
+
+        let (resolved_type, name) = self.parse_declarator(base_type.clone())?;
+        self.typedef_names.insert(name.clone(), resolved_type.clone());
+        results.push((name, resolved_type));
+
+        while self.peek()?.kind == TokenKind::Comma {
+            self.advance()?;
+            let (resolved_type, name) = self.parse_declarator(base_type.clone())?;
+            self.typedef_names.insert(name.clone(), resolved_type.clone());
+            results.push((name, resolved_type));
+        }
+
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(results)
+    }
+
     /// `<program> ::= <top_level_decl>*`
     fn parse_program(&mut self) -> Result<Program> {
         let mut declarations = Vec::new();
@@ -512,6 +560,14 @@ impl<'a> Parser<'a> {
     /// `[static|extern]? int <id>` の後に `(` → 関数、`=` or `;` → 変数。
     /// カンマ区切り変数宣言をサポート: `int a = 1, b = 2;` → 複数の TopLevelDecl。
     fn parse_top_level_decl(&mut self) -> Result<Vec<TopLevelDecl>> {
+        // typedef 宣言のチェック
+        if self.peek()?.kind == TokenKind::KwTypedef {
+            let results = self.parse_typedef()?;
+            return Ok(results.into_iter()
+                .map(|(name, ty)| TopLevelDecl::Typedef { name, underlying_type: ty })
+                .collect());
+        }
+
         let storage_class = self.parse_storage_class()?;
         let base_type = self.parse_type_specifier()?;
 
@@ -633,6 +689,18 @@ impl<'a> Parser<'a> {
             | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
             | TokenKind::KwStatic | TokenKind::KwExtern
             | TokenKind::KwStruct => {
+                let decls = self.parse_declaration()?;
+                Ok(decls.into_iter().map(BlockItem::Declaration).collect())
+            }
+            TokenKind::KwTypedef => {
+                // ブロック内 typedef
+                let results = self.parse_typedef()?;
+                Ok(results.into_iter()
+                    .map(|(name, ty)| BlockItem::Typedef { name, underlying_type: ty })
+                    .collect())
+            }
+            TokenKind::Identifier(name) if self.typedef_names.contains_key(name) => {
+                // typedef 名で始まる宣言
                 let decls = self.parse_declaration()?;
                 Ok(decls.into_iter().map(BlockItem::Declaration).collect())
             }
@@ -802,6 +870,10 @@ impl<'a> Parser<'a> {
                     | TokenKind::KwStatic | TokenKind::KwExtern
                     | TokenKind::KwStruct => {
                         // parse_declaration() returns Vec<Declaration> for comma-separated decls
+                        ForInit::Declaration(self.parse_declaration()?)
+                    }
+                    TokenKind::Identifier(name) if self.typedef_names.contains_key(name) => {
+                        // typedef 名で始まる宣言
                         ForInit::Declaration(self.parse_declaration()?)
                     }
                     TokenKind::Semicolon => {
@@ -1082,30 +1154,22 @@ impl<'a> Parser<'a> {
     ///
     /// `(` の次が型キーワードならキャスト式、そうでなければ `parse_unary()` に委譲。
     fn parse_cast(&mut self) -> Result<Expr> {
-        // `(` の次が型キーワードならキャスト式
+        // `(` の次が型キーワード/typedef 名ならキャスト式
         if self.pos < self.tokens.len()
             && self.peek()?.kind == TokenKind::OpenParen
             && self.pos + 1 < self.tokens.len()
+            && self.is_type_token_at(self.pos + 1)
         {
-            // 先読み: `(` の次のトークンが型キーワードか
-            let next = &self.tokens[self.pos + 1].kind;
-            if matches!(
-                next,
-                TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
-                | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
-                | TokenKind::KwVoid | TokenKind::KwStruct
-            ) {
-                self.advance()?; // consume '('
-                let base_type = self.parse_type_specifier()?;
-                let target_type = self.parse_abstract_declarator(base_type)?;
-                self.expect(&TokenKind::CloseParen)?;
-                let inner = self.parse_cast()?; // 右結合
-                return Ok(Expr::Cast {
-                    target_type,
-                    source_type: Type::Int, // プレースホルダー。型チェッカーが設定する。
-                    expr: Box::new(inner),
-                });
-            }
+            self.advance()?; // consume '('
+            let base_type = self.parse_type_specifier()?;
+            let target_type = self.parse_abstract_declarator(base_type)?;
+            self.expect(&TokenKind::CloseParen)?;
+            let inner = self.parse_cast()?; // 右結合
+            return Ok(Expr::Cast {
+                target_type,
+                source_type: Type::Int, // プレースホルダー。型チェッカーが設定する。
+                expr: Box::new(inner),
+            });
         }
         self.parse_unary()
     }
@@ -1126,20 +1190,13 @@ impl<'a> Parser<'a> {
                 if self.pos < self.tokens.len()
                     && self.peek()?.kind == TokenKind::OpenParen
                     && self.pos + 1 < self.tokens.len()
+                    && self.is_type_token_at(self.pos + 1)
                 {
-                    let next = &self.tokens[self.pos + 1].kind;
-                    if matches!(
-                        next,
-                        TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
-                        | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
-                        | TokenKind::KwVoid | TokenKind::KwStruct
-                    ) {
-                        self.advance()?; // consume '('
-                        let base_type = self.parse_type_specifier()?;
-                        let ty = self.parse_abstract_declarator(base_type)?;
-                        self.expect(&TokenKind::CloseParen)?;
-                        return Ok(Expr::SizeOfType(ty));
-                    }
+                    self.advance()?; // consume '('
+                    let base_type = self.parse_type_specifier()?;
+                    let ty = self.parse_abstract_declarator(base_type)?;
+                    self.expect(&TokenKind::CloseParen)?;
+                    return Ok(Expr::SizeOfType(ty));
                 }
                 // sizeof expr (unary precedence)
                 let inner = self.parse_unary()?;
