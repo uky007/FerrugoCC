@@ -198,13 +198,6 @@ fn typecheck_local_declaration(
 
     symbols.insert(decl.name.clone(), SymbolType::Variable(decl.var_type.clone()));
 
-    // 配列型への初期化子は禁止（初期化子リストは未対応）
-    if decl.var_type.is_array() && decl.init.is_some() {
-        return Err(CompileError::TypeError(format!(
-            "cannot initialize array variable '{}' with scalar initializer", decl.name
-        )));
-    }
-
     if let Some(init) = &mut decl.init {
         // Chapter 18: 複合初期化子の検査
         if let Expr::CompoundInit(inits) = init {
@@ -227,9 +220,29 @@ fn typecheck_local_declaration(
                     }
                 }
                 return Ok(());
+            } else if let Type::Array(ref elem_type, count) = decl.var_type {
+                // 配列初期化子リスト: 要素数チェック + 各要素の型チェック
+                if inits.len() > count {
+                    return Err(CompileError::TypeError(format!(
+                        "too many initializers for array (expected at most {}, got {})",
+                        count, inits.len()
+                    )));
+                }
+                for init_expr in inits.iter_mut() {
+                    let init_type = typecheck_expr(init_expr, symbols)?;
+                    if init_type != **elem_type {
+                        let old = std::mem::replace(init_expr, Expr::Constant(0));
+                        *init_expr = Expr::Cast {
+                            target_type: (**elem_type).clone(),
+                            source_type: init_type,
+                            expr: Box::new(old),
+                        };
+                    }
+                }
+                return Ok(());
             } else {
                 return Err(CompileError::TypeError(
-                    "compound initializer used with non-struct type".to_string()
+                    "compound initializer used with non-struct/non-array type".to_string()
                 ));
             }
         }

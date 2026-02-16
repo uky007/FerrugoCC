@@ -92,8 +92,11 @@ pub fn generate(program: &TackyProgram) -> Result<(Vec<CodegenFunctionResult>, V
 
     // 静的変数を AsmStaticVar に変換
     let static_vars: Vec<AsmStaticVar> = program.static_vars.iter().map(|sv| {
-        let asm_type = if sv.var_type.is_struct() || sv.var_type.is_array() {
+        let asm_type = if sv.var_type.is_struct() {
             AsmType::Quadword
+        } else if sv.var_type.is_array() {
+            // 配列の asm_type は要素型を使用（初期値ディレクティブの選択に必要）
+            type_to_asm(sv.var_type.target_type().unwrap())
         } else {
             type_to_asm(&sv.var_type)
         };
@@ -135,6 +138,9 @@ fn convert_static_init(init: &TackyStaticInit) -> StaticInit {
         TackyStaticInit::StringInit(s, n) => StaticInit::StringInit(s.clone(), *n),
         TackyStaticInit::ByteArrayInit(bytes) => StaticInit::ByteArrayInit(bytes.clone()),
         TackyStaticInit::PointerArrayInit(labels) => StaticInit::PointerArrayInit(labels.clone()),
+        TackyStaticInit::ArrayInit(elems) => {
+            StaticInit::ArrayInit(elems.iter().map(convert_static_init).collect())
+        }
     }
 }
 

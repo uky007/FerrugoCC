@@ -134,6 +134,12 @@ impl TackyGenerator {
             Expr::ConstantUInt(v) => Ok(TackyStaticInit::IntInit(*v as i64)),
             Expr::ConstantULong(v) => Ok(TackyStaticInit::IntInit(*v as i64)),
             Expr::ConstantDouble(v) => Ok(TackyStaticInit::DoubleInit(*v)),
+            Expr::CompoundInit(inits) => {
+                let init_vals: Vec<TackyStaticInit> = inits.iter()
+                    .map(|e| TackyGenerator::resolve_static_init(e))
+                    .collect::<std::result::Result<_, _>>()?;
+                Ok(TackyStaticInit::ArrayInit(init_vals))
+            }
             _ => Err("must be initialized with a constant expression".to_string()),
         }
     }
@@ -508,6 +514,10 @@ impl TackyGenerator {
                         dst,
                         size: decl.var_type.size(),
                     });
+                }
+            } else if decl.var_type.is_array() {
+                if let Expr::CompoundInit(init_exprs) = init {
+                    self.generate_array_init(init_exprs, &decl.var_type, &decl.name, instrs, func_table)?;
                 }
             } else {
                 let (val, _) = self.generate_expr(init, instrs, func_table)?;
@@ -1807,6 +1817,54 @@ impl TackyGenerator {
             });
 
             member_offset += member.member_type.size();
+        }
+
+        Ok(())
+    }
+
+    /// 配列の複合初期化子（ローカル変数用）
+    fn generate_array_init(
+        &mut self,
+        init_exprs: &[Expr],
+        array_type: &Type,
+        dst_name: &str,
+        instrs: &mut Vec<TackyInstruction>,
+        func_table: &HashMap<String, FunctionInfo>,
+    ) -> Result<()> {
+        let (elem_type, count) = match array_type {
+            Type::Array(e, c) => (e, *c),
+            _ => unreachable!(),
+        };
+        let resolved_dst = self.resolve_var_name(dst_name);
+        let elem_size = elem_type.size();
+
+        // 明示的な要素を CopyToOffset で書き込み
+        for (i, init_expr) in init_exprs.iter().enumerate() {
+            let (val, _) = self.generate_expr(init_expr, instrs, func_table)?;
+            instrs.push(TackyInstruction::CopyToOffset {
+                src: val,
+                dst: resolved_dst.clone(),
+                offset: i * elem_size,
+            });
+        }
+
+        // 残りをゼロ初期化（init_exprs.len() < count の場合）
+        if init_exprs.len() < count {
+            for i in init_exprs.len()..count {
+                let zero = if **elem_type == Type::Double {
+                    TackyVal::Constant(TackyConst::Double(0.0))
+                } else {
+                    match elem_type.size() {
+                        8 => TackyVal::Constant(TackyConst::Long(0)),
+                        _ => TackyVal::Constant(TackyConst::Int(0)),
+                    }
+                };
+                instrs.push(TackyInstruction::CopyToOffset {
+                    src: zero,
+                    dst: resolved_dst.clone(),
+                    offset: i * elem_size,
+                });
+            }
         }
 
         Ok(())

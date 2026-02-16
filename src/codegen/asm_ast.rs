@@ -82,6 +82,8 @@ pub enum StaticInit {
     /// ポインタ配列初期値（難読化の CFF ジャンプテーブル用）。
     /// `.data` セクションに `.quad label0, label1, ...` として配置される。
     PointerArrayInit(Vec<String>),
+    /// 配列初期値（各要素の初期値リスト）
+    ArrayInit(Vec<StaticInit>),
 }
 
 /// 読み取り専用の静的定数（Chapter 13）。`.rodata` セクションに配置。

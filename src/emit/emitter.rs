@@ -107,6 +107,23 @@ fn emit_function(out: &mut String, func: &crate::codegen::asm_ast::AsmFunction) 
     Ok(())
 }
 
+/// StaticInit の要素サイズを返す（配列アラインメント計算用）。
+fn static_init_size(init: &StaticInit, asm_type: &AsmType) -> usize {
+    match init {
+        StaticInit::IntInit(_) => match asm_type {
+            AsmType::Byte => 1,
+            AsmType::Longword => 4,
+            _ => 8,
+        },
+        StaticInit::DoubleInit(_) => 8,
+        StaticInit::ZeroInit(n) => *n,
+        StaticInit::StringInit(_, n) => *n,
+        StaticInit::ByteArrayInit(bytes) => bytes.len(),
+        StaticInit::PointerArrayInit(labels) => labels.len() * 8,
+        StaticInit::ArrayInit(elems) => elems.iter().map(|e| static_init_size(e, asm_type)).sum(),
+    }
+}
+
 /// 静的変数のアセンブリ出力（Chapter 10, 11, 15: 型サイズ対応、配列ゼロ初期化）。
 ///
 /// 初期値が 0 の場合は `.bss` セクション、非0 の場合は `.data` セクションに配置する。
@@ -115,6 +132,15 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
     let (align, size) = match var.init {
         StaticInit::ZeroInit(n) => (16, n),  // 配列は16バイトアラインメント
         StaticInit::PointerArrayInit(ref labels) => (8, labels.len() * 8),
+        StaticInit::ArrayInit(ref elems) => {
+            let total_size: usize = elems.iter().map(|e| static_init_size(e, &var.asm_type)).sum();
+            let elem_align = match var.asm_type {
+                AsmType::Byte => 1,
+                AsmType::Longword => 4,
+                AsmType::Quadword | AsmType::Double => 8,
+            };
+            (std::cmp::max(elem_align, 16), total_size)
+        }
         _ => match var.asm_type {
             AsmType::Byte => (1, 1),
             AsmType::Longword => (4, 4),
@@ -138,6 +164,13 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
         StaticInit::ByteArrayInit(_) => false,
         // ポインタ配列は .data に配置
         StaticInit::PointerArrayInit(_) => false,
+        // 配列初期化子リスト: 全要素がゼロなら .bss に配置
+        StaticInit::ArrayInit(elems) => elems.iter().all(|e| match e {
+            StaticInit::IntInit(v) => *v == 0,
+            StaticInit::DoubleInit(_) => false,
+            StaticInit::ZeroInit(_) => true,
+            _ => false,
+        }),
     };
 
     if !is_zero {
@@ -177,6 +210,9 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
                         .map_err(|e| CompileError::EmitError(e.to_string()))?;
                 }
             }
+            StaticInit::ArrayInit(elems) => {
+                emit_array_init_data(out, elems, &var.asm_type)?;
+            }
         }
     } else {
         writeln!(out, "    .bss")
@@ -187,6 +223,33 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
             .map_err(|e| CompileError::EmitError(e.to_string()))?;
         writeln!(out, "    .zero {size}")
             .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// 配列初期化子リストのデータ出力
+fn emit_array_init_data(out: &mut String, elems: &[StaticInit], asm_type: &AsmType) -> Result<()> {
+    for elem in elems {
+        match elem {
+            StaticInit::IntInit(v) => {
+                let directive = match asm_type {
+                    AsmType::Byte => "byte",
+                    AsmType::Longword => "long",
+                    _ => "quad",
+                };
+                writeln!(out, "    .{directive} {v}")
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
+            StaticInit::DoubleInit(v) => {
+                writeln!(out, "    .quad {}", v.to_bits())
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
+            StaticInit::ZeroInit(n) => {
+                writeln!(out, "    .zero {n}")
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
+            _ => unreachable!("unsupported element type in array initializer"),
+        }
     }
     Ok(())
 }
@@ -225,6 +288,26 @@ fn emit_static_constant(out: &mut String, constant: &AsmStaticConstant) -> Resul
             for label in labels {
                 writeln!(out, "    .quad {label}")
                     .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
+        }
+        StaticInit::ArrayInit(elems) => {
+            // 静的定数の配列初期化子は想定外だが、安全のため処理
+            for elem in elems {
+                match elem {
+                    StaticInit::IntInit(v) => {
+                        writeln!(out, "    .quad {v}")
+                            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                    }
+                    StaticInit::DoubleInit(v) => {
+                        writeln!(out, "    .quad {}", v.to_bits())
+                            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                    }
+                    StaticInit::ZeroInit(n) => {
+                        writeln!(out, "    .zero {n}")
+                            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                    }
+                    _ => unreachable!("unsupported element type in array initializer"),
+                }
             }
         }
     }

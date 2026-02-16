@@ -170,6 +170,8 @@ pub enum TackyStaticInit {
     /// ポインタ配列初期値（難読化の CFF ジャンプテーブル用）。
     /// ラベルアドレスの配列を `.data` セクションに `.quad label0, label1, ...` として配置する。
     PointerArrayInit(Vec<String>),
+    /// 配列初期値（各要素の初期値リスト）
+    ArrayInit(Vec<TackyStaticInit>),
 }
 
 /// 読み取り専用の静的定数
