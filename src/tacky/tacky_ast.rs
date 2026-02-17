@@ -33,6 +33,8 @@ pub struct TackyFunction {
     pub return_type: Type,
     /// 全変数（パラメータ + ローカル + 一時変数）の型マッピング
     pub var_types: HashMap<String, Type>,
+    /// 可変長引数関数かどうか
+    pub is_variadic: bool,
 }
 
 /// TACKY 三アドレスコード命令
@@ -92,6 +94,20 @@ pub enum TackyInstruction {
     /// コード生成時は `jmp *target` のみ出力するが、レジスタ割り当ての
     /// 生存解析で正しい後続ブロック情報を提供するために使う。
     JumpIndirect { target: TackyVal, possible_targets: Vec<String> },
+    /// `va_start(ap)` — va_list の初期化
+    VaStart {
+        ap: TackyVal,
+        gp_offset_init: i32,
+        fp_offset_init: i32,
+    },
+    /// `va_arg(ap, type)` — va_list から次の引数を取得
+    VaArg {
+        ap: TackyVal,
+        dst: TackyVal,
+        arg_type: Type,
+    },
+    /// `va_end` — no-op
+    VaEnd,
 }
 
 /// TACKY 値（定数または変数）

@@ -537,6 +537,71 @@ ASM レベルパスはレジスタ割り当て後に適用する（適用順: �
 - 反逆アセンブリはジャンプ命令の位置を変えないため安全
 - 間接コール変換は R10（caller-saved scratch）を使用し、Call の直前に挿入するため安全
 
+### 可変長引数関数の定義サポートの詳細
+
+`va_list`/`va_start`/`va_arg`/`va_end` によるユーザー定義可変長引数関数を実装した。
+System V AMD64 ABI に完全準拠し、`#include <stdarg.h>` なしで使用可能（コンパイラ組み込み）。
+
+#### 対応する引数型
+
+- **整数型**: `int`, `long`, `unsigned int`, `unsigned long`（GP レジスタ経由）
+- **ポインタ型**: `int *`, `char *` 等（GP レジスタ経由）
+- **浮動小数点型**: `double`（XMM レジスタ経由）
+- **7引数以上のスタック渡し**: レジスタを超過した引数は `overflow_arg_area` から取得
+
+#### System V AMD64 ABI の va_list 構造体
+
+```
+va_list (24 bytes, align 8):
+  [0..4]   gp_offset        次の GP レジスタ引数のオフセット (0〜48)
+  [4..8]   fp_offset        次の XMM レジスタ引数のオフセット (48〜176)
+  [8..16]  overflow_arg_area スタック渡し引数へのポインタ
+  [16..24] reg_save_area    レジスタ保存領域へのポインタ
+```
+
+#### レジスタ保存領域 (176 bytes)
+
+可変長関数の入口で、パラメータ受け取り前に全引数レジスタを保存:
+
+```
+offset 0-47:   GP レジスタ (rdi, rsi, rdx, rcx, r8, r9) × 8B = 48B
+offset 48-175: XMM レジスタ (xmm0-xmm7) × 16B = 128B
+```
+
+#### va_arg の分岐ロジック
+
+整数型:
+```
+if gp_offset < 48:
+    val = reg_save_area[gp_offset]   // レジスタ保存領域から取得
+    gp_offset += 8
+else:
+    val = *overflow_arg_area          // スタックから取得
+    overflow_arg_area += 8
+```
+
+浮動小数点型:
+```
+if fp_offset < 176:
+    val = reg_save_area[fp_offset]   // XMM 保存領域から取得
+    fp_offset += 16
+else:
+    val = *overflow_arg_area          // スタックから取得
+    overflow_arg_area += 8
+```
+
+#### 実装範囲
+
+- **AST**: `Type::VaList`（24B, align 8）、`Expr::VaStart`/`VaArg`/`VaEnd`
+- **パーサー**: `va_list` を型トークンとして認識（ブロック内宣言・for 初期化部・キャスト・sizeof で使用可能）。
+  `va_start`/`va_arg`/`va_end` を特殊識別子としてパース
+- **型チェッカー**: 引数が `va_list` 型であることを検証
+- **TACKY IR**: `VaStart { gp_offset_init, fp_offset_init }`、`VaArg { arg_type }`、`VaEnd`（no-op）
+- **コード生成**: va_arg の分岐ロジックをインライン展開（Cmp + JmpCC + Mov + Lea + Binary）
+- **レジスタ割り当て**: `VaList` 型変数を強制スタック配置。`__va_reg_save` は `Array(UChar, 176)` として管理
+- **スタックフレーム修正**: `insert_prologue_epilogue` で全 `Stack()` オペランドをスキャンし、
+  強制スタック変数を含む正確なフレームサイズを計算（`scan_min_stack_offset`）
+
 ### typedef サポートの詳細
 
 `typedef` による型エイリアス定義を実装した:
@@ -702,13 +767,31 @@ Chapter 12 では以下の機能を追加した:
   - `...` トークンのレキシング、パラメータリスト末尾の `, ...` パース
   - 可変長関数呼び出し時に `%al` に XMM レジスタ引数数をセット（System V ABI 準拠）
   - デフォルト引数昇格（`char` → `int`）
-  - 可変長引数関数の **定義**（`va_list`/`va_start`/`va_arg`/`va_end`）は未対応
   ```c
   int printf(char *fmt, ...);
   int main(void) {
       printf("%d %.2f %s\n", 42, 3.14, "hello");
       return 0;
   }
+  ```
+- **可変長引数関数の定義**: `va_list`/`va_start`/`va_arg`/`va_end` によるユーザー定義の可変長引数関数
+  - System V AMD64 ABI 準拠の `va_list` 構造体（24バイト: `gp_offset`, `fp_offset`, `overflow_arg_area`, `reg_save_area`）
+  - 関数入口で全引数レジスタ（GP 6個 + XMM 8個）を 176バイトのレジスタ保存領域に退避
+  - `va_arg` で整数型（`int`, `long`, ポインタ）と浮動小数点型（`double`）の両方に対応
+  - レジスタ渡し引数（GP: `gp_offset < 48`、XMM: `fp_offset < 176`）とスタック渡し引数（`overflow_arg_area`）の自動切り替え
+  - `#include <stdarg.h>` 不要（コンパイラ組み込み）
+  ```c
+  int my_sum(int count, ...) {
+      va_list ap;
+      va_start(ap, count);
+      int sum = 0;
+      for (int i = 0; i < count; i = i + 1) {
+          sum = sum + va_arg(ap, int);
+      }
+      va_end(ap);
+      return sum;
+  }
+  int main(void) { return my_sum(3, 10, 20, 12); }  // 42
   ```
 
 ### Chapter 8 の詳細
@@ -741,7 +824,7 @@ Chapter 12 では以下の機能を追加した:
 ### 言語機能の拡充
 
 - [x] **可変長引数関数の呼び出し**: `printf(fmt, ...)` 等の外部可変長引数関数を呼び出し可能に
-- [ ] **可変長引数関数の定義**: `va_list`/`va_start`/`va_arg`/`va_end`
+- [x] **可変長引数関数の定義**: `va_list`/`va_start`/`va_arg`/`va_end`（System V AMD64 ABI 準拠、int/long/double/ポインタ対応）
 - [x] **配列初期化子リスト**: `int arr[3] = {1, 2, 3};`
 - [x] **カンマ区切り複数宣言**: `int a = 1, b = 2, c = 3;`
 - [ ] **switch 文**: `switch`/`case`/`default`

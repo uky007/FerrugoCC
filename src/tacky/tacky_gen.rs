@@ -54,6 +54,8 @@ struct TackyGenerator {
     string_constants: Vec<(String, String)>,
     /// static 変数リスト
     static_vars: Vec<TackyStaticVar>,
+    /// 現在の関数の名前付きパラメータ型リスト（va_start で gp/fp offset 計算に使用）
+    current_func_params: Vec<Type>,
 }
 
 impl TackyGenerator {
@@ -69,6 +71,7 @@ impl TackyGenerator {
             double_constants: HashMap::new(),
             string_constants: Vec::new(),
             static_vars: Vec::new(),
+            current_func_params: Vec::new(),
         }
     }
 
@@ -225,6 +228,8 @@ fn expr_type(
             }
         }
         Expr::CompoundInit(_) => Type::Int,
+        Expr::VaStart(_) | Expr::VaEnd(_) => Type::Void,
+        Expr::VaArg { arg_type, .. } => arg_type.clone(),
     }
 }
 
@@ -374,6 +379,7 @@ impl TackyGenerator {
         self.temp_counter = 0;
         self.var_types = HashMap::new();
         self.var_map = global_var_map.clone();
+        self.current_func_params = func.params.iter().map(|(t, _)| t.clone()).collect();
 
         let params: Vec<String> = func.params.iter().map(|(_, name)| name.clone()).collect();
 
@@ -416,6 +422,7 @@ impl TackyGenerator {
             body: instrs,
             return_type: func.return_type.clone(),
             var_types: self.var_types.clone(),
+            is_variadic: func.is_variadic,
         })
     }
 
@@ -1161,6 +1168,47 @@ impl TackyGenerator {
 
             Expr::CompoundInit(_) => {
                 unreachable!("CompoundInit should be handled in generate_declaration")
+            }
+
+            Expr::VaStart(ap) => {
+                let (ap_val, _) = self.generate_expr(ap, instrs, func_table)?;
+
+                // 現在の関数の名前付きパラメータから gp/fp offset を計算
+                let mut named_gp_count: i32 = 0;
+                let mut named_xmm_count: i32 = 0;
+                for param_type in &self.current_func_params {
+                    if param_type.is_double() {
+                        if named_xmm_count < 8 { named_xmm_count += 1; }
+                    } else {
+                        if named_gp_count < 6 { named_gp_count += 1; }
+                    }
+                }
+                let gp_offset_init = named_gp_count * 8;
+                let fp_offset_init = 48 + named_xmm_count * 16;
+
+                instrs.push(TackyInstruction::VaStart {
+                    ap: ap_val,
+                    gp_offset_init,
+                    fp_offset_init,
+                });
+                Ok((TackyVal::Constant(TackyConst::Int(0)), Type::Void))
+            }
+
+            Expr::VaArg { ap, arg_type } => {
+                let (ap_val, _) = self.generate_expr(ap, instrs, func_table)?;
+
+                let dst = self.new_temp(arg_type.clone());
+                instrs.push(TackyInstruction::VaArg {
+                    ap: ap_val,
+                    dst: dst.clone(),
+                    arg_type: arg_type.clone(),
+                });
+                Ok((dst, arg_type.clone()))
+            }
+
+            Expr::VaEnd(_ap) => {
+                instrs.push(TackyInstruction::VaEnd);
+                Ok((TackyVal::Constant(TackyConst::Int(0)), Type::Void))
             }
         }
     }

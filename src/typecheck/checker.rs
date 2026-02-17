@@ -1114,6 +1114,30 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 "compound initializer not allowed in expression context".to_string()
             ))
         }
+
+        Expr::VaStart(ap) => {
+            let ap_type = typecheck_expr(ap, symbols)?;
+            if ap_type != Type::VaList {
+                return Err(CompileError::TypeError("va_start requires va_list argument".into()));
+            }
+            Ok(Type::Void)
+        }
+
+        Expr::VaArg { ap, arg_type } => {
+            let ap_type = typecheck_expr(ap, symbols)?;
+            if ap_type != Type::VaList {
+                return Err(CompileError::TypeError("va_arg requires va_list argument".into()));
+            }
+            Ok(arg_type.clone())
+        }
+
+        Expr::VaEnd(ap) => {
+            let ap_type = typecheck_expr(ap, symbols)?;
+            if ap_type != Type::VaList {
+                return Err(CompileError::TypeError("va_end requires va_list argument".into()));
+            }
+            Ok(Type::Void)
+        }
     }
 }
 

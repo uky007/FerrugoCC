@@ -38,6 +38,7 @@ fn type_to_asm(t: &Type) -> AsmType {
         Type::Pointer(_) => AsmType::Quadword,
         Type::Array(_, _) => AsmType::Quadword,
         Type::Struct { .. } => unreachable!("struct has no single AsmType"),
+        Type::VaList => AsmType::Quadword,
     }
 }
 
@@ -206,9 +207,9 @@ fn collect_forced_stack_vars(func: &TackyFunction) -> HashSet<String> {
         }
     }
 
-    // 構造体/配列型の変数もスタックに強制配置
+    // 構造体/配列型/va_list型の変数もスタックに強制配置
     for (name, ty) in &func.var_types {
-        if ty.is_struct() || ty.is_array() {
+        if ty.is_struct() || ty.is_array() || ty.is_va_list() {
             forced.insert(name.clone());
         }
     }
@@ -227,6 +228,18 @@ fn generate_function(
     // スタックに強制配置する変数のオフセットを計算
     let mut stack_vars: HashMap<String, i32> = HashMap::new();
     let mut next_offset: i32 = 0;
+    let mut var_types = func.var_types.clone();
+
+    // 可変長関数: レジスタ保存領域（176B）をスタックに確保
+    if func.is_variadic {
+        // __va_reg_save: 176B (6 GP×8B + 8 XMM×16B), align 16
+        next_offset -= 176;
+        if next_offset % 16 != 0 {
+            next_offset -= 16 + (next_offset % 16);
+        }
+        stack_vars.insert("__va_reg_save".to_string(), next_offset);
+        var_types.insert("__va_reg_save".to_string(), Type::Array(Box::new(Type::UChar), 176));
+    }
 
     // 1. 強制スタック変数を割り当て（パラメータ含む）
     for (name, ty) in &func.var_types {
@@ -239,7 +252,7 @@ fn generate_function(
         if ty.is_void() {
             continue;
         }
-        let (size, align) = if ty.is_struct() || ty.is_array() {
+        let (size, align) = if ty.is_struct() || ty.is_array() || ty.is_va_list() {
             (ty.size() as i32, ty.alignment() as i32)
         } else {
             let at = safe_asm_type(ty);
@@ -251,6 +264,27 @@ fn generate_function(
             next_offset -= align + (next_offset % align);
         }
         stack_vars.insert(name.clone(), next_offset);
+    }
+
+    // 可変長関数: レジスタ保存領域に全引数レジスタを保存（パラメータ受け取り前に）
+    if func.is_variadic {
+        let reg_save_offset = *stack_vars.get("__va_reg_save").unwrap();
+        // GP レジスタ保存 (6個 × 8B = 48B)
+        for (i, &reg) in ARG_REGISTERS.iter().enumerate() {
+            instructions.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(reg),
+                dst: Operand::Stack(reg_save_offset + (i * 8) as i32),
+            });
+        }
+        // XMM レジスタ保存 (8個 × 16B = 128B, offset 48 以降)
+        for (i, &reg) in XMM_ARG_REGISTERS.iter().enumerate() {
+            instructions.push(Instruction::Mov {
+                asm_type: AsmType::Double,
+                src: Operand::Register(reg),
+                dst: Operand::Stack(reg_save_offset + 48 + (i * 16) as i32),
+            });
+        }
     }
 
     // 2. パラメータの処理（Pseudo or Stack）
@@ -268,18 +302,48 @@ fn generate_function(
         let (_, ref loc) = classification.locations[i];
         match loc {
             ParamLocation::IntReg(idx) => {
-                instructions.push(Instruction::Mov {
-                    asm_type,
-                    src: Operand::Register(ARG_REGISTERS[*idx]),
-                    dst: dst_op,
-                });
+                // 可変長関数の場合、レジスタは既にreg_save_areaに保存済み。
+                // パラメータはreg_save_areaからロードする。
+                if func.is_variadic {
+                    let reg_save_offset = *stack_vars.get("__va_reg_save").unwrap();
+                    instructions.push(Instruction::Mov {
+                        asm_type: AsmType::Quadword,
+                        src: Operand::Stack(reg_save_offset + (*idx * 8) as i32),
+                        dst: Operand::Register(Reg::R10),
+                    });
+                    instructions.push(Instruction::Mov {
+                        asm_type,
+                        src: Operand::Register(Reg::R10),
+                        dst: dst_op,
+                    });
+                } else {
+                    instructions.push(Instruction::Mov {
+                        asm_type,
+                        src: Operand::Register(ARG_REGISTERS[*idx]),
+                        dst: dst_op,
+                    });
+                }
             }
             ParamLocation::XmmReg(idx) => {
-                instructions.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
-                    src: Operand::Register(XMM_ARG_REGISTERS[*idx]),
-                    dst: dst_op,
-                });
+                if func.is_variadic {
+                    let reg_save_offset = *stack_vars.get("__va_reg_save").unwrap();
+                    instructions.push(Instruction::Mov {
+                        asm_type: AsmType::Double,
+                        src: Operand::Stack(reg_save_offset + 48 + (*idx * 16) as i32),
+                        dst: Operand::Register(Reg::XMM15),
+                    });
+                    instructions.push(Instruction::Mov {
+                        asm_type: AsmType::Double,
+                        src: Operand::Register(Reg::XMM15),
+                        dst: dst_op,
+                    });
+                } else {
+                    instructions.push(Instruction::Mov {
+                        asm_type: AsmType::Double,
+                        src: Operand::Register(XMM_ARG_REGISTERS[*idx]),
+                        dst: dst_op,
+                    });
+                }
             }
             ParamLocation::Stack(stack_offset) => {
                 // Stack-passed parameters: need a scratch register to copy
@@ -311,8 +375,9 @@ fn generate_function(
     }
 
     // 3. TACKY 命令を変換
+    let mut va_label_counter: usize = 0;
     for instr in &func.body {
-        generate_instruction(instr, static_vars, &stack_vars, &mut instructions, double_constants, &func.var_types)?;
+        generate_instruction(instr, static_vars, &stack_vars, &mut instructions, double_constants, &func.var_types, &mut va_label_counter)?;
     }
 
     Ok(CodegenFunctionResult {
@@ -321,7 +386,7 @@ fn generate_function(
             instructions,
             global: func.global,
         },
-        var_types: func.var_types.clone(),
+        var_types,
     })
 }
 
@@ -421,6 +486,7 @@ fn generate_instruction(
     instrs: &mut Vec<Instruction>,
     double_constants: &mut HashMap<u64, (String, usize)>,
     var_types: &HashMap<String, Type>,
+    va_label_counter: &mut usize,
 ) -> Result<()> {
     let mut const_counter: usize = double_constants.len();
 
@@ -1073,6 +1139,180 @@ fn generate_instruction(
                 });
                 copied += 1;
             }
+        }
+
+        TackyInstruction::VaStart { ap, gp_offset_init, fp_offset_init } => {
+            let ap_name = match ap { TackyVal::Var(n) => n.as_str(), _ => unreachable!() };
+            let ap_offset = *stack_vars.get(ap_name).expect("va_list must be on stack");
+
+            // gp_offset (offset 0, 4 bytes)
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Longword,
+                src: Operand::Imm(*gp_offset_init as i64),
+                dst: Operand::Stack(ap_offset),
+            });
+
+            // fp_offset (offset 4, 4 bytes)
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Longword,
+                src: Operand::Imm(*fp_offset_init as i64),
+                dst: Operand::Stack(ap_offset + 4),
+            });
+
+            // overflow_arg_area (offset 8, 8 bytes) = RBP + 16
+            // Stack(16) is the first stack-passed argument location (RBP + 16 after fixup)
+            instrs.push(Instruction::Lea {
+                src: Operand::Stack(16),
+                dst: Operand::Register(Reg::R10),
+            });
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::R10),
+                dst: Operand::Stack(ap_offset + 8),
+            });
+
+            // reg_save_area (offset 16, 8 bytes) = &__va_reg_save
+            let reg_save_offset = *stack_vars.get("__va_reg_save").expect("__va_reg_save must be on stack");
+            instrs.push(Instruction::Lea {
+                src: Operand::Stack(reg_save_offset),
+                dst: Operand::Register(Reg::R10),
+            });
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::R10),
+                dst: Operand::Stack(ap_offset + 16),
+            });
+        }
+
+        TackyInstruction::VaArg { ap, dst, arg_type } => {
+            let ap_name = match ap { TackyVal::Var(n) => n.as_str(), _ => unreachable!() };
+            let ap_offset = *stack_vars.get(ap_name).expect("va_list must be on stack");
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+
+            let is_fp = arg_type.is_double();
+            let (offset_field, limit, step): (i32, i64, i64) = if is_fp {
+                (4, 176, 16)  // fp_offset field
+            } else {
+                (0, 48, 8)    // gp_offset field
+            };
+
+            let reg_label = format!(".Lva_reg_{}", *va_label_counter);
+            let end_label = format!(".Lva_end_{}", *va_label_counter);
+            *va_label_counter += 1;
+
+            let asm_type = safe_asm_type(arg_type);
+
+            // Load current offset
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Longword,
+                src: Operand::Stack(ap_offset + offset_field),
+                dst: Operand::Register(Reg::R10),
+            });
+            // Compare with limit
+            instrs.push(Instruction::Cmp {
+                asm_type: AsmType::Longword,
+                src: Operand::Imm(limit),
+                dst: Operand::Register(Reg::R10),
+            });
+            instrs.push(Instruction::JmpCC(CondCode::L, reg_label.clone()));
+
+            // === overflow path ===
+            // Load overflow_arg_area
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Stack(ap_offset + 8),
+                dst: Operand::Register(Reg::R10),
+            });
+            // Load value from overflow area
+            if is_fp {
+                instrs.push(Instruction::Mov {
+                    asm_type: AsmType::Double,
+                    src: Operand::Memory(Reg::R10),
+                    dst: Operand::Register(Reg::XMM15),
+                });
+                instrs.push(Instruction::Mov {
+                    asm_type: AsmType::Double,
+                    src: Operand::Register(Reg::XMM15),
+                    dst: dst_op.clone(),
+                });
+            } else {
+                instrs.push(Instruction::Mov {
+                    asm_type: AsmType::Quadword,
+                    src: Operand::Memory(Reg::R10),
+                    dst: Operand::Register(Reg::R11),
+                });
+                instrs.push(Instruction::Mov {
+                    asm_type,
+                    src: Operand::Register(Reg::R11),
+                    dst: dst_op.clone(),
+                });
+            }
+            // Advance overflow_arg_area by 8
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Quadword,
+                op: AsmBinaryOp::Add,
+                src: Operand::Imm(8),
+                dst: Operand::Stack(ap_offset + 8),
+            });
+            instrs.push(Instruction::Jmp(end_label.clone()));
+
+            // === register path ===
+            instrs.push(Instruction::Label(reg_label));
+            // Load reg_save_area base address
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Stack(ap_offset + 16),
+                dst: Operand::Register(Reg::R11),
+            });
+            // R10 still has the offset (sign-extended from 32-bit to 64-bit)
+            instrs.push(Instruction::Movsx {
+                src: Operand::Register(Reg::R10),
+                dst: Operand::Register(Reg::R10),
+            });
+            // R11 = reg_save_area + offset
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Quadword,
+                op: AsmBinaryOp::Add,
+                src: Operand::Register(Reg::R10),
+                dst: Operand::Register(Reg::R11),
+            });
+            // Load value
+            if is_fp {
+                instrs.push(Instruction::Mov {
+                    asm_type: AsmType::Double,
+                    src: Operand::Memory(Reg::R11),
+                    dst: Operand::Register(Reg::XMM15),
+                });
+                instrs.push(Instruction::Mov {
+                    asm_type: AsmType::Double,
+                    src: Operand::Register(Reg::XMM15),
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Mov {
+                    asm_type: AsmType::Quadword,
+                    src: Operand::Memory(Reg::R11),
+                    dst: Operand::Register(Reg::R11),
+                });
+                instrs.push(Instruction::Mov {
+                    asm_type,
+                    src: Operand::Register(Reg::R11),
+                    dst: dst_op,
+                });
+            }
+            // Advance the offset field
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Longword,
+                op: AsmBinaryOp::Add,
+                src: Operand::Imm(step),
+                dst: Operand::Stack(ap_offset + offset_field),
+            });
+
+            instrs.push(Instruction::Label(end_label));
+        }
+
+        TackyInstruction::VaEnd => {
+            // No-op
         }
     }
 

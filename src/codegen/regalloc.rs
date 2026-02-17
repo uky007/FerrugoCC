@@ -1281,7 +1281,14 @@ fn insert_prologue_epilogue(
     // その後 callee-saved push が callee_count * 8 バイト。
     // RSP を 0 mod 16 に保つには callee_count * 8 + alloc_size が 16 の倍数である必要がある。
     let callee_bytes = callee_count * 8;
-    let total = callee_bytes + spill_bytes;
+
+    // 全命令の Stack() オペランドをスキャンし、最も深い負オフセットを取得。
+    // これはスピル変数と強制スタック変数の両方を含む実際のスタック使用量を反映する。
+    let min_stack_offset = scan_min_stack_offset(&instructions);
+    let stack_bytes_from_scan = if min_stack_offset < 0 { (-min_stack_offset) as usize } else { 0 };
+    let needed_stack = std::cmp::max(spill_bytes, stack_bytes_from_scan);
+
+    let total = callee_bytes + needed_stack;
     let aligned_total = (total + 15) & !15;
     let alloc_size = aligned_total - callee_bytes;
 
@@ -1429,6 +1436,22 @@ fn shift_stack_offsets(instr: Instruction, shift: i32) -> Instruction {
 // ────────────────────────────────────────────
 // ユーティリティ
 // ────────────────────────────────────────────
+
+/// 全命令の Stack() オペランドをスキャンし、最も深い（最も負の）オフセットを返す。
+/// Stack() オペランドがない場合は 0 を返す。
+fn scan_min_stack_offset(instructions: &[Instruction]) -> i32 {
+    let mut min_offset: i32 = 0;
+    for instr in instructions {
+        for_each_operand(instr, |op| {
+            if let Operand::Stack(offset) = op {
+                if *offset < min_offset {
+                    min_offset = *offset;
+                }
+            }
+        });
+    }
+    min_offset
+}
 
 /// 命令の全オペランドに対してクロージャを適用
 fn for_each_operand<F: FnMut(&Operand)>(instr: &Instruction, mut f: F) {

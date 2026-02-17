@@ -90,6 +90,8 @@ pub enum Type {
     /// 構造体型（Chapter 18）。tag 名とメンバリストを保持。
     /// members が空の場合は前方宣言（不完全型）。
     Struct { tag: String, members: Vec<MemberDecl> },
+    /// `va_list` 型 — 可変長引数アクセス用の24バイト構造体（System V AMD64 ABI）
+    VaList,
 }
 
 /// 構造体メンバ宣言（Chapter 18）。
@@ -118,6 +120,11 @@ impl Type {
             Type::Struct { members, .. } => members.is_empty(),
             _ => false,
         }
+    }
+
+    /// va_list 型かどうかを判定する。
+    pub fn is_va_list(&self) -> bool {
+        matches!(self, Type::VaList)
     }
 
     /// 符号なし型かどうかを判定する。
@@ -168,6 +175,7 @@ impl Type {
                 }
                 struct_size(members)
             }
+            Type::VaList => 24,
         }
     }
 
@@ -185,6 +193,7 @@ impl Type {
                 }
                 struct_alignment(members)
             }
+            Type::VaList => 8,
         }
     }
 }
@@ -416,6 +425,12 @@ pub enum Expr {
     Dot(Box<Expr>, String),
     /// 複合初期化子（Chapter 18）。`{ expr, expr, ... }`
     CompoundInit(Vec<Expr>),
+    /// `va_start(ap)` — va_list の初期化
+    VaStart(Box<Expr>),
+    /// `va_arg(ap, type)` — va_list から次の引数を取得
+    VaArg { ap: Box<Expr>, arg_type: Type },
+    /// `va_end(ap)` — va_list の終了処理（no-op）
+    VaEnd(Box<Expr>),
 }
 
 /// 単項演算子の種類（Chapter 2）。

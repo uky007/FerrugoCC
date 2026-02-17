@@ -341,6 +341,7 @@ fn generate_strlen(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         body,
         return_type: Type::Long,
         var_types,
+        is_variadic: false,
     }
 }
 
@@ -469,6 +470,7 @@ fn generate_strcmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         body,
         return_type: Type::Int,
         var_types,
+        is_variadic: false,
     }
 }
 
@@ -571,6 +573,7 @@ fn generate_strcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         body,
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
+        is_variadic: false,
     }
 }
 
@@ -675,6 +678,7 @@ fn generate_memcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         body,
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
+        is_variadic: false,
     }
 }
 
@@ -771,6 +775,7 @@ fn generate_memset(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         body,
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
+        is_variadic: false,
     }
 }
 
@@ -894,6 +899,7 @@ fn generate_memcmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         body,
         return_type: Type::Int,
         var_types,
+        is_variadic: false,
     }
 }
 
@@ -1024,6 +1030,7 @@ fn generate_strncmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         body,
         return_type: Type::Int,
         var_types,
+        is_variadic: false,
     }
 }
 
@@ -1176,6 +1183,7 @@ fn generate_strncpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         body,
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
+        is_variadic: false,
     }
 }
 
@@ -1287,6 +1295,7 @@ fn generate_strchr(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         body,
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
+        is_variadic: false,
     }
 }
 
@@ -1425,6 +1434,7 @@ fn generate_strcat(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         body,
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
+        is_variadic: false,
     }
 }
 
@@ -1700,6 +1710,13 @@ fn rename_instruction(
             target: rv(target),
             possible_targets: possible_targets.iter().map(|l| rl(l)).collect(),
         },
+        TackyInstruction::VaStart { ap, gp_offset_init, fp_offset_init } => TackyInstruction::VaStart {
+            ap: rv(ap), gp_offset_init: *gp_offset_init, fp_offset_init: *fp_offset_init,
+        },
+        TackyInstruction::VaArg { ap, dst, arg_type } => TackyInstruction::VaArg {
+            ap: rv(ap), dst: rv(dst), arg_type: arg_type.clone(),
+        },
+        TackyInstruction::VaEnd => TackyInstruction::VaEnd,
     }
 }
 
@@ -1920,6 +1937,9 @@ fn instruction_all_operands(instr: &TackyInstruction) -> Vec<&TackyVal> {
         TackyInstruction::CopyFromOffset { dst, .. } => vec![dst],
         TackyInstruction::CopyStruct { src, dst, .. } => vec![src, dst],
         TackyInstruction::JumpIndirect { target, .. } => vec![target],
+        TackyInstruction::VaStart { ap, .. } => vec![ap],
+        TackyInstruction::VaArg { ap, dst, .. } => vec![ap, dst],
+        TackyInstruction::VaEnd => vec![],
     }
 }
 
@@ -2007,6 +2027,7 @@ fn build_outlined_function(
         body,
         return_type: output_type.clone(),
         var_types,
+        is_variadic: false,
     }
 }
 

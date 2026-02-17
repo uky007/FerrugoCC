@@ -160,7 +160,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
             | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
             | TokenKind::KwVoid | TokenKind::KwStruct => true,
-            TokenKind::Identifier(name) => self.typedef_names.contains_key(name),
+            TokenKind::Identifier(name) => name == "va_list" || self.typedef_names.contains_key(name),
             _ => false,
         }
     }
@@ -174,7 +174,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
             | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
             | TokenKind::KwVoid | TokenKind::KwStruct => true,
-            TokenKind::Identifier(name) => self.typedef_names.contains_key(name),
+            TokenKind::Identifier(name) => name == "va_list" || self.typedef_names.contains_key(name),
             _ => false,
         }
     }
@@ -356,6 +356,11 @@ impl<'a> Parser<'a> {
                     return self.parse_struct_type();
                 }
                 TokenKind::Identifier(name) if count == 0 => {
+                    // va_list を型として認識
+                    if name == "va_list" {
+                        self.advance()?;
+                        return Ok(Type::VaList);
+                    }
                     // 他の型キーワードが未出現の場合のみ typedef 名として認識
                     if let Some(ty) = self.typedef_names.get(name).cloned() {
                         self.advance()?;
@@ -699,8 +704,8 @@ impl<'a> Parser<'a> {
                     .map(|(name, ty)| BlockItem::Typedef { name, underlying_type: ty })
                     .collect())
             }
-            TokenKind::Identifier(name) if self.typedef_names.contains_key(name) => {
-                // typedef 名で始まる宣言
+            TokenKind::Identifier(name) if name == "va_list" || self.typedef_names.contains_key(name) => {
+                // typedef 名または va_list で始まる宣言
                 let decls = self.parse_declaration()?;
                 Ok(decls.into_iter().map(BlockItem::Declaration).collect())
             }
@@ -872,8 +877,8 @@ impl<'a> Parser<'a> {
                         // parse_declaration() returns Vec<Declaration> for comma-separated decls
                         ForInit::Declaration(self.parse_declaration()?)
                     }
-                    TokenKind::Identifier(name) if self.typedef_names.contains_key(name) => {
-                        // typedef 名で始まる宣言
+                    TokenKind::Identifier(name) if name == "va_list" || self.typedef_names.contains_key(name) => {
+                        // typedef 名または va_list で始まる宣言
                         ForInit::Declaration(self.parse_declaration()?)
                     }
                     TokenKind::Semicolon => {
@@ -1366,6 +1371,39 @@ impl<'a> Parser<'a> {
                 let token = self.advance()?;
                 if let TokenKind::Identifier(name) = &token.kind {
                     let name = name.clone();
+
+                    // va_start(ap, last_named_param)
+                    if name == "va_start" {
+                        self.expect(&TokenKind::OpenParen)?;
+                        let ap = self.parse_assignment()?;
+                        // 第2引数（最後の名前付きパラメータ）は無視（ABI で不要）
+                        if self.peek()?.kind == TokenKind::Comma {
+                            self.advance()?;
+                            self.parse_assignment()?; // 読み捨て
+                        }
+                        self.expect(&TokenKind::CloseParen)?;
+                        return Ok(Expr::VaStart(Box::new(ap)));
+                    }
+
+                    // va_arg(ap, type)
+                    if name == "va_arg" {
+                        self.expect(&TokenKind::OpenParen)?;
+                        let ap = self.parse_assignment()?;
+                        self.expect(&TokenKind::Comma)?;
+                        let arg_type = self.parse_type_specifier()?;
+                        let arg_type = self.parse_abstract_declarator(arg_type)?;
+                        self.expect(&TokenKind::CloseParen)?;
+                        return Ok(Expr::VaArg { ap: Box::new(ap), arg_type });
+                    }
+
+                    // va_end(ap)
+                    if name == "va_end" {
+                        self.expect(&TokenKind::OpenParen)?;
+                        let ap = self.parse_assignment()?;
+                        self.expect(&TokenKind::CloseParen)?;
+                        return Ok(Expr::VaEnd(Box::new(ap)));
+                    }
+
                     // 関数呼び出し: <identifier> "(" <args>? ")"
                     if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
                         self.advance()?; // consume '('
