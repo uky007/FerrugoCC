@@ -520,6 +520,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "char"     => TokenKind::KwChar,
                 "struct"   => TokenKind::KwStruct,
                 "typedef"  => TokenKind::KwTypedef,
+                "enum"     => TokenKind::KwEnum,
+                "switch"   => TokenKind::KwSwitch,
+                "case"     => TokenKind::KwCase,
+                "default"  => TokenKind::KwDefault,
                 _        => TokenKind::Identifier(text.to_string()),
             };
             tokens.push(Token {

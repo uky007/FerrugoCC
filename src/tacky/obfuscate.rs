@@ -2706,15 +2706,15 @@ fn opaque_predicates(
     let mut result = Vec::new();
     let mut candidate_count = 0;
 
-    for instr in instrs {
-        if is_value_producing(&instr) {
+    for (_idx, instr) in instrs.iter().enumerate() {
+        if is_value_producing(instr) {
             candidate_count += 1;
             if candidate_count % freq == 0 {
-                result.extend(wrap_with_opaque_predicate(instr, ctx, var_types));
+                result.extend(wrap_with_opaque_predicate(instr.clone(), ctx, var_types));
                 continue;
             }
         }
-        result.push(instr);
+        result.push(instr.clone());
     }
 
     result
@@ -3561,6 +3561,7 @@ fn control_flow_flattening(
                     dst: TackyVal::Var(state_var.clone()),
                 });
                 result.push(TackyInstruction::Jump(dispatch_label.clone()));
+            } else {
             }
         }
     }

@@ -349,6 +349,12 @@ pub enum Statement {
     Break,
     /// `continue;` — ループ継続（Chapter 8）
     Continue,
+    /// `switch (expr) body` — 多分岐文
+    Switch { expr: Expr, body: Box<Statement> },
+    /// `case value: body` — switch のケースラベル
+    Case { value: i64, body: Box<Statement> },
+    /// `default: body` — switch のデフォルトラベル
+    Default(Box<Statement>),
 }
 
 /// forループの初期化部（Chapter 8）。

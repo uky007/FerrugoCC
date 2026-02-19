@@ -92,11 +92,23 @@ struct Parser<'a> {
     struct_tags: HashMap<String, Vec<MemberDecl>>,
     /// typedef 名テーブル。typedef 名 → 基底型。
     typedef_names: HashMap<String, Type>,
+    /// enum 定数テーブル。定数名 → 値。
+    enum_constants: HashMap<String, i64>,
+    /// 直前にパースした型が enum 定義（`enum { ... }`）かどうか。
+    /// `enum { ... };` のような定義のみ構文に対応するために使う。
+    last_parsed_enum_def: bool,
 }
 
 impl<'a> Parser<'a> {
     fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0, struct_tags: HashMap::new(), typedef_names: HashMap::new() }
+        Self {
+            tokens,
+            pos: 0,
+            struct_tags: HashMap::new(),
+            typedef_names: HashMap::new(),
+            enum_constants: HashMap::new(),
+            last_parsed_enum_def: false,
+        }
     }
 
     /// 現在位置のトークンを消費せずに参照する（先読み）。
@@ -159,7 +171,7 @@ impl<'a> Parser<'a> {
         match &self.tokens[self.pos].kind {
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
             | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
-            | TokenKind::KwVoid | TokenKind::KwStruct => true,
+            | TokenKind::KwVoid | TokenKind::KwStruct | TokenKind::KwEnum => true,
             TokenKind::Identifier(name) => name == "va_list" || self.typedef_names.contains_key(name),
             _ => false,
         }
@@ -173,7 +185,7 @@ impl<'a> Parser<'a> {
         match &self.tokens[pos].kind {
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
             | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
-            | TokenKind::KwVoid | TokenKind::KwStruct => true,
+            | TokenKind::KwVoid | TokenKind::KwStruct | TokenKind::KwEnum => true,
             TokenKind::Identifier(name) => name == "va_list" || self.typedef_names.contains_key(name),
             _ => false,
         }
@@ -355,6 +367,14 @@ impl<'a> Parser<'a> {
                     }
                     return self.parse_struct_type();
                 }
+                TokenKind::KwEnum => {
+                    if count > 0 {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'enum' with other type specifiers".to_string()
+                        ));
+                    }
+                    return self.parse_enum_type();
+                }
                 TokenKind::Identifier(name) if count == 0 => {
                     // va_list を型として認識
                     if name == "va_list" {
@@ -447,6 +467,83 @@ impl<'a> Parser<'a> {
             let members = self.struct_tags.get(&tag).cloned().unwrap_or_default();
             Ok(Type::Struct { tag, members })
         }
+    }
+
+    /// enum 型のパース。
+    ///
+    /// `enum [tag] { NAME [= value], ... }` または `enum tag` を解析する。
+    /// enum は int として扱い、各定数を `enum_constants` テーブルに登録する。
+    fn parse_enum_type(&mut self) -> Result<Type> {
+        self.advance()?; // consume 'enum'
+        self.last_parsed_enum_def = false;
+
+        // オプショナルのタグ名
+        let _tag = if self.pos < self.tokens.len() {
+            if let TokenKind::Identifier(name) = &self.peek()?.kind {
+                let name = name.clone();
+                self.advance()?;
+                Some(name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // '{' があれば定数リストをパース
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBrace {
+            self.advance()?; // consume '{'
+            let mut next_value: i64 = 0;
+
+            while self.peek()?.kind != TokenKind::CloseBrace {
+                let const_token = self.advance()?;
+                let const_name = match &const_token.kind {
+                    TokenKind::Identifier(name) => name.clone(),
+                    other => {
+                        return Err(CompileError::ParseError(format!(
+                            "expected enum constant name, got {:?}", other
+                        )));
+                    }
+                };
+
+                // 明示値: `NAME = value`
+                if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Assign {
+                    self.advance()?; // consume '='
+                    // 負値対応: '-' リテラル
+                    let negative = if self.peek()?.kind == TokenKind::Minus {
+                        self.advance()?;
+                        true
+                    } else {
+                        false
+                    };
+                    let val_token = self.advance()?;
+                    let value = match &val_token.kind {
+                        TokenKind::IntLiteral(v) => *v,
+                        TokenKind::LongLiteral(v) => *v,
+                        other => {
+                            return Err(CompileError::ParseError(format!(
+                                "expected integer constant for enum value, got {:?}", other
+                            )));
+                        }
+                    };
+                    next_value = if negative { -value } else { value };
+                }
+
+                self.enum_constants.insert(const_name, next_value);
+                next_value += 1;
+
+                // トレーリングカンマ許容
+                if self.peek()?.kind == TokenKind::Comma {
+                    self.advance()?;
+                } else {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::CloseBrace)?;
+            self.last_parsed_enum_def = true;
+        }
+
+        Ok(Type::Int)
     }
 
     /// 宣言子のパース（Chapter 14）。
@@ -577,7 +674,9 @@ impl<'a> Parser<'a> {
         let base_type = self.parse_type_specifier()?;
 
         // Chapter 18: `struct tag { ... };` — 構造体定義のみ（変数宣言なし）
-        if base_type.is_struct() && self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
+        // enum { ... }; — enum 定義のみ（変数宣言なし）
+        if (base_type.is_struct() || self.last_parsed_enum_def) && self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
+            self.last_parsed_enum_def = false;
             self.advance()?; // consume ';'
             return Ok(vec![TopLevelDecl::Variable(Declaration {
                 name: String::new(),
@@ -586,6 +685,7 @@ impl<'a> Parser<'a> {
                 storage_class,
             })]);
         }
+        self.last_parsed_enum_def = false;
 
         let (decl_type, name) = self.parse_declarator(base_type.clone())?;
 
@@ -693,7 +793,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
             | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
             | TokenKind::KwStatic | TokenKind::KwExtern
-            | TokenKind::KwStruct => {
+            | TokenKind::KwStruct | TokenKind::KwEnum => {
                 let decls = self.parse_declaration()?;
                 Ok(decls.into_iter().map(BlockItem::Declaration).collect())
             }
@@ -725,7 +825,9 @@ impl<'a> Parser<'a> {
         let base_type = self.parse_type_specifier()?;
 
         // Chapter 18: `struct tag { ... };` — 構造体定義のみ（変数宣言なし）
-        if base_type.is_struct() && self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
+        // enum { ... }; — enum 定義のみ（変数宣言なし）
+        if (base_type.is_struct() || self.last_parsed_enum_def) && self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
+            self.last_parsed_enum_def = false;
             self.advance()?; // consume ';'
             // ダミー宣言を返す（コード生成では無視される）
             return Ok(vec![Declaration {
@@ -735,6 +837,7 @@ impl<'a> Parser<'a> {
                 storage_class,
             }]);
         }
+        self.last_parsed_enum_def = false;
 
         let mut declarations = Vec::new();
 
@@ -873,7 +976,7 @@ impl<'a> Parser<'a> {
                     TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
                     | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
                     | TokenKind::KwStatic | TokenKind::KwExtern
-                    | TokenKind::KwStruct => {
+                    | TokenKind::KwStruct | TokenKind::KwEnum => {
                         // parse_declaration() returns Vec<Declaration> for comma-separated decls
                         ForInit::Declaration(self.parse_declaration()?)
                     }
@@ -922,6 +1025,69 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 self.expect(&TokenKind::Semicolon)?;
                 Ok(Statement::Continue)
+            }
+            // switch (expr) stmt
+            TokenKind::KwSwitch => {
+                self.advance()?;
+                self.expect(&TokenKind::OpenParen)?;
+                let expr = self.parse_expr()?;
+                self.expect(&TokenKind::CloseParen)?;
+                let body = Box::new(self.parse_statement()?);
+                Ok(Statement::Switch { expr, body })
+            }
+            // case <const>: stmt
+            TokenKind::KwCase => {
+                self.advance()?;
+                // 負値対応: '-' リテラル
+                let negative = if self.peek()?.kind == TokenKind::Minus {
+                    self.advance()?;
+                    true
+                } else {
+                    false
+                };
+                let val_token = self.peek()?;
+                let value = match &val_token.kind {
+                    TokenKind::IntLiteral(v) => {
+                        let v = *v;
+                        self.advance()?;
+                        v
+                    }
+                    TokenKind::LongLiteral(v) => {
+                        let v = *v;
+                        self.advance()?;
+                        v
+                    }
+                    TokenKind::CharLiteral(v) => {
+                        let v = *v as i64;
+                        self.advance()?;
+                        v
+                    }
+                    TokenKind::Identifier(name) => {
+                        let name = name.clone();
+                        self.advance()?;
+                        *self.enum_constants.get(&name).ok_or_else(|| {
+                            CompileError::ParseError(format!(
+                                "expected constant expression in case label, got '{}'", name
+                            ))
+                        })?
+                    }
+                    other => {
+                        return Err(CompileError::ParseError(format!(
+                            "expected constant expression in case label, got {:?}", other
+                        )));
+                    }
+                };
+                let value = if negative { -value } else { value };
+                self.expect(&TokenKind::Colon)?;
+                let body = Box::new(self.parse_statement()?);
+                Ok(Statement::Case { value, body })
+            }
+            // default: stmt
+            TokenKind::KwDefault => {
+                self.advance()?;
+                self.expect(&TokenKind::Colon)?;
+                let body = Box::new(self.parse_statement()?);
+                Ok(Statement::Default(body))
             }
             _ => {
                 let expr = self.parse_expr()?;
@@ -1402,6 +1568,11 @@ impl<'a> Parser<'a> {
                         let ap = self.parse_assignment()?;
                         self.expect(&TokenKind::CloseParen)?;
                         return Ok(Expr::VaEnd(Box::new(ap)));
+                    }
+
+                    // enum 定数解決: 定数名 → Expr::Constant(value)
+                    if let Some(&value) = self.enum_constants.get(&name) {
+                        return Ok(Expr::Constant(value));
                     }
 
                     // 関数呼び出し: <identifier> "(" <args>? ")"

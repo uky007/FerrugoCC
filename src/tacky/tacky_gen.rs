@@ -13,10 +13,11 @@ use crate::parse::ast::{
 };
 use super::tacky_ast::*;
 
-/// ループ内の break/continue ジャンプ先ラベル
+/// ループ/switch 内の break/continue ジャンプ先ラベル
 struct LoopLabels {
     break_label: String,
-    continue_label: String,
+    /// ループでは Some(label)、switch 内では None（continue は外側ループに委譲）
+    continue_label: Option<String>,
 }
 
 /// 関数シンボルテーブル用の情報
@@ -605,7 +606,7 @@ impl TackyGenerator {
                 let end_label = self.new_label("while_end");
                 let labels = LoopLabels {
                     break_label: end_label.clone(),
-                    continue_label: start_label.clone(),
+                    continue_label: Some(start_label.clone()),
                 };
 
                 instrs.push(TackyInstruction::Label(start_label.clone()));
@@ -625,7 +626,7 @@ impl TackyGenerator {
                 let end_label = self.new_label("do_end");
                 let labels = LoopLabels {
                     break_label: end_label.clone(),
-                    continue_label: continue_label.clone(),
+                    continue_label: Some(continue_label.clone()),
                 };
 
                 instrs.push(TackyInstruction::Label(start_label.clone()));
@@ -645,7 +646,7 @@ impl TackyGenerator {
                 let end_label = self.new_label("for_end");
                 let labels = LoopLabels {
                     break_label: end_label.clone(),
-                    continue_label: continue_label.clone(),
+                    continue_label: Some(continue_label.clone()),
                 };
 
                 let saved_var_map = self.var_map.clone();
@@ -695,7 +696,181 @@ impl TackyGenerator {
                 let labels = loop_labels.ok_or_else(|| {
                     CompileError::CodegenError("continue outside loop".to_string())
                 })?;
-                instrs.push(TackyInstruction::Jump(labels.continue_label.clone()));
+                let continue_target = labels.continue_label.as_ref().ok_or_else(|| {
+                    CompileError::CodegenError("continue outside loop".to_string())
+                })?;
+                instrs.push(TackyInstruction::Jump(continue_target.clone()));
+            }
+            Statement::Switch { expr, body } => {
+                let switch_end = self.new_label("switch_end");
+
+                // switch 式を評価
+                let (switch_val, switch_type) = self.generate_expr(expr, instrs, func_table)?;
+
+                // Pass 1: case/default ラベルを収集
+                let (cases, default_label) = self.collect_switch_labels(body)?;
+
+                // 比較チェーン
+                for (case_val, case_label) in &cases {
+                    let case_const = self.make_case_constant(*case_val, &switch_type);
+                    let cmp_result = self.new_temp(Type::Int);
+                    instrs.push(TackyInstruction::Binary {
+                        op: TackyBinaryOp::Equal,
+                        left: switch_val.clone(),
+                        right: case_const,
+                        dst: cmp_result.clone(),
+                    });
+                    instrs.push(TackyInstruction::JumpIfNotZero {
+                        condition: cmp_result,
+                        target: case_label.clone(),
+                    });
+                }
+
+                // default or switch_end
+                let fallthrough_target = default_label.clone().unwrap_or_else(|| switch_end.clone());
+                instrs.push(TackyInstruction::Jump(fallthrough_target));
+
+                // switch 用 LoopLabels: break → switch_end, continue → 外側ループの continue
+                let outer_continue = loop_labels.and_then(|l| l.continue_label.clone());
+                let switch_labels = LoopLabels {
+                    break_label: switch_end.clone(),
+                    continue_label: outer_continue,
+                };
+
+                // Pass 2: case 本体をソース順でラベル付きで生成（fall-through）
+                self.generate_switch_body(body, instrs, &cases, &default_label, &switch_labels, func_table)?;
+
+                instrs.push(TackyInstruction::Label(switch_end));
+            }
+            Statement::Case { .. } => {
+                return Err(CompileError::CodegenError("case outside switch".to_string()));
+            }
+            Statement::Default(_) => {
+                return Err(CompileError::CodegenError("default outside switch".to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// switch body の AST を走査し、case/default ラベルを収集する（Pass 1）。
+    /// ネストした switch には再帰しない。
+    fn collect_switch_labels(
+        &mut self,
+        stmt: &Statement,
+    ) -> Result<(Vec<(i64, String)>, Option<String>)> {
+        let mut cases: Vec<(i64, String)> = Vec::new();
+        let mut default_label: Option<String> = None;
+        self.collect_labels_recursive(stmt, &mut cases, &mut default_label)?;
+        Ok((cases, default_label))
+    }
+
+    fn collect_labels_recursive(
+        &mut self,
+        stmt: &Statement,
+        cases: &mut Vec<(i64, String)>,
+        default_label: &mut Option<String>,
+    ) -> Result<()> {
+        match stmt {
+            Statement::Case { value, body } => {
+                // 重複チェック
+                if cases.iter().any(|(v, _)| *v == *value) {
+                    return Err(CompileError::CodegenError(format!(
+                        "duplicate case value: {}", value
+                    )));
+                }
+                let label = self.new_label("case");
+                cases.push((*value, label));
+                self.collect_labels_recursive(body, cases, default_label)?;
+            }
+            Statement::Default(body) => {
+                if default_label.is_some() {
+                    return Err(CompileError::CodegenError(
+                        "multiple default labels in switch".to_string()
+                    ));
+                }
+                *default_label = Some(self.new_label("default"));
+                self.collect_labels_recursive(body, cases, default_label)?;
+            }
+            Statement::Compound(items) => {
+                for item in items {
+                    if let BlockItem::Statement(s) = item {
+                        self.collect_labels_recursive(s, cases, default_label)?;
+                    }
+                }
+            }
+            Statement::If { then_branch, else_branch, .. } => {
+                self.collect_labels_recursive(then_branch, cases, default_label)?;
+                if let Some(else_stmt) = else_branch {
+                    self.collect_labels_recursive(else_stmt, cases, default_label)?;
+                }
+            }
+            Statement::While { body, .. } | Statement::DoWhile { body, .. } => {
+                self.collect_labels_recursive(body, cases, default_label)?;
+            }
+            Statement::For { body, .. } => {
+                self.collect_labels_recursive(body, cases, default_label)?;
+            }
+            // ネストした switch には再帰しない
+            Statement::Switch { .. } => {}
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// switch 式の型に合わせた case 定数を生成する。
+    fn make_case_constant(&self, value: i64, switch_type: &Type) -> TackyVal {
+        match switch_type {
+            Type::Long => TackyVal::Constant(TackyConst::Long(value)),
+            Type::UInt => TackyVal::Constant(TackyConst::UInt(value as u32)),
+            Type::ULong => TackyVal::Constant(TackyConst::ULong(value as u64)),
+            Type::Char => TackyVal::Constant(TackyConst::Char(value as i8)),
+            Type::UChar => TackyVal::Constant(TackyConst::UChar(value as u8)),
+            _ => TackyVal::Constant(TackyConst::Int(value as i32)),
+        }
+    }
+
+    /// switch body のコード生成（Pass 2）。
+    /// case/default のラベルを正しい位置に挿入しながら文を生成する。
+    fn generate_switch_body(
+        &mut self,
+        stmt: &Statement,
+        instrs: &mut Vec<TackyInstruction>,
+        cases: &[(i64, String)],
+        default_label: &Option<String>,
+        switch_labels: &LoopLabels,
+        func_table: &HashMap<String, FunctionInfo>,
+    ) -> Result<()> {
+        match stmt {
+            Statement::Case { value, body } => {
+                if let Some((_, label)) = cases.iter().find(|(v, _)| *v == *value) {
+                    instrs.push(TackyInstruction::Label(label.clone()));
+                }
+                self.generate_switch_body(body, instrs, cases, default_label, switch_labels, func_table)?;
+            }
+            Statement::Default(body) => {
+                if let Some(label) = default_label {
+                    instrs.push(TackyInstruction::Label(label.clone()));
+                }
+                self.generate_switch_body(body, instrs, cases, default_label, switch_labels, func_table)?;
+            }
+            Statement::Compound(items) => {
+                let saved_var_map = self.var_map.clone();
+                for item in items {
+                    match item {
+                        BlockItem::Statement(s) => {
+                            self.generate_switch_body(s, instrs, cases, default_label, switch_labels, func_table)?;
+                        }
+                        BlockItem::Declaration(decl) => {
+                            self.generate_declaration(decl, instrs, None, func_table)?;
+                        }
+                        BlockItem::Typedef { .. } => {}
+                    }
+                }
+                self.var_map = saved_var_map;
+            }
+            // 通常の文はそのまま生成（switch_labels を渡して break/continue を処理）
+            _ => {
+                self.generate_statement(stmt, instrs, Some(switch_labels), func_table)?;
             }
         }
         Ok(())

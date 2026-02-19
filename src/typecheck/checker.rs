@@ -416,6 +416,18 @@ fn typecheck_statement(
             typecheck_statement(body, &mut inner_symbols, return_type)
         }
         Statement::Break | Statement::Continue => Ok(()),
+        Statement::Switch { expr, body } => {
+            let expr_type = typecheck_expr(expr, symbols)?;
+            // switch 式は整数型のみ（void/struct/double/pointer は不可）
+            if expr_type.is_void() || expr_type.is_struct() || expr_type.is_double() || expr_type.is_pointer() {
+                return Err(CompileError::TypeError(
+                    "switch expression must have integer type".to_string()
+                ));
+            }
+            typecheck_statement(body, symbols, return_type)
+        }
+        Statement::Case { body, .. } => typecheck_statement(body, symbols, return_type),
+        Statement::Default(body) => typecheck_statement(body, symbols, return_type),
     }
 }
 

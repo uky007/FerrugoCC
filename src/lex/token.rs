@@ -76,6 +76,14 @@ pub enum TokenKind {
     KwStruct,
     /// `typedef` キーワード — 型エイリアス定義
     KwTypedef,
+    /// `enum` キーワード — 列挙型
+    KwEnum,
+    /// `switch` キーワード — 多分岐文
+    KwSwitch,
+    /// `case` キーワード — switch のケースラベル
+    KwCase,
+    /// `default` キーワード — switch のデフォルトラベル
+    KwDefault,
 
     // ── 演算子 ──（Chapter 2 で追加）
     /// `-` — 単項マイナス / 二項減算

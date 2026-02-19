@@ -1219,3 +1219,26 @@ fn test_lib_obfuscate_strcat_no_libc_call() {
         "assembly should contain '_obf_strcat'"
     );
 }
+
+// === CFF + ライブラリ関数の組み合わせテスト (Level 2) ===
+
+#[test]
+fn test_cff_strcmp_level2() {
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    let source = r#"
+        int strcmp(char *s1, char *s2);
+        int main(void) {
+            char a[4];
+            a[0] = 'a'; a[1] = 'b'; a[2] = 'c'; a[3] = 0;
+            char b[4];
+            b[0] = 'a'; b[1] = 'b'; b[2] = 'c'; b[3] = 0;
+            if (strcmp(a, b) == 0) { return 42; }
+            return 0;
+        }
+    "#;
+    let result = compile_and_run_with_level(source, 2);
+    assert_eq!(result, 42, "CFF+strcmp level 2: expected 42, got {result}");
+}

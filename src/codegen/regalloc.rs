@@ -92,8 +92,9 @@ pub fn allocate_registers(
     let mut assignments: HashMap<String, Operand> = HashMap::new();
     let mut callee_saved_set: HashSet<Reg> = HashSet::new();
 
-    // 整数割り当て結果をマージ
-    let mut next_spill_offset: i32 = 0;
+    // 強制スタック変数（配列、構造体等）の最も深いオフセットを取得し、
+    // スピル変数がそれらと重ならないようにする。
+    let mut next_spill_offset: i32 = scan_min_stack_offset(&instructions);
     for (name, assignment) in &gp_coloring.assignments {
         match assignment {
             Assignment::Register(reg) => {
@@ -211,73 +212,89 @@ fn instruction_uses(instr: &Instruction) -> Vec<GraphNode> {
     let mut uses = Vec::new();
 
     match instr {
-        Instruction::Mov { src, .. } => {
-            add_operand_nodes(src, &mut uses);
+        Instruction::Mov { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            // dst が Memory/MemoryOffset の場合、ベースレジスタはアドレス計算で読まれる
+            add_memory_base_to_uses(dst, &mut uses);
         }
         Instruction::Unary { operand, .. } => {
-            add_operand_nodes(operand, &mut uses);
+            add_operand_nodes_for_use(operand, &mut uses);
         }
         Instruction::Cmp { src, dst, .. } => {
-            add_operand_nodes(src, &mut uses);
-            add_operand_nodes(dst, &mut uses);
+            add_operand_nodes_for_use(src, &mut uses);
+            add_operand_nodes_for_use(dst, &mut uses);
         }
-        Instruction::SetCC { .. } => {}
+        Instruction::SetCC { operand, .. } => {
+            // dst が Memory/MemoryOffset の場合、ベースレジスタはアドレス計算で読まれる
+            add_memory_base_to_uses(operand, &mut uses);
+        }
         Instruction::Binary { src, dst, .. } => {
-            add_operand_nodes(src, &mut uses);
-            add_operand_nodes(dst, &mut uses);
+            add_operand_nodes_for_use(src, &mut uses);
+            add_operand_nodes_for_use(dst, &mut uses);
         }
         Instruction::Idiv { operand, .. } => {
-            add_operand_nodes(operand, &mut uses);
+            add_operand_nodes_for_use(operand, &mut uses);
             uses.push(GraphNode::HardReg(Reg::AX));
             uses.push(GraphNode::HardReg(Reg::DX));
         }
         Instruction::Div { operand, .. } => {
-            add_operand_nodes(operand, &mut uses);
+            add_operand_nodes_for_use(operand, &mut uses);
             uses.push(GraphNode::HardReg(Reg::AX));
             uses.push(GraphNode::HardReg(Reg::DX));
         }
         Instruction::SignExtend(_) => {
             uses.push(GraphNode::HardReg(Reg::AX));
         }
-        Instruction::Movsx { src, .. } => {
-            add_operand_nodes(src, &mut uses);
+        Instruction::Movsx { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
         }
-        Instruction::MovsxByte { src, .. } => {
-            add_operand_nodes(src, &mut uses);
+        Instruction::MovsxByte { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
         }
-        Instruction::MovZeroExtend { src, .. } => {
-            add_operand_nodes(src, &mut uses);
+        Instruction::MovZeroExtend { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
         }
-        Instruction::MovZeroExtendByte { src, .. } => {
-            add_operand_nodes(src, &mut uses);
+        Instruction::MovZeroExtendByte { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
         }
-        Instruction::Truncate { src, .. } => {
-            add_operand_nodes(src, &mut uses);
+        Instruction::Truncate { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
         }
         Instruction::Push(op) => {
-            add_operand_nodes(op, &mut uses);
+            add_operand_nodes_for_use(op, &mut uses);
         }
-        Instruction::Pop(_) => {}
+        Instruction::Pop(op) => {
+            // dst が Memory/MemoryOffset の場合、ベースレジスタはアドレス計算で読まれる
+            add_memory_base_to_uses(op, &mut uses);
+        }
         Instruction::Jmp(_) | Instruction::JmpCC(_, _) | Instruction::Label(_) => {}
         Instruction::AllocateStack(_) | Instruction::DeallocateStack(_) => {}
         Instruction::Call(_) => {}
         Instruction::Ret => {
             uses.push(GraphNode::HardReg(Reg::AX));
         }
-        Instruction::Cvtsi2sd { src, .. } => {
-            add_operand_nodes(src, &mut uses);
+        Instruction::Cvtsi2sd { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
         }
-        Instruction::Cvttsd2si { src, .. } => {
-            add_operand_nodes(src, &mut uses);
+        Instruction::Cvttsd2si { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
         }
-        Instruction::Lea { src, .. } => {
-            add_operand_nodes(src, &mut uses);
+        Instruction::Lea { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
         }
         Instruction::JmpIndirect(op, _) => {
-            add_operand_nodes(op, &mut uses);
+            add_operand_nodes_for_use(op, &mut uses);
         }
         Instruction::CallIndirect(op) => {
-            add_operand_nodes(op, &mut uses);
+            add_operand_nodes_for_use(op, &mut uses);
         }
         Instruction::RawBytes(_) => {}
     }
@@ -291,17 +308,17 @@ fn instruction_defs(instr: &Instruction) -> Vec<GraphNode> {
 
     match instr {
         Instruction::Mov { dst, .. } => {
-            add_operand_nodes(dst, &mut defs);
+            add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::Unary { operand, .. } => {
-            add_operand_nodes(operand, &mut defs);
+            add_operand_nodes_for_def(operand, &mut defs);
         }
         Instruction::Cmp { .. } => {}
         Instruction::SetCC { operand, .. } => {
-            add_operand_nodes(operand, &mut defs);
+            add_operand_nodes_for_def(operand, &mut defs);
         }
         Instruction::Binary { dst, .. } => {
-            add_operand_nodes(dst, &mut defs);
+            add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::Idiv { .. } => {
             defs.push(GraphNode::HardReg(Reg::AX));
@@ -315,23 +332,23 @@ fn instruction_defs(instr: &Instruction) -> Vec<GraphNode> {
             defs.push(GraphNode::HardReg(Reg::DX));
         }
         Instruction::Movsx { dst, .. } => {
-            add_operand_nodes(dst, &mut defs);
+            add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::MovsxByte { dst, .. } => {
-            add_operand_nodes(dst, &mut defs);
+            add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::MovZeroExtend { dst, .. } => {
-            add_operand_nodes(dst, &mut defs);
+            add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::MovZeroExtendByte { dst, .. } => {
-            add_operand_nodes(dst, &mut defs);
+            add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::Truncate { dst, .. } => {
-            add_operand_nodes(dst, &mut defs);
+            add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::Push(_) => {}
         Instruction::Pop(op) => {
-            add_operand_nodes(op, &mut defs);
+            add_operand_nodes_for_def(op, &mut defs);
         }
         Instruction::Jmp(_) | Instruction::JmpCC(_, _) | Instruction::Label(_) => {}
         Instruction::AllocateStack(_) | Instruction::DeallocateStack(_) => {}
@@ -346,13 +363,13 @@ fn instruction_defs(instr: &Instruction) -> Vec<GraphNode> {
         }
         Instruction::Ret => {}
         Instruction::Cvtsi2sd { dst, .. } => {
-            add_operand_nodes(dst, &mut defs);
+            add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::Cvttsd2si { dst, .. } => {
-            add_operand_nodes(dst, &mut defs);
+            add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::Lea { dst, .. } => {
-            add_operand_nodes(dst, &mut defs);
+            add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::JmpIndirect(_, _) => {}
         Instruction::CallIndirect(_) => {
@@ -370,13 +387,39 @@ fn instruction_defs(instr: &Instruction) -> Vec<GraphNode> {
     defs
 }
 
-fn add_operand_nodes(op: &Operand, nodes: &mut Vec<GraphNode>) {
+/// オペランドを「使用(use)」として追加する。
+/// Memory(reg) / MemoryOffset(reg, _) のベースレジスタはアドレス計算で読まれるので use に含める。
+fn add_operand_nodes_for_use(op: &Operand, nodes: &mut Vec<GraphNode>) {
     match op {
         Operand::Register(reg) => nodes.push(GraphNode::HardReg(*reg)),
         Operand::Pseudo(name) => nodes.push(GraphNode::Pseudo(name.clone())),
         Operand::Memory(reg) => nodes.push(GraphNode::HardReg(*reg)),
         Operand::MemoryOffset(reg, _) => nodes.push(GraphNode::HardReg(*reg)),
         Operand::Imm(_) | Operand::Stack(_) | Operand::Data(_) => {}
+    }
+}
+
+/// オペランドを「定義(def)」として追加する。
+/// Memory(reg) / MemoryOffset(reg, _) はメモリへの書き込みであり、
+/// ベースレジスタ自体は書き換えられないので def に含めない。
+fn add_operand_nodes_for_def(op: &Operand, nodes: &mut Vec<GraphNode>) {
+    match op {
+        Operand::Register(reg) => nodes.push(GraphNode::HardReg(*reg)),
+        Operand::Pseudo(name) => nodes.push(GraphNode::Pseudo(name.clone())),
+        Operand::Memory(_) | Operand::MemoryOffset(_, _) => {
+            // メモリへの書き込みはベースレジスタの定義ではない
+        }
+        Operand::Imm(_) | Operand::Stack(_) | Operand::Data(_) => {}
+    }
+}
+
+/// Memory/MemoryOffset のベースレジスタだけを use に追加する。
+/// dst が Memory(reg) の場合、アドレス計算でレジスタが読まれるため。
+fn add_memory_base_to_uses(op: &Operand, nodes: &mut Vec<GraphNode>) {
+    match op {
+        Operand::Memory(reg) => nodes.push(GraphNode::HardReg(*reg)),
+        Operand::MemoryOffset(reg, _) => nodes.push(GraphNode::HardReg(*reg)),
+        _ => {}
     }
 }
 

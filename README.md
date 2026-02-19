@@ -827,8 +827,8 @@ Chapter 12 では以下の機能を追加した:
 - [x] **可変長引数関数の定義**: `va_list`/`va_start`/`va_arg`/`va_end`（System V AMD64 ABI 準拠、int/long/double/ポインタ対応）
 - [x] **配列初期化子リスト**: `int arr[3] = {1, 2, 3};`
 - [x] **カンマ区切り複数宣言**: `int a = 1, b = 2, c = 3;`
-- [ ] **switch 文**: `switch`/`case`/`default`
-- [ ] **enum 型**: `enum Color { RED, GREEN, BLUE };`
+- [x] **switch 文**: `switch`/`case`/`default`（fall-through、ネスト、enum 定数 case ラベル対応）
+- [x] **enum 型**: `enum Color { RED, GREEN, BLUE };`（明示値、負値、typedef enum、無名 enum 対応）
 - [x] **typedef**: 型エイリアスの定義（`typedef int myint;`, `typedef struct { ... } Point;`, ポインタ・配列・ネスト対応）
 - [ ] **プリプロセッサ**: `#include`, `#define`, `#ifdef` 等
 
@@ -874,4 +874,4 @@ ASM レベル（5パス）:
 
 ## License
 
-学習目的のプロジェクト。
+MIT License. See [LICENSE](LICENSE).
