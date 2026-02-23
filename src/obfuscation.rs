@@ -3,6 +3,7 @@
 //! 各難読化パスの有効/無効およびパラメータを管理する。
 //! `--fobfuscate` と `--obf-level=N` で制御する。
 //! 全16パス（TACKY IR 11パス + ASM 5パス）。
+//! Pass 16（OPSEC）はシンボルリネーム + 文字列リーク警告 + シンボル Strip の3段階。
 
 /// 難読化パスの設定。パイプライン全体で共有される。
 #[derive(Debug, Clone)]
@@ -42,6 +43,8 @@ pub struct ObfuscationConfig {
     pub opsec: bool,
     /// OPSEC 文字列リーク警告
     pub opsec_warn: bool,
+    /// OPSEC シンボル strip（.globl 抑制 + バイナリ strip）
+    pub opsec_strip: bool,
 
     // ── 頻度パラメータ ──
     /// ジャンクコード挿入頻度（N命令ごとに挿入）
@@ -104,6 +107,7 @@ impl ObfuscationConfig {
                 lib_obfuscate: true,
                 opsec: false,
                 opsec_warn: false,
+                opsec_strip: false,
                 junk_freq: 8,
                 pred_freq: 10,
                 arith_freq: 3,
@@ -135,6 +139,7 @@ impl ObfuscationConfig {
                 lib_obfuscate: true,
                 opsec: false,
                 opsec_warn: true,
+                opsec_strip: false,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 5,
@@ -166,6 +171,7 @@ impl ObfuscationConfig {
                 lib_obfuscate: true,
                 opsec: true,
                 opsec_warn: true,
+                opsec_strip: true,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 3,
@@ -198,6 +204,7 @@ impl ObfuscationConfig {
                 lib_obfuscate: true,
                 opsec: true,
                 opsec_warn: true,
+                opsec_strip: true,
                 junk_freq: 2,
                 pred_freq: 2,
                 arith_freq: 2,

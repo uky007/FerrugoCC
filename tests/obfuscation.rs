@@ -1481,3 +1481,78 @@ fn test_opsec_warn() {
         "OPSEC: stderr should contain 'OPSEC WARNING' for IP address string, got: {stderr}"
     );
 }
+
+// === OPSEC Strip テスト ===
+
+#[test]
+fn test_opsec_strip_no_globl() {
+    // Level 3 で .globl が main 以外に出力されないことを確認
+    let source = r#"
+        int helper(int x) { return x + 1; }
+        int compute(int a, int b) { return helper(a) + b; }
+        int main(void) { return compute(20, 21); }
+    "#;
+    let (asm, _) = compile_to_asm_with_opts(source, &["--fobfuscate", "--obf-level=3"]);
+
+    // .globl main は存在するべき
+    assert!(
+        asm.contains(".globl main"),
+        "OPSEC strip: '.globl main' should be present in assembly output"
+    );
+
+    // .globl 行を収集し、main 以外の .globl が無いことを確認
+    let other_globls: Vec<&str> = asm
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with(".globl ") && trimmed != ".globl main"
+        })
+        .collect();
+    assert!(
+        other_globls.is_empty(),
+        "OPSEC strip: no .globl directives other than 'main' should exist, found: {other_globls:?}"
+    );
+}
+
+#[test]
+fn test_opsec_strip_correctness() {
+    // strip 後もプログラムが正しく動作すること
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    let source = r#"
+        int helper(int x) { return x + 1; }
+        int compute(int a, int b) { return helper(a) + b; }
+        int main(void) { return compute(20, 21); }
+    "#;
+    let result = compile_and_run_with_opts(source, &["--fobfuscate", "--obf-level=3"]);
+    assert_eq!(
+        result, 42,
+        "OPSEC strip correctness: expected 42, got {result}"
+    );
+}
+
+#[test]
+fn test_opsec_strip_disabled() {
+    // --obf-no-strip で .globl が維持されることを確認
+    let source = r#"
+        int helper(int x) { return x + 1; }
+        int main(void) { return helper(41); }
+    "#;
+    let (asm, _) =
+        compile_to_asm_with_opts(source, &["--fobfuscate", "--obf-level=3", "--obf-no-strip"]);
+
+    // main 以外の .globl が存在するべき（リネーム済みシンボル _f0 等）
+    let other_globls: Vec<&str> = asm
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with(".globl ") && trimmed != ".globl main"
+        })
+        .collect();
+    assert!(
+        !other_globls.is_empty(),
+        "OPSEC strip disabled: .globl directives for renamed symbols should exist when strip is disabled"
+    );
+}

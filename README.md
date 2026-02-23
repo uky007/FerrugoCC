@@ -39,6 +39,9 @@ cargo run -- --fobfuscate --obf-no-instr-subst source.c    # Disable instruction
 cargo run -- --fobfuscate --obf-no-func-inline source.c   # Disable function inlining
 cargo run -- --fobfuscate --obf-no-func-outline source.c  # Disable function outlining
 cargo run -- --fobfuscate --obf-no-vm-virtualize source.c # Disable VM virtualization
+cargo run -- --fobfuscate --obf-no-opsec source.c        # Disable OPSEC sanitization
+cargo run -- --fobfuscate --obf-no-opsec-warn source.c   # Disable OPSEC string leak warnings
+cargo run -- --fobfuscate --obf-no-strip source.c        # Disable symbol strip (.globl suppression + binary strip)
 
 # Frequency parameters
 cargo run -- --fobfuscate --obf-junk-freq=2 source.c          # Insert junk every 2 instructions
@@ -131,7 +134,7 @@ Intended for quantitative evaluation with deobfuscators (D-810, SATURN, etc.).
 
 After completing all 20 chapters, code obfuscation passes were implemented as an additional feature.
 The `--fobfuscate` flag applies obfuscation passes instead of optimization.
-Consists of 10 TACKY IR-level passes and 5 ASM-level passes (15 total).
+Consists of 11 TACKY IR-level passes and 5 ASM-level passes (16 total).
 
 ### Obfuscation Levels
 
@@ -141,10 +144,10 @@ Consists of 10 TACKY IR-level passes and 5 ASM-level passes (15 total).
 |-------|---------------|:--:|----------|
 | 1 | Constant encoding, junk code, opaque predicates | No | Light: basic obfuscation |
 | 2 | Level 1 + CFF, arithmetic substitution | No | Standard: adds control flow flattening |
-| 3 | Level 2 + inlining, outlining, string encryption, anti-disasm, indirect calls, register shuffle, stack frame obf, instruction substitution | No | Full: all passes except VM (default) |
-| 4 | All 15 passes (+ VM virtualization), high frequency | Yes | Maximum: VM virtualization + all passes at high frequency |
+| 3 | Level 2 + inlining, outlining, string encryption, anti-disasm, indirect calls, register shuffle, stack frame obf, instruction substitution, OPSEC (rename + strip) | No | Full: all passes except VM (default) |
+| 4 | All 16 passes (+ VM virtualization), high frequency | Yes | Maximum: VM virtualization + all passes at high frequency |
 
-### TACKY IR Level (10 passes)
+### TACKY IR Level (11 passes)
 
 - **Pass 12 -- Function Inlining**: Embeds callee function bodies at call sites, destroying the call graph.
   Renames variables/labels with `_inline_{N}_{name}`, converts `Return` to `Copy + Jump`.
@@ -217,6 +220,12 @@ Consists of 10 TACKY IR-level passes and 5 ASM-level passes (15 total).
   ```
 - **Pass 6 -- String Encryption**: Encrypts string literals with additive cipher (key=0x5A) and stores as `ByteArrayInit` in `.data`.
   Inserts unrolled decryption code (Load -> Subtract(key) -> Store) at the beginning of main()
+- **Pass 16 -- OPSEC Sanitization**: Three-part operational security hardening applied as the final TACKY pass:
+  1. **String Leak Warnings**: Scans string literals for IP addresses, URLs, file paths, and hostnames, emitting `[OPSEC WARNING]` to stderr
+  2. **Symbol Renaming**: Renames all internal functions to `_f{N}`, global variables to `_v{N}`, and static constants to `_c{N}`.
+     Preserves `main`, external functions (e.g. `printf`), and `.L` labels
+  3. **Symbol Strip**: Suppresses `.globl` directives for all symbols except `main` (internal linkage), and runs `strip` on the final binary to remove the symbol table entirely.
+     `--obf-no-strip` to disable, `--obf-no-opsec` to disable all OPSEC features
 
 ### ASM Level (5 passes, applied after register allocation + fixup)
 
@@ -247,7 +256,8 @@ TACKY IR pass ordering is intentionally designed:
 7. **Function Outlining** -- extracts already-obfuscated code into decoy functions
 8. **VM Virtualization** -- converts functions to bytecode+VM interpreter; before CFF for double indirection
 9. **CFF** -- flattens all functions including VM dispatch loops
-10. **String Encryption** -- applied last so decryption code isn't destroyed by other passes
+10. **String Encryption** -- applied late so decryption code isn't destroyed by other passes
+11. **OPSEC Sanitization** -- applied last: renames symbols after all passes complete, then strips `.globl`
 
 ASM-level passes are applied after register allocation (order: Stack Frame Obf -> Register Shuffle -> Instruction Substitution -> Anti-Disassembly -> Indirect Calls).
 
@@ -380,7 +390,7 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 
 ### コード難読化の詳細
 
-#### TACKY IR レベル（10パス）
+#### TACKY IR レベル（11パス）
 
 - **Pass 12 — 関数インライン展開（Function Inlining）**: 呼び出し先の関数本体を呼び出し元に埋め込み、コールグラフを破壊する。
   変数・ラベルを `_inline_{N}_{name}` でリネームし、`Return` を `Copy + Jump` に変換。
@@ -472,6 +482,16 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 - **Pass 6 — 文字列暗号化**: 文字列リテラルを加算暗号化（key=0x5A）して `.data` に `ByteArrayInit` として配置。
   main() の先頭にアンロール復号コード（Load → Subtract(key) → Store）を挿入
   - Pass 6 は Pass 1〜5 の後に適用する。復号コードが CFF 等で破壊されるのを防ぐため
+- **Pass 16 — OPSEC 衛生化（OPSEC Sanitization）**: 全パスの最後に適用する3段階の運用セキュリティ強化:
+  1. **文字列リーク警告**: 文字列リテラル中の IP アドレス、URL、ファイルパス、ホスト名を検出し `[OPSEC WARNING]` を stderr に出力。
+     `--obf-no-opsec-warn` で無効化可能
+  2. **シンボルリネーム**: 内部関数を `_f{N}`、グローバル変数を `_v{N}`、静的定数を `_c{N}` にリネーム。
+     `main`、外部関数（`printf` 等）、`.L` ラベルは保持。`nm` や `strings` での関数名特定を防止
+  3. **シンボル Strip**: `main` 以外の全関数・変数の `.globl` ディレクティブを抑制（internal linkage 化）し、
+     フルコンパイル時に `strip` コマンドを自動実行してバイナリからシンボルテーブルを完全除去。
+     `--obf-no-strip` で無効化可能（`strip` コマンドが未インストールでも警告のみでコンパイルは成功）
+  - Level 3/4 でデフォルト有効、Level 1/2 ではリネーム無効（警告のみ Level 2 で有効）
+  - `--obf-no-opsec` で OPSEC 衛生化全体を無効化
 
 #### ASM レベル（5パス、レジスタ割り当て+fixup 後に適用）
 
@@ -528,7 +548,8 @@ TACKY IR パスの適用順序は意図的に設計されている:
 7. **関数アウトライン化** → Pass 1-4 で難読化済みのコードが切り出され、解析者が見る関数は意味不明な断片
 8. **VM仮想化** → 適格な関数をバイトコード＋VMインタプリタに変換。CFF の前に適用することで二重間接化
 9. **CFF** → VMディスパッチループを含む全関数に適用。コード＋データの相関解析が必要な二重の間接化
-10. **文字列暗号化** → 復号コードが他のパスで壊されないよう最後に適用
+10. **文字列暗号化** → 復号コードが他のパスで壊されないよう終盤に適用
+11. **OPSEC 衛生化** → 全パスの最後に適用: リネーム・`.globl` 抑制は他のパスが完了してから実行
 
 ASM レベルパスはレジスタ割り当て後に適用する（適用順: スタックフレーム難読化 → レジスタシャッフル → 命令置換 → 反逆アセンブリ → 間接コール）:
 - スタックフレーム難読化はフレーム構造を変更するため最初に適用。後続のレジスタシャッフルが挿入する dead mov が偽スタック操作の近傍に散在することで解析をさらに困難にする
@@ -834,9 +855,9 @@ Chapter 12 では以下の機能を追加した:
 
 ### コード難読化（Anti-Reverse Engineering）
 
-コンパイラレベルでの難読化変換。`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計15パスを適用する。
+コンパイラレベルでの難読化変換。`--fobfuscate` フラグで有効化し、TACKY IR + ASM レベルの計16パスを適用する。
 
-TACKY IR レベル（10パス）:
+TACKY IR レベル（11パス）:
 - [x] **定数の間接化（Constant Encoding）**
 - [x] **算術置換（Arithmetic Substitution）**
 - [x] **ジャンクコード挿入**
@@ -845,6 +866,7 @@ TACKY IR レベル（10パス）:
 - [x] **文字列暗号化**
 - [x] **VM仮想化（VM-Based Code Virtualization）**
 - [x] **ライブラリ関数難読化（Library Function Obfuscation）**
+- [x] **OPSEC 衛生化（シンボルリネーム + 文字列リーク警告 + シンボル Strip）**
 
 ASM レベル（5パス）:
 - [x] **反逆アセンブリ（Anti-Disassembly）**
@@ -859,7 +881,7 @@ ASM レベル（5パス）:
 
 パラメータ化:
 - [x] **難易度レベル制御（`--obf-level=1..4`）**
-- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-vm-virtualize` 等で各パスを個別に無効化
+- [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-vm-virtualize`, `--obf-no-opsec`, `--obf-no-strip` 等で各パスを個別に無効化
 - [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N` 等で頻度を調整
 
 ### ベンチマーク・評価

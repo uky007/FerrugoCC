@@ -184,7 +184,7 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
 
     // Pass 16b: OPSEC シンボル難読化（全パスの最後）
     if config.opsec {
-        opsec_sanitize(&mut program, &mut ctx);
+        opsec_sanitize(&mut program, &mut ctx, config.opsec_strip);
     }
 
     program
@@ -3961,7 +3961,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 /// - `main`（エントリポイント）
 /// - 外部関数（定義がなく宣言のみ: `printf`, `strcmp` 等）
 /// - ラベル名（`.L` プレフィックス）
-fn opsec_sanitize(program: &mut TackyProgram, ctx: &mut ObfCtx) {
+fn opsec_sanitize(program: &mut TackyProgram, ctx: &mut ObfCtx, strip: bool) {
     let mut rename_map: HashMap<String, String> = HashMap::new();
 
     // 定義済み関数の名前セットを構築（外部関数の判定に使用）
@@ -4017,6 +4017,18 @@ fn opsec_sanitize(program: &mut TackyProgram, ctx: &mut ObfCtx) {
     for sc in &mut program.static_constants {
         if let Some(new_name) = rename_map.get(&sc.name) {
             sc.name = new_name.clone();
+        }
+    }
+
+    // .globl 抑制: main 以外の全シンボルを internal linkage にする
+    if strip {
+        for func in &mut program.functions {
+            if func.name != "main" {
+                func.global = false;
+            }
+        }
+        for sv in &mut program.static_vars {
+            sv.global = false;
         }
     }
 }

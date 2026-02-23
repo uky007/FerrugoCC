@@ -10,7 +10,7 @@
 //! ```
 //!
 //! - デフォルト: TACKY IR 最適化パス（定数畳み込み・コピー伝播・不要コード除去）
-//! - `--fobfuscate`: 難読化パス（TACKY: 関数インライン展開・定数間接化・算術置換・ジャンクコード・不透明述語・関数アウトライン化・CFF・文字列暗号化、
+//! - `--fobfuscate`: 難読化パス（TACKY: 関数インライン展開・定数間接化・算術置換・ジャンクコード・不透明述語・関数アウトライン化・CFF・文字列暗号化・OPSEC衛生化、
 //!   ASM: スタックフレーム難読化・レジスタシャッフル・命令置換・反逆アセンブリ・間接呼出）
 //! - `--obf-level=N`: 難読化強度レベル（1=軽量, 2=標準, 3=全パス有効, 4=最大）
 //!
@@ -121,6 +121,19 @@ pub fn run(source_path: &Path, stage: Stage, obf_config: Option<ObfuscationConfi
             "gcc exited with status {}",
             status
         )));
+    }
+
+    // 難読化の OPSEC strip が有効ならバイナリを strip
+    if let Some(config) = &obf_config
+        && config.opsec_strip
+    {
+        let strip_status = Command::new("strip").arg(&output_path).status();
+        match strip_status {
+            Ok(s) if s.success() => {}
+            _ => {
+                eprintln!("[OPSEC] warning: strip command failed or not found");
+            }
+        }
     }
 
     Ok(())

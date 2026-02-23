@@ -8,7 +8,7 @@
 //!          → [Codegen] → [RegAlloc+Coalescing] → [Fixup] → [Emit] → source.s → [gcc] → binary
 //! ```
 //!
-//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（16パス）を適用する。
+//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（TACKY 11パス + ASM 5パス = 計16パス）を適用する。
 //! `--obf-level=N` で難読化強度を段階的に制御可能（1=軽量〜4=最大）。
 //!
 //! # 使い方
@@ -157,6 +157,10 @@ struct Cli {
     #[arg(long = "obf-no-opsec-warn")]
     obf_no_opsec_warn: bool,
 
+    /// シンボル strip を無効化
+    #[arg(long = "obf-no-strip")]
+    obf_no_strip: bool,
+
     /// 算術置換頻度（N回に1回適用）
     #[arg(long = "obf-arith-freq")]
     obf_arith_freq: Option<usize>,
@@ -255,6 +259,9 @@ fn main() {
         }
         if cli.obf_no_opsec_warn {
             config.opsec_warn = false;
+        }
+        if cli.obf_no_strip {
+            config.opsec_strip = false;
         }
 
         // 頻度オーバーライド
