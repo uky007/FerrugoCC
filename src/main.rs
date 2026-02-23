@@ -90,7 +90,7 @@ struct Cli {
     obfuscate: bool,
 
     /// 難読化レベル (1=軽量, 2=標準, 3=全パス有効, 4=最大)
-    #[arg(long = "obf-level", default_value_t = 3)]
+    #[arg(long = "obf-level", default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=4))]
     obf_level: u8,
 
     /// CFF（制御フロー平坦化）を無効化
@@ -109,13 +109,13 @@ struct Cli {
     #[arg(long = "obf-no-indirect-calls")]
     obf_no_indirect_calls: bool,
 
-    /// ジャンクコード挿入頻度（N命令ごと）
-    #[arg(long = "obf-junk-freq")]
-    obf_junk_freq: Option<usize>,
+    /// ジャンクコード挿入頻度（N命令ごと、1以上）
+    #[arg(long = "obf-junk-freq", value_parser = clap::value_parser!(u64).range(1..))]
+    obf_junk_freq: Option<u64>,
 
-    /// 不透明述語頻度（N個の値生成命令ごと）
-    #[arg(long = "obf-pred-freq")]
-    obf_pred_freq: Option<usize>,
+    /// 不透明述語頻度（N個の値生成命令ごと、1以上）
+    #[arg(long = "obf-pred-freq", value_parser = clap::value_parser!(u64).range(1..))]
+    obf_pred_freq: Option<u64>,
 
     /// 算術置換を無効化
     #[arg(long = "obf-no-arith-subst")]
@@ -161,33 +161,33 @@ struct Cli {
     #[arg(long = "obf-no-strip")]
     obf_no_strip: bool,
 
-    /// 算術置換頻度（N回に1回適用）
-    #[arg(long = "obf-arith-freq")]
-    obf_arith_freq: Option<usize>,
+    /// 算術置換頻度（N回に1回適用、1以上）
+    #[arg(long = "obf-arith-freq", value_parser = clap::value_parser!(u64).range(1..))]
+    obf_arith_freq: Option<u64>,
 
-    /// レジスタシャッフル頻度（N命令ごとに挿入）
-    #[arg(long = "obf-reg-shuffle-freq")]
-    obf_reg_shuffle_freq: Option<usize>,
+    /// レジスタシャッフル頻度（N命令ごとに挿入、1以上）
+    #[arg(long = "obf-reg-shuffle-freq", value_parser = clap::value_parser!(u64).range(1..))]
+    obf_reg_shuffle_freq: Option<u64>,
 
     /// 偽スタックスロット数
     #[arg(long = "obf-stack-padding")]
     obf_stack_padding: Option<usize>,
 
-    /// 偽スタック操作の挿入頻度（N命令ごと）
-    #[arg(long = "obf-stack-fake-freq")]
-    obf_stack_fake_freq: Option<usize>,
+    /// 偽スタック操作の挿入頻度（N命令ごと、1以上）
+    #[arg(long = "obf-stack-fake-freq", value_parser = clap::value_parser!(u64).range(1..))]
+    obf_stack_fake_freq: Option<u64>,
 
-    /// 命令置換頻度（N命令ごと）
-    #[arg(long = "obf-instr-subst-freq")]
-    obf_instr_subst_freq: Option<usize>,
+    /// 命令置換頻度（N命令ごと、1以上）
+    #[arg(long = "obf-instr-subst-freq", value_parser = clap::value_parser!(u64).range(1..))]
+    obf_instr_subst_freq: Option<u64>,
 
-    /// インライン展開頻度（N回の適格呼び出しごとにインライン化）
-    #[arg(long = "obf-inline-freq")]
-    obf_inline_freq: Option<usize>,
+    /// インライン展開頻度（N回の適格呼び出しごとにインライン化、1以上）
+    #[arg(long = "obf-inline-freq", value_parser = clap::value_parser!(u64).range(1..))]
+    obf_inline_freq: Option<u64>,
 
-    /// アウトライン最小ブロックサイズ
-    #[arg(long = "obf-outline-min-block")]
-    obf_outline_min_block: Option<usize>,
+    /// アウトライン最小ブロックサイズ（1以上）
+    #[arg(long = "obf-outline-min-block", value_parser = clap::value_parser!(u64).range(1..))]
+    obf_outline_min_block: Option<u64>,
 
     /// Input C source file
     source: PathBuf,
@@ -256,6 +256,8 @@ fn main() {
         }
         if cli.obf_no_opsec {
             config.opsec = false;
+            config.opsec_warn = false;
+            config.opsec_strip = false;
         }
         if cli.obf_no_opsec_warn {
             config.opsec_warn = false;
@@ -264,33 +266,33 @@ fn main() {
             config.opsec_strip = false;
         }
 
-        // 頻度オーバーライド
+        // 頻度オーバーライド（clap の value_parser で 1以上に制約済み）
         if let Some(freq) = cli.obf_junk_freq {
-            config.junk_freq = freq;
+            config.junk_freq = freq as usize;
         }
         if let Some(freq) = cli.obf_pred_freq {
-            config.pred_freq = freq;
+            config.pred_freq = freq as usize;
         }
         if let Some(freq) = cli.obf_arith_freq {
-            config.arith_freq = freq;
+            config.arith_freq = freq as usize;
         }
         if let Some(freq) = cli.obf_reg_shuffle_freq {
-            config.reg_shuffle_freq = freq;
+            config.reg_shuffle_freq = freq as usize;
         }
         if let Some(n) = cli.obf_stack_padding {
             config.stack_frame_padding = n;
         }
         if let Some(freq) = cli.obf_stack_fake_freq {
-            config.stack_frame_fake_freq = freq;
+            config.stack_frame_fake_freq = freq as usize;
         }
         if let Some(freq) = cli.obf_instr_subst_freq {
-            config.instr_subst_freq = freq;
+            config.instr_subst_freq = freq as usize;
         }
         if let Some(freq) = cli.obf_inline_freq {
-            config.func_inline_freq = freq;
+            config.func_inline_freq = freq as usize;
         }
         if let Some(n) = cli.obf_outline_min_block {
-            config.func_outline_min_block = n;
+            config.func_outline_min_block = n as usize;
         }
 
         Some(config)

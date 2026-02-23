@@ -319,7 +319,7 @@ Source Code (.c)
 +----------+
 ```
 
-Target: x86-64 Linux/macOS (AT&T syntax).
+Primary target: **x86-64 Linux** (AT&T syntax). macOS (x86_64/Rosetta 2) is best-effort and not guaranteed.
 
 ---
 
