@@ -2,13 +2,12 @@
 //!
 //! 各難読化パスの有効/無効およびパラメータを管理する。
 //! `--fobfuscate` と `--obf-level=N` で制御する。
-//! 全15パス（TACKY IR 10パス + ASM 5パス）。
+//! 全16パス（TACKY IR 11パス + ASM 5パス）。
 
 /// 難読化パスの設定。パイプライン全体で共有される。
 #[derive(Debug, Clone)]
 pub struct ObfuscationConfig {
     // ── パス有効/無効 ──
-
     /// Pass 1 (TACKY): 定数の間接化（即値を a*b+c に分解）
     pub constant_encoding: bool,
     /// Pass 2 (TACKY): 算術置換（Add/Subtract を多段計算に展開）
@@ -39,16 +38,18 @@ pub struct ObfuscationConfig {
     pub vm_virtualize: bool,
     /// Pass 15 (TACKY): ライブラリ関数難読化
     pub lib_obfuscate: bool,
+    /// Pass 16 (TACKY): OPSEC 衛生化（シンボルリネーム）
+    pub opsec: bool,
+    /// OPSEC 文字列リーク警告
+    pub opsec_warn: bool,
 
     // ── 頻度パラメータ ──
-
     /// ジャンクコード挿入頻度（N命令ごとに挿入）
     pub junk_freq: usize,
     /// 不透明述語頻度（N個の値生成命令ごとに適用）
     pub pred_freq: usize,
 
     // ── CFF パラメータ ──
-
     /// 状態エンコード乗数 (encoded = index * cff_a + cff_b)
     pub cff_a: i32,
     /// 状態エンコードバイアス
@@ -70,7 +71,6 @@ pub struct ObfuscationConfig {
     pub func_outline_min_block: usize,
 
     // ── 文字列暗号化パラメータ ──
-
     /// 暗号化キー（加算ベース）
     pub string_key: u8,
 }
@@ -102,6 +102,8 @@ impl ObfuscationConfig {
                 func_outline: false,
                 vm_virtualize: false,
                 lib_obfuscate: true,
+                opsec: false,
+                opsec_warn: false,
                 junk_freq: 8,
                 pred_freq: 10,
                 arith_freq: 3,
@@ -131,6 +133,8 @@ impl ObfuscationConfig {
                 func_outline: false,
                 vm_virtualize: false,
                 lib_obfuscate: true,
+                opsec: false,
+                opsec_warn: true,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 5,
@@ -160,6 +164,8 @@ impl ObfuscationConfig {
                 func_outline: true,
                 vm_virtualize: false,
                 lib_obfuscate: true,
+                opsec: true,
+                opsec_warn: true,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 3,
@@ -190,6 +196,8 @@ impl ObfuscationConfig {
                 func_outline: true,
                 vm_virtualize: true,
                 lib_obfuscate: true,
+                opsec: true,
+                opsec_warn: true,
                 junk_freq: 2,
                 pred_freq: 2,
                 arith_freq: 2,

@@ -135,11 +135,11 @@ fn fixup_asm_for_macos(asm: &str) -> String {
         }
 
         // シンボルラベル定義: `main:` → `_main:`
-        if let Some(label) = trimmed.strip_suffix(':') {
-            if symbols.contains(label) {
-                result.push(format!("_{label}:"));
-                continue;
-            }
+        if let Some(label) = trimmed.strip_suffix(':')
+            && symbols.contains(label)
+        {
+            result.push(format!("_{label}:"));
+            continue;
         }
 
         // call 命令: `call func` → `call _func`
@@ -153,14 +153,14 @@ fn fixup_asm_for_macos(asm: &str) -> String {
 
         // leaq 命令: `leaq func(%rip), reg` → `leaq _func(%rip), reg`
         // （間接呼び出し変換で生成される lea 命令の macOS 対応）
-        if trimmed.starts_with("leaq ") {
-            if let Some(rip_pos) = trimmed.find("(%rip)") {
-                let after_leaq = &trimmed[5..rip_pos]; // "leaq " is 5 chars
-                if symbols.contains(after_leaq) {
-                    let suffix = &trimmed[rip_pos..];
-                    result.push(format!("    leaq _{after_leaq}{suffix}"));
-                    continue;
-                }
+        if trimmed.starts_with("leaq ")
+            && let Some(rip_pos) = trimmed.find("(%rip)")
+        {
+            let after_leaq = &trimmed[5..rip_pos]; // "leaq " is 5 chars
+            if symbols.contains(after_leaq) {
+                let suffix = &trimmed[rip_pos..];
+                result.push(format!("    leaq _{after_leaq}{suffix}"));
+                continue;
             }
         }
 
@@ -250,18 +250,21 @@ fn assert_obfuscation_preserves_behavior(source: &str, expected_exit_code: i32) 
     }
 
     let normal = compile_and_run(source, false);
-    assert_eq!(normal, expected_exit_code, "normal compilation: expected {expected_exit_code}, got {normal}");
+    assert_eq!(
+        normal, expected_exit_code,
+        "normal compilation: expected {expected_exit_code}, got {normal}"
+    );
 
     let obfuscated = compile_and_run(source, true);
-    assert_eq!(obfuscated, expected_exit_code, "obfuscated compilation: expected {expected_exit_code}, got {obfuscated}");
+    assert_eq!(
+        obfuscated, expected_exit_code,
+        "obfuscated compilation: expected {expected_exit_code}, got {obfuscated}"
+    );
 }
 
 #[test]
 fn test_constant_return() {
-    assert_obfuscation_preserves_behavior(
-        "int main(void) { return 42; }",
-        42,
-    );
+    assert_obfuscation_preserves_behavior("int main(void) { return 42; }", 42);
 }
 
 #[test]
@@ -489,13 +492,19 @@ fn compile_and_run_with_flags(source: &str, extra_flags: &[&str]) -> i32 {
 
     let gcc_output = if cfg!(target_arch = "x86_64") {
         Command::new("gcc")
-            .arg(&asm_path).arg("-o").arg(&bin_path)
-            .output().expect("failed to run gcc")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run gcc")
     } else {
         Command::new("arch")
             .args(["-x86_64", "gcc"])
-            .arg(&asm_path).arg("-o").arg(&bin_path)
-            .output().expect("failed to run arch -x86_64 gcc")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run arch -x86_64 gcc")
     };
     assert!(
         gcc_output.status.success(),
@@ -504,10 +513,15 @@ fn compile_and_run_with_flags(source: &str, extra_flags: &[&str]) -> i32 {
     );
 
     let run_output = if cfg!(target_arch = "x86_64") {
-        Command::new(&bin_path).output().expect("failed to run binary")
+        Command::new(&bin_path)
+            .output()
+            .expect("failed to run binary")
     } else {
-        Command::new("arch").arg("-x86_64").arg(&bin_path)
-            .output().expect("failed to run binary via arch -x86_64")
+        Command::new("arch")
+            .arg("-x86_64")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run binary via arch -x86_64")
     };
 
     run_output.status.code().unwrap_or(-1)
@@ -612,7 +626,10 @@ fn test_lib_obfuscate_strcmp_equal() {
         }
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
-    assert_eq!(result, 0, "strcmp(\"abc\", \"abc\") should be 0, got {result}");
+    assert_eq!(
+        result, 0,
+        "strcmp(\"abc\", \"abc\") should be 0, got {result}"
+    );
 }
 
 #[test]
@@ -631,7 +648,10 @@ fn test_lib_obfuscate_strcmp_less() {
         }
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
-    assert_eq!(result, 1, "strcmp(\"abc\", \"abd\") should be negative, got non-negative");
+    assert_eq!(
+        result, 1,
+        "strcmp(\"abc\", \"abd\") should be negative, got non-negative"
+    );
 }
 
 #[test]
@@ -650,7 +670,10 @@ fn test_lib_obfuscate_strcmp_greater() {
         }
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
-    assert_eq!(result, 1, "strcmp(\"abd\", \"abc\") should be positive, got non-positive");
+    assert_eq!(
+        result, 1,
+        "strcmp(\"abd\", \"abc\") should be positive, got non-positive"
+    );
 }
 
 #[test]
@@ -689,7 +712,10 @@ fn test_lib_obfuscate_strcpy() {
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
     // 'H' == 72
-    assert_eq!(result, 72, "strcpy: buf[0] should be 'H' (72), got {result}");
+    assert_eq!(
+        result, 72,
+        "strcpy: buf[0] should be 'H' (72), got {result}"
+    );
 }
 
 #[test]
@@ -751,7 +777,10 @@ fn test_lib_obfuscate_memcpy() {
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
     // 'X' == 88
-    assert_eq!(result, 88, "memcpy: buf[0] should be 'X' (88), got {result}");
+    assert_eq!(
+        result, 88,
+        "memcpy: buf[0] should be 'X' (88), got {result}"
+    );
 }
 
 #[test]
@@ -771,7 +800,10 @@ fn test_lib_obfuscate_memcpy_zero_length() {
         }
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
-    assert_eq!(result, 42, "memcpy(n=0): buf[0] should remain 42, got {result}");
+    assert_eq!(
+        result, 42,
+        "memcpy(n=0): buf[0] should remain 42, got {result}"
+    );
 }
 
 #[test]
@@ -813,7 +845,10 @@ fn test_lib_obfuscate_memset() {
         }
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
-    assert_eq!(result, 65, "memset(65): buf[0] should be 65 ('A'), got {result}");
+    assert_eq!(
+        result, 65,
+        "memset(65): buf[0] should be 65 ('A'), got {result}"
+    );
 }
 
 #[test]
@@ -873,7 +908,10 @@ fn test_lib_obfuscate_memcmp_equal() {
         }
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
-    assert_eq!(result, 0, "memcmp(\"abc\", \"abc\", 3) should be 0, got {result}");
+    assert_eq!(
+        result, 0,
+        "memcmp(\"abc\", \"abc\", 3) should be 0, got {result}"
+    );
 }
 
 #[test]
@@ -949,7 +987,10 @@ fn test_lib_obfuscate_strncmp_equal() {
         }
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
-    assert_eq!(result, 0, "strncmp(\"abcX\", \"abcY\", 3) should be 0, got {result}");
+    assert_eq!(
+        result, 0,
+        "strncmp(\"abcX\", \"abcY\", 3) should be 0, got {result}"
+    );
 }
 
 #[test]
@@ -1026,7 +1067,10 @@ fn test_lib_obfuscate_strncpy() {
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
     // 'H' == 72
-    assert_eq!(result, 72, "strncpy: buf[0] should be 'H' (72), got {result}");
+    assert_eq!(
+        result, 72,
+        "strncpy: buf[0] should be 'H' (72), got {result}"
+    );
 }
 
 #[test]
@@ -1047,7 +1091,10 @@ fn test_lib_obfuscate_strncpy_pad() {
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
     // buf[2] should be '\0' (0) due to zero-padding
-    assert_eq!(result, 0, "strncpy should zero-pad: buf[2] should be 0, got {result}");
+    assert_eq!(
+        result, 0,
+        "strncpy should zero-pad: buf[2] should be 0, got {result}"
+    );
 }
 
 #[test]
@@ -1089,7 +1136,10 @@ fn test_lib_obfuscate_strchr_found() {
         }
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
-    assert_eq!(result, 108, "strchr('hello','l') should find 'l' (108), got {result}");
+    assert_eq!(
+        result, 108,
+        "strchr('hello','l') should find 'l' (108), got {result}"
+    );
 }
 
 #[test]
@@ -1127,7 +1177,10 @@ fn test_lib_obfuscate_strchr_null_char() {
         }
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
-    assert_eq!(result, 0, "strchr('hi','\\0') should find null terminator, got {result}");
+    assert_eq!(
+        result, 0,
+        "strchr('hi','\\0') should find null terminator, got {result}"
+    );
 }
 
 #[test]
@@ -1172,7 +1225,10 @@ fn test_lib_obfuscate_strcat() {
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
     // '!' == 33
-    assert_eq!(result, 33, "strcat: buf[2] should be '!' (33), got {result}");
+    assert_eq!(
+        result, 33,
+        "strcat: buf[2] should be '!' (33), got {result}"
+    );
 }
 
 #[test]
@@ -1194,7 +1250,10 @@ fn test_lib_obfuscate_strcat_empty() {
     "#;
     let result = compile_and_run_with_flags(source, &["--obf-level=1"]);
     // 'A' == 65
-    assert_eq!(result, 65, "strcat with empty: buf[0] should be 'A' (65), got {result}");
+    assert_eq!(
+        result, 65,
+        "strcat with empty: buf[0] should be 'A' (65), got {result}"
+    );
 }
 
 #[test]
@@ -1241,4 +1300,184 @@ fn test_cff_strcmp_level2() {
     "#;
     let result = compile_and_run_with_level(source, 2);
     assert_eq!(result, 42, "CFF+strcmp level 2: expected 42, got {result}");
+}
+
+// === OPSEC パス (Pass 16) テスト ===
+
+/// テストヘルパー: 指定オプションでコンパイルし、アセンブリ出力とstderrを返す
+fn compile_to_asm_with_opts(source: &str, extra_args: &[&str]) -> (String, String) {
+    let dir = TempDir::new().unwrap();
+    let src_path = dir.path().join("test.c");
+    let asm_path = dir.path().join("test.s");
+
+    std::fs::write(&src_path, source).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrugocc"));
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.arg("-S").arg(&src_path);
+
+    let output = cmd.output().expect("failed to run compiler");
+    assert!(
+        output.status.success(),
+        "compilation failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let asm = if asm_path.exists() {
+        std::fs::read_to_string(&asm_path).unwrap()
+    } else {
+        String::new()
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    (asm, stderr)
+}
+
+/// テストヘルパー: 指定オプションでコンパイル → 実行して終了コードを返す
+fn compile_and_run_with_opts(source: &str, extra_args: &[&str]) -> i32 {
+    let dir = TempDir::new().unwrap();
+    let src_path = dir.path().join("test.c");
+    let asm_path = dir.path().join("test.s");
+    let bin_path = dir.path().join("test");
+
+    std::fs::write(&src_path, source).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrugocc"));
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.arg("-S").arg(&src_path);
+
+    let output = cmd.output().expect("failed to run compiler");
+    assert!(
+        output.status.success(),
+        "compilation failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    assert!(asm_path.exists(), "assembly file not generated");
+
+    if cfg!(target_os = "macos") {
+        let asm = std::fs::read_to_string(&asm_path).unwrap();
+        let asm = fixup_asm_for_macos(&asm);
+        std::fs::write(&asm_path, asm).unwrap();
+    }
+
+    let gcc_output = if cfg!(target_arch = "x86_64") {
+        Command::new("gcc")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run gcc")
+    } else {
+        Command::new("arch")
+            .args(["-x86_64", "gcc"])
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run arch -x86_64 gcc")
+    };
+
+    assert!(
+        gcc_output.status.success(),
+        "gcc failed:\nstderr: {}",
+        String::from_utf8_lossy(&gcc_output.stderr),
+    );
+
+    let run_output = if cfg!(target_arch = "x86_64") {
+        Command::new(&bin_path)
+            .output()
+            .expect("failed to run binary")
+    } else {
+        Command::new("arch")
+            .arg("-x86_64")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run binary via arch -x86_64")
+    };
+
+    run_output.status.code().unwrap_or(-1)
+}
+
+#[test]
+fn test_opsec_symbol_rename() {
+    // 関数名がアセンブリ出力に残らないことを確認
+    let source = r#"
+        int my_secret_func(int x) { return x + 1; }
+        int main(void) { return my_secret_func(41); }
+    "#;
+    let (asm, _) = compile_to_asm_with_opts(source, &["--fobfuscate", "--obf-level=3"]);
+    assert!(
+        !asm.contains("my_secret_func"),
+        "OPSEC: function name 'my_secret_func' should not appear in assembly output"
+    );
+}
+
+#[test]
+fn test_opsec_main_preserved() {
+    // main はリネームされないことを確認
+    let source = r#"
+        int helper(int x) { return x * 2; }
+        int main(void) { return helper(21); }
+    "#;
+    let (asm, _) = compile_to_asm_with_opts(source, &["--fobfuscate", "--obf-level=3"]);
+    assert!(
+        asm.contains("main:") || asm.contains("main :"),
+        "OPSEC: 'main' label should be preserved in assembly output"
+    );
+}
+
+#[test]
+fn test_opsec_external_preserved() {
+    // 外部関数（printf）はリネームされないことを確認
+    let source = r#"
+        int printf(char *fmt, ...);
+        int main(void) {
+            printf("hi");
+            return 0;
+        }
+    "#;
+    let (asm, _) = compile_to_asm_with_opts(source, &["--fobfuscate", "--obf-level=3"]);
+    assert!(
+        asm.contains("printf"),
+        "OPSEC: external function 'printf' should be preserved in assembly output"
+    );
+}
+
+#[test]
+fn test_opsec_correctness() {
+    // リネーム後もプログラムが正しく動作すること
+    if !can_run_x86_64() {
+        eprintln!("skipping: x86_64 execution not available");
+        return;
+    }
+    let source = r#"
+        int compute(int a, int b) { return a * b + 2; }
+        int wrapper(int x) { return compute(x, 3); }
+        int main(void) { return wrapper(10); }
+    "#;
+    let result = compile_and_run_with_opts(source, &["--fobfuscate", "--obf-level=3"]);
+    assert_eq!(result, 32, "OPSEC correctness: expected 32, got {result}");
+}
+
+#[test]
+fn test_opsec_warn() {
+    // IP アドレスを含む文字列リテラル → stderr に OPSEC WARNING が出ること
+    let source = r#"
+        int main(void) {
+            char *s = "connect to 192.168.1.1";
+            return s[0];
+        }
+    "#;
+    let (_, stderr) = compile_to_asm_with_opts(source, &["--fobfuscate", "--obf-level=3"]);
+    assert!(
+        stderr.contains("OPSEC WARNING"),
+        "OPSEC: stderr should contain 'OPSEC WARNING' for IP address string, got: {stderr}"
+    );
 }

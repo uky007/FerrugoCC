@@ -8,7 +8,7 @@
 //!          → [Codegen] → [RegAlloc+Coalescing] → [Fixup] → [Emit] → source.s → [gcc] → binary
 //! ```
 //!
-//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（15パス）を適用する。
+//! `--fobfuscate` 指定時は最適化の代わりに難読化パス（16パス）を適用する。
 //! `--obf-level=N` で難読化強度を段階的に制御可能（1=軽量〜4=最大）。
 //!
 //! # 使い方
@@ -36,15 +36,15 @@
 //! ferrugocc --fobfuscate --obf-outline-min-block=3 <source.c> # アウトライン最小ブロック変更
 //! ```
 
+mod codegen;
+mod driver;
+mod emit;
 mod error;
 mod lex;
-mod parse;
-mod typecheck;
-mod tacky;
-mod codegen;
-mod emit;
-mod driver;
 mod obfuscation;
+mod parse;
+mod tacky;
+mod typecheck;
 
 use std::path::PathBuf;
 use std::process;
@@ -149,6 +149,14 @@ struct Cli {
     #[arg(long = "obf-no-lib-obfuscate")]
     obf_no_lib_obfuscate: bool,
 
+    /// OPSEC 衛生化（シンボルリネーム）を無効化
+    #[arg(long = "obf-no-opsec")]
+    obf_no_opsec: bool,
+
+    /// OPSEC 文字列リーク警告を無効化
+    #[arg(long = "obf-no-opsec-warn")]
+    obf_no_opsec_warn: bool,
+
     /// 算術置換頻度（N回に1回適用）
     #[arg(long = "obf-arith-freq")]
     obf_arith_freq: Option<usize>,
@@ -206,29 +214,77 @@ fn main() {
         let mut config = ObfuscationConfig::from_level(cli.obf_level);
 
         // 個別パス無効化
-        if cli.obf_no_cff { config.cff = false; }
-        if cli.obf_no_strings { config.string_encryption = false; }
-        if cli.obf_no_anti_disasm { config.anti_disassembly = false; }
-        if cli.obf_no_indirect_calls { config.indirect_calls = false; }
-        if cli.obf_no_arith_subst { config.arith_subst = false; }
-        if cli.obf_no_reg_shuffle { config.reg_shuffle = false; }
-        if cli.obf_no_stack_frame { config.stack_frame_obf = false; }
-        if cli.obf_no_instr_subst { config.instr_subst = false; }
-        if cli.obf_no_func_inline { config.func_inline = false; }
-        if cli.obf_no_func_outline { config.func_outline = false; }
-        if cli.obf_no_vm_virtualize { config.vm_virtualize = false; }
-        if cli.obf_no_lib_obfuscate { config.lib_obfuscate = false; }
+        if cli.obf_no_cff {
+            config.cff = false;
+        }
+        if cli.obf_no_strings {
+            config.string_encryption = false;
+        }
+        if cli.obf_no_anti_disasm {
+            config.anti_disassembly = false;
+        }
+        if cli.obf_no_indirect_calls {
+            config.indirect_calls = false;
+        }
+        if cli.obf_no_arith_subst {
+            config.arith_subst = false;
+        }
+        if cli.obf_no_reg_shuffle {
+            config.reg_shuffle = false;
+        }
+        if cli.obf_no_stack_frame {
+            config.stack_frame_obf = false;
+        }
+        if cli.obf_no_instr_subst {
+            config.instr_subst = false;
+        }
+        if cli.obf_no_func_inline {
+            config.func_inline = false;
+        }
+        if cli.obf_no_func_outline {
+            config.func_outline = false;
+        }
+        if cli.obf_no_vm_virtualize {
+            config.vm_virtualize = false;
+        }
+        if cli.obf_no_lib_obfuscate {
+            config.lib_obfuscate = false;
+        }
+        if cli.obf_no_opsec {
+            config.opsec = false;
+        }
+        if cli.obf_no_opsec_warn {
+            config.opsec_warn = false;
+        }
 
         // 頻度オーバーライド
-        if let Some(freq) = cli.obf_junk_freq { config.junk_freq = freq; }
-        if let Some(freq) = cli.obf_pred_freq { config.pred_freq = freq; }
-        if let Some(freq) = cli.obf_arith_freq { config.arith_freq = freq; }
-        if let Some(freq) = cli.obf_reg_shuffle_freq { config.reg_shuffle_freq = freq; }
-        if let Some(n) = cli.obf_stack_padding { config.stack_frame_padding = n; }
-        if let Some(freq) = cli.obf_stack_fake_freq { config.stack_frame_fake_freq = freq; }
-        if let Some(freq) = cli.obf_instr_subst_freq { config.instr_subst_freq = freq; }
-        if let Some(freq) = cli.obf_inline_freq { config.func_inline_freq = freq; }
-        if let Some(n) = cli.obf_outline_min_block { config.func_outline_min_block = n; }
+        if let Some(freq) = cli.obf_junk_freq {
+            config.junk_freq = freq;
+        }
+        if let Some(freq) = cli.obf_pred_freq {
+            config.pred_freq = freq;
+        }
+        if let Some(freq) = cli.obf_arith_freq {
+            config.arith_freq = freq;
+        }
+        if let Some(freq) = cli.obf_reg_shuffle_freq {
+            config.reg_shuffle_freq = freq;
+        }
+        if let Some(n) = cli.obf_stack_padding {
+            config.stack_frame_padding = n;
+        }
+        if let Some(freq) = cli.obf_stack_fake_freq {
+            config.stack_frame_fake_freq = freq;
+        }
+        if let Some(freq) = cli.obf_instr_subst_freq {
+            config.instr_subst_freq = freq;
+        }
+        if let Some(freq) = cli.obf_inline_freq {
+            config.func_inline_freq = freq;
+        }
+        if let Some(n) = cli.obf_outline_min_block {
+            config.func_outline_min_block = n;
+        }
 
         Some(config)
     } else {

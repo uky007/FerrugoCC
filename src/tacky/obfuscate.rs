@@ -24,8 +24,10 @@
 //!    - ジャンプテーブル: `.data` セクションにブロックラベルの配列を配置し `jmp *%rax` で分岐
 //!    - 状態エンコード: `encoded = index * 37 + 0xCAFE` のアフィン変換で状態変数を符号化
 //! 10. **String Encryption**（文字列暗号化）— 文字列リテラルを加算暗号化し main() で復号
+//! 11. **OPSEC Sanitization**（OPSEC 衛生化）— シンボル名をリネームし、疑わしい文字列を警告
 //!
 //! Pass 10 は他のパスの後に適用する。復号コードが CFF 等で破壊されるのを防ぐため。
+//! Pass 11（OPSEC）は全パスの最後に適用する。シンボルリネームが他のパスに影響しないよう。
 //!
 //! # ASM レベル難読化（codegen/mod.rs で適用、レジスタ割り当て後）
 //! - **Stack Frame Obfuscation**: 偽のスタックスロットと偽の read/write 操作を挿入し偽ローカル変数を生成
@@ -37,8 +39,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::tacky_ast::*;
-use crate::parse::ast::Type;
 use crate::obfuscation::ObfuscationConfig;
+use crate::parse::ast::Type;
 
 /// 難読化コンテキスト — temp 変数とラベルのカウンタを管理
 struct ObfCtx {
@@ -47,6 +49,7 @@ struct ObfCtx {
     inline_counter: usize,
     outline_counter: usize,
     vm_counter: usize,
+    opsec_counter: usize,
 }
 
 impl ObfCtx {
@@ -57,6 +60,7 @@ impl ObfCtx {
             inline_counter: 0,
             outline_counter: 0,
             vm_counter: 0,
+            opsec_counter: 0,
         }
     }
 
@@ -84,7 +88,9 @@ impl ObfCtx {
 /// 4. Pass 13: 関数アウトライン化（難読化済みコードが関数に切り出される）
 /// 5. Pass 14: VM仮想化（適格な関数をバイトコード＋VMインタプリタに変換）
 /// 6. Pass 5: CFF（VMディスパッチループを含む全関数に適用 → 二重間接化）
-/// 7. Pass 6: 文字列暗号化（復号コードが CFF 等で破壊されるのを防ぐ）
+/// 7. Pass 16a: OPSEC 文字列リーク警告（暗号化前に検査）
+/// 8. Pass 6: 文字列暗号化（復号コードが CFF 等で破壊されるのを防ぐ）
+/// 9. Pass 16b: OPSEC シンボル難読化（全パスの最後）
 pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProgram {
     let mut program = program;
 
@@ -102,25 +108,43 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
 
     // Pass 1-4: 関数ごとの変換
     for func in &mut program.functions {
-
         // Pass 1: 定数の間接化
         if config.constant_encoding {
-            func.body = constant_encoding(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types);
+            func.body = constant_encoding(
+                std::mem::take(&mut func.body),
+                &mut ctx,
+                &mut func.var_types,
+            );
         }
 
         // Pass 2: 算術置換（Add/Subtract を多段計算に展開）
         if config.arith_subst {
-            func.body = arithmetic_substitution(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types, config.arith_freq);
+            func.body = arithmetic_substitution(
+                std::mem::take(&mut func.body),
+                &mut ctx,
+                &mut func.var_types,
+                config.arith_freq,
+            );
         }
 
         // Pass 3: ジャンクコード挿入
         if config.junk_code {
-            func.body = junk_code_insertion(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types, config.junk_freq);
+            func.body = junk_code_insertion(
+                std::mem::take(&mut func.body),
+                &mut ctx,
+                &mut func.var_types,
+                config.junk_freq,
+            );
         }
 
         // Pass 4: 不透明述語（多様化パターン）
         if config.opaque_predicates {
-            func.body = opaque_predicates(std::mem::take(&mut func.body), &mut ctx, &mut func.var_types, config.pred_freq);
+            func.body = opaque_predicates(
+                std::mem::take(&mut func.body),
+                &mut ctx,
+                &mut func.var_types,
+                config.pred_freq,
+            );
         }
     }
 
@@ -148,9 +172,19 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
         }
     }
 
+    // Pass 16a: OPSEC 文字列リーク警告（暗号化前に検査）
+    if config.opsec_warn {
+        opsec_warn_strings(&program);
+    }
+
     // Pass 6: 文字列暗号化（他のパスの後に適用 — 復号コードが CFF 等で壊されるのを防ぐ）
     if config.string_encryption {
         string_encryption(&mut program, &mut ctx, config.string_key);
+    }
+
+    // Pass 16b: OPSEC シンボル難読化（全パスの最後）
+    if config.opsec {
+        opsec_sanitize(&mut program, &mut ctx);
     }
 
     program
@@ -167,18 +201,18 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
 fn replace_library_functions(program: &mut TackyProgram, ctx: &mut ObfCtx) {
     /// 差し替え対象のライブラリ関数名
     const TARGET_FUNCTIONS: &[&str] = &[
-        "strlen", "strcmp", "strcpy", "memcpy", "memset",
-        "memcmp", "strncmp", "strncpy", "strchr", "strcat",
+        "strlen", "strcmp", "strcpy", "memcpy", "memset", "memcmp", "strncmp", "strncpy", "strchr",
+        "strcat",
     ];
 
     // 全 FunCall を走査し、対象関数名を収集
     let mut needed: HashSet<String> = HashSet::new();
     for func in &program.functions {
         for instr in &func.body {
-            if let TackyInstruction::FunCall { name, .. } = instr {
-                if TARGET_FUNCTIONS.contains(&name.as_str()) {
-                    needed.insert(name.clone());
-                }
+            if let TackyInstruction::FunCall { name, .. } = instr
+                && TARGET_FUNCTIONS.contains(&name.as_str())
+            {
+                needed.insert(name.clone());
             }
         }
     }
@@ -250,10 +284,10 @@ fn replace_library_functions(program: &mut TackyProgram, ctx: &mut ObfCtx) {
     // FunCall のターゲットを差し替え
     for func in &mut program.functions {
         for instr in &mut func.body {
-            if let TackyInstruction::FunCall { name, .. } = instr {
-                if let Some(obf_name) = generated.get(name) {
-                    *name = obf_name.clone();
-                }
+            if let TackyInstruction::FunCall { name, .. } = instr
+                && let Some(obf_name) = generated.get(name)
+            {
+                *name = obf_name.clone();
             }
         }
     }
@@ -274,10 +308,10 @@ fn replace_library_functions(program: &mut TackyProgram, ctx: &mut ObfCtx) {
 /// ```
 fn generate_strlen(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
     let p = "p".to_string();
-    let len = ctx.fresh_tmp();    // loop counter (Long)
-    let ptr = ctx.fresh_tmp();    // ptr = s + len (Pointer(Char))
-    let ch = ctx.fresh_tmp();     // *ptr (Char)
-    let ci = ctx.fresh_tmp();     // zero-extended to Int
+    let len = ctx.fresh_tmp(); // loop counter (Long)
+    let ptr = ctx.fresh_tmp(); // ptr = s + len (Pointer(Char))
+    let ch = ctx.fresh_tmp(); // *ptr (Char)
+    let ci = ctx.fresh_tmp(); // zero-extended to Int
 
     let loop_start = ctx.fresh_label();
     let loop_end = ctx.fresh_label();
@@ -362,14 +396,14 @@ fn generate_strlen(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
 fn generate_strcmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
     let p1 = "p1".to_string();
     let p2 = "p2".to_string();
-    let idx = ctx.fresh_tmp();     // loop index (Long)
-    let ptr1 = ctx.fresh_tmp();    // s1 + idx
-    let ptr2 = ctx.fresh_tmp();    // s2 + idx
-    let ch1 = ctx.fresh_tmp();     // *ptr1 (Char)
-    let ch2 = ctx.fresh_tmp();     // *ptr2 (Char)
-    let ci1 = ctx.fresh_tmp();     // ZeroExtend ch1 → Int
-    let ci2 = ctx.fresh_tmp();     // ZeroExtend ch2 → Int
-    let diff = ctx.fresh_tmp();    // ci1 - ci2 (Int)
+    let idx = ctx.fresh_tmp(); // loop index (Long)
+    let ptr1 = ctx.fresh_tmp(); // s1 + idx
+    let ptr2 = ctx.fresh_tmp(); // s2 + idx
+    let ch1 = ctx.fresh_tmp(); // *ptr1 (Char)
+    let ch2 = ctx.fresh_tmp(); // *ptr2 (Char)
+    let ci1 = ctx.fresh_tmp(); // ZeroExtend ch1 → Int
+    let ci2 = ctx.fresh_tmp(); // ZeroExtend ch2 → Int
+    let diff = ctx.fresh_tmp(); // ci1 - ci2 (Int)
 
     let loop_start = ctx.fresh_label();
     let loop_end = ctx.fresh_label();
@@ -491,11 +525,11 @@ fn generate_strcmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
 fn generate_strcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
     let dst = "p_dst".to_string();
     let src = "p_src".to_string();
-    let idx = ctx.fresh_tmp();      // loop index (Long)
-    let src_ptr = ctx.fresh_tmp();  // src + idx
-    let dst_ptr = ctx.fresh_tmp();  // dst + idx
-    let ch = ctx.fresh_tmp();       // *src_ptr (Char)
-    let ci = ctx.fresh_tmp();       // ZeroExtend ch → Int
+    let idx = ctx.fresh_tmp(); // loop index (Long)
+    let src_ptr = ctx.fresh_tmp(); // src + idx
+    let dst_ptr = ctx.fresh_tmp(); // dst + idx
+    let ch = ctx.fresh_tmp(); // *src_ptr (Char)
+    let ci = ctx.fresh_tmp(); // ZeroExtend ch → Int
 
     let loop_start = ctx.fresh_label();
     let loop_end = ctx.fresh_label();
@@ -593,11 +627,11 @@ fn generate_memcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
     let dst = "p_dst".to_string();
     let src = "p_src".to_string();
     let n = "p_n".to_string();
-    let idx = ctx.fresh_tmp();      // loop index (Long)
-    let src_ptr = ctx.fresh_tmp();  // src + idx
-    let dst_ptr = ctx.fresh_tmp();  // dst + idx
-    let byte = ctx.fresh_tmp();     // loaded byte (Char)
-    let cmp = ctx.fresh_tmp();      // idx < n (Int)
+    let idx = ctx.fresh_tmp(); // loop index (Long)
+    let src_ptr = ctx.fresh_tmp(); // src + idx
+    let dst_ptr = ctx.fresh_tmp(); // dst + idx
+    let byte = ctx.fresh_tmp(); // loaded byte (Char)
+    let cmp = ctx.fresh_tmp(); // idx < n (Int)
 
     let loop_start = ctx.fresh_label();
     let loop_end = ctx.fresh_label();
@@ -699,10 +733,10 @@ fn generate_memset(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
     let s = "p_s".to_string();
     let c = "p_c".to_string();
     let n = "p_n".to_string();
-    let b = ctx.fresh_tmp();        // truncated byte (Char)
-    let idx = ctx.fresh_tmp();      // loop index (Long)
-    let dst_ptr = ctx.fresh_tmp();  // s + idx
-    let cmp = ctx.fresh_tmp();      // idx < n (Int)
+    let b = ctx.fresh_tmp(); // truncated byte (Char)
+    let idx = ctx.fresh_tmp(); // loop index (Long)
+    let dst_ptr = ctx.fresh_tmp(); // s + idx
+    let cmp = ctx.fresh_tmp(); // idx < n (Int)
 
     let loop_start = ctx.fresh_label();
     let loop_end = ctx.fresh_label();
@@ -1204,13 +1238,13 @@ fn generate_strncpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
 fn generate_strchr(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
     let s = "p_s".to_string();
     let c = "p_c".to_string();
-    let target = ctx.fresh_tmp();   // Truncate(c) → Char
-    let idx = ctx.fresh_tmp();      // Long
-    let ptr = ctx.fresh_tmp();      // s + idx
-    let ch = ctx.fresh_tmp();       // Char
-    let ci = ctx.fresh_tmp();       // ZeroExtend(ch) → Int
-    let ti = ctx.fresh_tmp();       // ZeroExtend(target) → Int
-    let eq = ctx.fresh_tmp();       // ci == ti (Int)
+    let target = ctx.fresh_tmp(); // Truncate(c) → Char
+    let idx = ctx.fresh_tmp(); // Long
+    let ptr = ctx.fresh_tmp(); // s + idx
+    let ch = ctx.fresh_tmp(); // Char
+    let ci = ctx.fresh_tmp(); // ZeroExtend(ch) → Int
+    let ti = ctx.fresh_tmp(); // ZeroExtend(target) → Int
+    let eq = ctx.fresh_tmp(); // ci == ti (Int)
 
     let loop_start = ctx.fresh_label();
     let ret_found = ctx.fresh_label();
@@ -1320,12 +1354,12 @@ fn generate_strchr(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
 fn generate_strcat(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
     let dst = "p_dst".to_string();
     let src = "p_src".to_string();
-    let di = ctx.fresh_tmp();       // dst index (Long)
-    let si = ctx.fresh_tmp();       // src index (Long)
-    let dptr = ctx.fresh_tmp();     // dst + di
-    let sptr = ctx.fresh_tmp();     // src + si
-    let ch = ctx.fresh_tmp();       // Char
-    let ci = ctx.fresh_tmp();       // Int
+    let di = ctx.fresh_tmp(); // dst index (Long)
+    let si = ctx.fresh_tmp(); // src index (Long)
+    let dptr = ctx.fresh_tmp(); // dst + di
+    let sptr = ctx.fresh_tmp(); // src + si
+    let ch = ctx.fresh_tmp(); // Char
+    let ci = ctx.fresh_tmp(); // Int
 
     let find_start = ctx.fresh_label();
     let find_end = ctx.fresh_label();
@@ -1446,12 +1480,17 @@ fn generate_strcat(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
 /// コールグラフを破壊し、元の関数構造の復元を困難にする。
 fn inline_functions(program: &mut TackyProgram, ctx: &mut ObfCtx, freq: usize) {
     // 静的変数・静的定数の名前を収集（リネーム対象外）
-    let static_names: HashSet<String> = program.static_vars.iter().map(|v| v.name.clone())
+    let static_names: HashSet<String> = program
+        .static_vars
+        .iter()
+        .map(|v| v.name.clone())
         .chain(program.static_constants.iter().map(|c| c.name.clone()))
         .collect();
 
     // 全関数を clone して callee_map を構築（可変借用と不変借用の衝突を回避）
-    let callee_map: HashMap<String, TackyFunction> = program.functions.iter()
+    let callee_map: HashMap<String, TackyFunction> = program
+        .functions
+        .iter()
         .map(|f| (f.name.clone(), f.clone()))
         .collect();
 
@@ -1460,63 +1499,72 @@ fn inline_functions(program: &mut TackyProgram, ctx: &mut ObfCtx, freq: usize) {
         let mut eligible_count = 0usize;
 
         for instr in std::mem::take(&mut func.body) {
-            if let TackyInstruction::FunCall { ref name, ref args, ref dst, ref dst_type, is_variadic: _ } = instr {
-                if let Some(callee) = callee_map.get(name) {
-                    if is_inline_eligible(callee, name, dst_type, &static_names) {
-                        eligible_count += 1;
-                        if freq > 0 && eligible_count % freq == 0 {
-                            // インライン展開を実行
-                            let prefix = format!("_inline_{}", ctx.inline_counter);
-                            ctx.inline_counter += 1;
-                            let end_label = format!("{}_end", prefix);
+            if let TackyInstruction::FunCall {
+                ref name,
+                ref args,
+                ref dst,
+                ref dst_type,
+                is_variadic: _,
+            } = instr
+                && let Some(callee) = callee_map.get(name)
+                && is_inline_eligible(callee, name, dst_type, &static_names)
+            {
+                eligible_count += 1;
+                if freq > 0 && eligible_count.is_multiple_of(freq) {
+                    // インライン展開を実行
+                    let prefix = format!("_inline_{}", ctx.inline_counter);
+                    ctx.inline_counter += 1;
+                    let end_label = format!("{}_end", prefix);
 
-                            // 引数→リネームされたパラメータへの Copy
-                            for (param, arg) in callee.params.iter().zip(args.iter()) {
-                                let renamed_param = format!("{}_{}", prefix, param);
-                                new_body.push(TackyInstruction::Copy {
-                                    src: arg.clone(),
-                                    dst: TackyVal::Var(renamed_param),
-                                });
-                            }
+                    // 引数→リネームされたパラメータへの Copy
+                    for (param, arg) in callee.params.iter().zip(args.iter()) {
+                        let renamed_param = format!("{}_{}", prefix, param);
+                        new_body.push(TackyInstruction::Copy {
+                            src: arg.clone(),
+                            dst: TackyVal::Var(renamed_param),
+                        });
+                    }
 
-                            // リネームされた本体を挿入
-                            for callee_instr in &callee.body {
-                                match callee_instr {
-                                    TackyInstruction::Return(val) => {
-                                        if !matches!(callee.return_type, Type::Void) {
-                                            new_body.push(TackyInstruction::Copy {
-                                                src: rename_val(val, &prefix, &static_names),
-                                                dst: dst.clone(),
-                                            });
-                                        }
-                                        new_body.push(TackyInstruction::Jump(end_label.clone()));
-                                    }
-                                    TackyInstruction::ReturnVoid => {
-                                        new_body.push(TackyInstruction::Jump(end_label.clone()));
-                                    }
-                                    _ => {
-                                        new_body.push(rename_instruction(
-                                            callee_instr, &prefix, &static_names,
-                                            dst, &end_label, &callee.return_type,
-                                        ));
-                                    }
+                    // リネームされた本体を挿入
+                    for callee_instr in &callee.body {
+                        match callee_instr {
+                            TackyInstruction::Return(val) => {
+                                if !matches!(callee.return_type, Type::Void) {
+                                    new_body.push(TackyInstruction::Copy {
+                                        src: rename_val(val, &prefix, &static_names),
+                                        dst: dst.clone(),
+                                    });
                                 }
+                                new_body.push(TackyInstruction::Jump(end_label.clone()));
                             }
-
-                            // end ラベル
-                            new_body.push(TackyInstruction::Label(end_label.clone()));
-
-                            // リネームされた変数を呼び出し元の var_types に追加
-                            for (var_name, var_type) in &callee.var_types {
-                                if !static_names.contains(var_name) {
-                                    let renamed = format!("{}_{}", prefix, var_name);
-                                    func.var_types.insert(renamed, var_type.clone());
-                                }
+                            TackyInstruction::ReturnVoid => {
+                                new_body.push(TackyInstruction::Jump(end_label.clone()));
                             }
-
-                            continue;
+                            _ => {
+                                new_body.push(rename_instruction(
+                                    callee_instr,
+                                    &prefix,
+                                    &static_names,
+                                    dst,
+                                    &end_label,
+                                    &callee.return_type,
+                                ));
+                            }
                         }
                     }
+
+                    // end ラベル
+                    new_body.push(TackyInstruction::Label(end_label.clone()));
+
+                    // リネームされた変数を呼び出し元の var_types に追加
+                    for (var_name, var_type) in &callee.var_types {
+                        if !static_names.contains(var_name) {
+                            let renamed = format!("{}_{}", prefix, var_name);
+                            func.var_types.insert(renamed, var_type.clone());
+                        }
+                    }
+
+                    continue;
                 }
             }
             new_body.push(instr);
@@ -1562,16 +1610,20 @@ fn is_inline_eligible(
 
 /// 関数本体に自身への FunCall があるか判定する
 fn is_directly_recursive(func: &TackyFunction) -> bool {
-    func.body.iter().any(|instr| {
-        matches!(instr, TackyInstruction::FunCall { name, .. } if name == &func.name)
-    })
+    func.body
+        .iter()
+        .any(|instr| matches!(instr, TackyInstruction::FunCall { name, .. } if name == &func.name))
 }
 
 /// GetAddress の src がパラメータか判定する
 fn has_param_address_taken(func: &TackyFunction, static_names: &HashSet<String>) -> bool {
     let params: HashSet<&str> = func.params.iter().map(|s| s.as_str()).collect();
     func.body.iter().any(|instr| {
-        if let TackyInstruction::GetAddress { src: TackyVal::Var(name), .. } = instr {
+        if let TackyInstruction::GetAddress {
+            src: TackyVal::Var(name),
+            ..
+        } = instr
+        {
             // 静的変数はパラメータではない
             !static_names.contains(name) && params.contains(name.as_str())
         } else {
@@ -1632,89 +1684,145 @@ fn rename_instruction(
                 }
             }
         }
-        TackyInstruction::ReturnVoid => {
-            TackyInstruction::Jump(end_label.to_string())
-        }
+        TackyInstruction::ReturnVoid => TackyInstruction::Jump(end_label.to_string()),
 
         TackyInstruction::Unary { op, src, dst } => TackyInstruction::Unary {
-            op: *op, src: rv(src), dst: rv(dst),
+            op: *op,
+            src: rv(src),
+            dst: rv(dst),
         },
-        TackyInstruction::Binary { op, left, right, dst } => TackyInstruction::Binary {
-            op: *op, left: rv(left), right: rv(right), dst: rv(dst),
+        TackyInstruction::Binary {
+            op,
+            left,
+            right,
+            dst,
+        } => TackyInstruction::Binary {
+            op: *op,
+            left: rv(left),
+            right: rv(right),
+            dst: rv(dst),
         },
         TackyInstruction::Copy { src, dst } => TackyInstruction::Copy {
-            src: rv(src), dst: rv(dst),
+            src: rv(src),
+            dst: rv(dst),
         },
         TackyInstruction::Jump(target) => TackyInstruction::Jump(rl(target)),
         TackyInstruction::JumpIfZero { condition, target } => TackyInstruction::JumpIfZero {
-            condition: rv(condition), target: rl(target),
+            condition: rv(condition),
+            target: rl(target),
         },
         TackyInstruction::JumpIfNotZero { condition, target } => TackyInstruction::JumpIfNotZero {
-            condition: rv(condition), target: rl(target),
+            condition: rv(condition),
+            target: rl(target),
         },
         TackyInstruction::Label(name) => TackyInstruction::Label(rl(name)),
-        TackyInstruction::FunCall { name, args, dst, dst_type, is_variadic } => TackyInstruction::FunCall {
+        TackyInstruction::FunCall {
+            name,
+            args,
+            dst,
+            dst_type,
+            is_variadic,
+        } => TackyInstruction::FunCall {
             name: name.clone(), // 関数名はリネームしない
-            args: args.iter().map(|a| rv(a)).collect(),
+            args: args.iter().map(rv).collect(),
             dst: rv(dst),
             dst_type: dst_type.clone(),
             is_variadic: *is_variadic,
         },
         TackyInstruction::SignExtend { src, dst } => TackyInstruction::SignExtend {
-            src: rv(src), dst: rv(dst),
+            src: rv(src),
+            dst: rv(dst),
         },
         TackyInstruction::ZeroExtend { src, dst } => TackyInstruction::ZeroExtend {
-            src: rv(src), dst: rv(dst),
+            src: rv(src),
+            dst: rv(dst),
         },
         TackyInstruction::Truncate { src, dst } => TackyInstruction::Truncate {
-            src: rv(src), dst: rv(dst),
+            src: rv(src),
+            dst: rv(dst),
         },
         TackyInstruction::IntToDouble { src, dst } => TackyInstruction::IntToDouble {
-            src: rv(src), dst: rv(dst),
+            src: rv(src),
+            dst: rv(dst),
         },
         TackyInstruction::DoubleToInt { src, dst } => TackyInstruction::DoubleToInt {
-            src: rv(src), dst: rv(dst),
+            src: rv(src),
+            dst: rv(dst),
         },
         TackyInstruction::UIntToDouble { src, dst } => TackyInstruction::UIntToDouble {
-            src: rv(src), dst: rv(dst),
+            src: rv(src),
+            dst: rv(dst),
         },
         TackyInstruction::DoubleToUInt { src, dst } => TackyInstruction::DoubleToUInt {
-            src: rv(src), dst: rv(dst),
+            src: rv(src),
+            dst: rv(dst),
         },
         TackyInstruction::GetAddress { src, dst } => TackyInstruction::GetAddress {
-            src: rv(src), dst: rv(dst),
+            src: rv(src),
+            dst: rv(dst),
         },
         TackyInstruction::Load { src_ptr, dst } => TackyInstruction::Load {
-            src_ptr: rv(src_ptr), dst: rv(dst),
+            src_ptr: rv(src_ptr),
+            dst: rv(dst),
         },
         TackyInstruction::Store { src, dst_ptr } => TackyInstruction::Store {
-            src: rv(src), dst_ptr: rv(dst_ptr),
+            src: rv(src),
+            dst_ptr: rv(dst_ptr),
         },
-        TackyInstruction::AddPtr { ptr, index, scale, dst } => TackyInstruction::AddPtr {
-            ptr: rv(ptr), index: rv(index), scale: *scale, dst: rv(dst),
+        TackyInstruction::AddPtr {
+            ptr,
+            index,
+            scale,
+            dst,
+        } => TackyInstruction::AddPtr {
+            ptr: rv(ptr),
+            index: rv(index),
+            scale: *scale,
+            dst: rv(dst),
         },
         TackyInstruction::CopyToOffset { src, dst, offset } => TackyInstruction::CopyToOffset {
             src: rv(src),
-            dst: if static_names.contains(dst) { dst.clone() } else { format!("{}_{}", prefix, dst) },
+            dst: if static_names.contains(dst) {
+                dst.clone()
+            } else {
+                format!("{}_{}", prefix, dst)
+            },
             offset: *offset,
         },
         TackyInstruction::CopyFromOffset { src, offset, dst } => TackyInstruction::CopyFromOffset {
-            src: if static_names.contains(src) { src.clone() } else { format!("{}_{}", prefix, src) },
+            src: if static_names.contains(src) {
+                src.clone()
+            } else {
+                format!("{}_{}", prefix, src)
+            },
             offset: *offset,
             dst: rv(dst),
         },
         TackyInstruction::CopyStruct { src, dst, size } => TackyInstruction::CopyStruct {
-            src: rv(src), dst: rv(dst), size: *size,
+            src: rv(src),
+            dst: rv(dst),
+            size: *size,
         },
-        TackyInstruction::JumpIndirect { target, possible_targets } => TackyInstruction::JumpIndirect {
+        TackyInstruction::JumpIndirect {
+            target,
+            possible_targets,
+        } => TackyInstruction::JumpIndirect {
             target: rv(target),
             possible_targets: possible_targets.iter().map(|l| rl(l)).collect(),
         },
-        TackyInstruction::VaStart { ap, gp_offset_init, fp_offset_init } => TackyInstruction::VaStart {
-            ap: rv(ap), gp_offset_init: *gp_offset_init, fp_offset_init: *fp_offset_init,
+        TackyInstruction::VaStart {
+            ap,
+            gp_offset_init,
+            fp_offset_init,
+        } => TackyInstruction::VaStart {
+            ap: rv(ap),
+            gp_offset_init: *gp_offset_init,
+            fp_offset_init: *fp_offset_init,
         },
         TackyInstruction::VaArg { ap, dst, arg_type } => TackyInstruction::VaArg {
-            ap: rv(ap), dst: rv(dst), arg_type: arg_type.clone(),
+            ap: rv(ap),
+            dst: rv(dst),
+            arg_type: arg_type.clone(),
         },
         TackyInstruction::VaEnd => TackyInstruction::VaEnd,
     }
@@ -1739,50 +1847,60 @@ fn outline_functions(program: &mut TackyProgram, ctx: &mut ObfCtx, min_block_siz
 
         while i < body.len() {
             // アウトライン候補ブロックを検索（上限チェック付き）
-            if outline_count < MAX_OUTLINES_PER_FUNC {
-                if let Some(block_len) = find_outline_candidate(&body, i, min_block_size) {
-                    let block = &body[i..i + block_len];
+            if outline_count < MAX_OUTLINES_PER_FUNC
+                && let Some(block_len) = find_outline_candidate(&body, i, min_block_size)
+            {
+                let block = &body[i..i + block_len];
 
-                    if let Some((inputs, output_name, intermediates)) =
-                        analyze_block(block, &body, i, &func.var_types)
-                    {
-                        // 入力変数 ≤ 6（整数レジスタ呼出規約の上限）
-                        if inputs.len() <= 6 {
-                            // Double / Struct / Array 型の入出力を除外
-                            let output_type = func.var_types.get(&output_name)
-                                .cloned().unwrap_or(Type::Int);
-                            let has_bad_type = matches!(output_type,
-                                Type::Double | Type::Struct { .. } | Type::Array(_, _))
-                                || inputs.iter().any(|name| {
-                                    let ty = func.var_types.get(name).unwrap_or(&Type::Int);
-                                    matches!(ty, Type::Double | Type::Struct { .. } | Type::Array(_, _))
-                                });
+                if let Some((inputs, output_name, intermediates)) =
+                    analyze_block(block, &body, i, &func.var_types)
+                {
+                    // 入力変数 ≤ 6（整数レジスタ呼出規約の上限）
+                    if inputs.len() <= 6 {
+                        // Double / Struct / Array 型の入出力を除外
+                        let output_type = func
+                            .var_types
+                            .get(&output_name)
+                            .cloned()
+                            .unwrap_or(Type::Int);
+                        let has_bad_type = matches!(
+                            output_type,
+                            Type::Double | Type::Struct { .. } | Type::Array(_, _)
+                        ) || inputs.iter().any(|name| {
+                            let ty = func.var_types.get(name).unwrap_or(&Type::Int);
+                            matches!(ty, Type::Double | Type::Struct { .. } | Type::Array(_, _))
+                        });
 
-                            if !has_bad_type {
-                                // 新関数を構築
-                                let outlined_func = build_outlined_function(
-                                    ctx, block, &inputs, &output_name, &intermediates,
-                                    &output_type, &func.var_types,
-                                );
-                                let func_name = outlined_func.name.clone();
+                        if !has_bad_type {
+                            // 新関数を構築
+                            let outlined_func = build_outlined_function(
+                                ctx,
+                                block,
+                                &inputs,
+                                &output_name,
+                                &intermediates,
+                                &output_type,
+                                &func.var_types,
+                            );
+                            let func_name = outlined_func.name.clone();
 
-                                // 元の位置に FunCall を挿入
-                                let call_args: Vec<TackyVal> = inputs.iter()
-                                    .map(|name| TackyVal::Var(name.clone()))
-                                    .collect();
-                                new_body.push(TackyInstruction::FunCall {
-                                    name: func_name,
-                                    args: call_args,
-                                    dst: TackyVal::Var(output_name),
-                                    dst_type: output_type,
-                                    is_variadic: false,
-                                });
+                            // 元の位置に FunCall を挿入
+                            let call_args: Vec<TackyVal> = inputs
+                                .iter()
+                                .map(|name| TackyVal::Var(name.clone()))
+                                .collect();
+                            new_body.push(TackyInstruction::FunCall {
+                                name: func_name,
+                                args: call_args,
+                                dst: TackyVal::Var(output_name),
+                                dst_type: output_type,
+                                is_variadic: false,
+                            });
 
-                                new_functions.push(outlined_func);
-                                outline_count += 1;
-                                i += block_len;
-                                continue;
-                            }
+                            new_functions.push(outlined_func);
+                            outline_count += 1;
+                            i += block_len;
+                            continue;
                         }
                     }
                 }
@@ -1813,11 +1931,7 @@ fn find_outline_candidate(body: &[TackyInstruction], pos: usize, min_size: usize
             _ => break,
         }
     }
-    if len >= min_size {
-        Some(len)
-    } else {
-        None
-    }
+    if len >= min_size { Some(len) } else { None }
 }
 
 /// ブロックの入出力を解析する。
@@ -1840,11 +1954,12 @@ fn analyze_block(
     for instr in block {
         // ソースオペランドを収集
         for src_val in instruction_sources(instr) {
-            if let TackyVal::Var(name) = src_val {
-                if !written.contains(name) && !input_set.contains(name) {
-                    inputs.push(name.clone());
-                    input_set.insert(name.clone());
-                }
+            if let TackyVal::Var(name) = src_val
+                && !written.contains(name)
+                && !input_set.contains(name)
+            {
+                inputs.push(name.clone());
+                input_set.insert(name.clone());
             }
         }
         // dst を written に追加
@@ -1870,10 +1985,10 @@ fn analyze_block(
                 continue;
             }
             for operand in instruction_all_operands(instr) {
-                if let TackyVal::Var(name) = operand {
-                    if intermediates.contains(name) {
-                        return None; // 中間変数がブロック外で使われている
-                    }
+                if let TackyVal::Var(name) = operand
+                    && intermediates.contains(name)
+                {
+                    return None; // 中間変数がブロック外で使われている
                 }
             }
         }
@@ -1898,9 +2013,18 @@ fn instruction_sources(instr: &TackyInstruction) -> Vec<&TackyVal> {
 /// 命令の dst 変数名を返す
 fn instruction_dst_name(instr: &TackyInstruction) -> Option<String> {
     match instr {
-        TackyInstruction::Copy { dst: TackyVal::Var(name), .. }
-        | TackyInstruction::Unary { dst: TackyVal::Var(name), .. }
-        | TackyInstruction::Binary { dst: TackyVal::Var(name), .. } => Some(name.clone()),
+        TackyInstruction::Copy {
+            dst: TackyVal::Var(name),
+            ..
+        }
+        | TackyInstruction::Unary {
+            dst: TackyVal::Var(name),
+            ..
+        }
+        | TackyInstruction::Binary {
+            dst: TackyVal::Var(name),
+            ..
+        } => Some(name.clone()),
         _ => None,
     }
 }
@@ -1911,7 +2035,9 @@ fn instruction_all_operands(instr: &TackyInstruction) -> Vec<&TackyVal> {
         TackyInstruction::Return(val) => vec![val],
         TackyInstruction::ReturnVoid => vec![],
         TackyInstruction::Unary { src, dst, .. } => vec![src, dst],
-        TackyInstruction::Binary { left, right, dst, .. } => vec![left, right, dst],
+        TackyInstruction::Binary {
+            left, right, dst, ..
+        } => vec![left, right, dst],
         TackyInstruction::Copy { src, dst } => vec![src, dst],
         TackyInstruction::Jump(_) => vec![],
         TackyInstruction::JumpIfZero { condition, .. }
@@ -1932,7 +2058,9 @@ fn instruction_all_operands(instr: &TackyInstruction) -> Vec<&TackyVal> {
         TackyInstruction::GetAddress { src, dst } => vec![src, dst],
         TackyInstruction::Load { src_ptr, dst } => vec![src_ptr, dst],
         TackyInstruction::Store { src, dst_ptr } => vec![src, dst_ptr],
-        TackyInstruction::AddPtr { ptr, index, dst, .. } => vec![ptr, index, dst],
+        TackyInstruction::AddPtr {
+            ptr, index, dst, ..
+        } => vec![ptr, index, dst],
         TackyInstruction::CopyToOffset { src, .. } => vec![src],
         TackyInstruction::CopyFromOffset { dst, .. } => vec![dst],
         TackyInstruction::CopyStruct { src, dst, .. } => vec![src, dst],
@@ -1963,7 +2091,10 @@ fn build_outlined_function(
 
     for input_name in inputs {
         let param_name = ctx.fresh_tmp();
-        let ty = caller_var_types.get(input_name).cloned().unwrap_or(Type::Int);
+        let ty = caller_var_types
+            .get(input_name)
+            .cloned()
+            .unwrap_or(Type::Int);
         var_types.insert(param_name.clone(), ty);
         input_to_param.insert(input_name.clone(), param_name.clone());
         params.push(param_name);
@@ -2004,13 +2135,24 @@ fn build_outlined_function(
     for instr in block {
         let new_instr = match instr {
             TackyInstruction::Copy { src, dst } => TackyInstruction::Copy {
-                src: rename(src), dst: rename(dst),
+                src: rename(src),
+                dst: rename(dst),
             },
             TackyInstruction::Unary { op, src, dst } => TackyInstruction::Unary {
-                op: *op, src: rename(src), dst: rename(dst),
+                op: *op,
+                src: rename(src),
+                dst: rename(dst),
             },
-            TackyInstruction::Binary { op, left, right, dst } => TackyInstruction::Binary {
-                op: *op, left: rename(left), right: rename(right), dst: rename(dst),
+            TackyInstruction::Binary {
+                op,
+                left,
+                right,
+                dst,
+            } => TackyInstruction::Binary {
+                op: *op,
+                left: rename(left),
+                right: rename(right),
+                dst: rename(dst),
             },
             _ => instr.clone(),
         };
@@ -2048,7 +2190,9 @@ fn string_encryption(program: &mut TackyProgram, ctx: &mut ObfCtx, key: u8) {
     program.static_constants.retain(|sc| {
         if let TackyStaticInit::StringInit(content, byte_len) = &sc.init {
             // 各バイトをキーで加算暗号化（null 終端含む）
-            let mut encrypted: Vec<u8> = content.as_bytes().iter()
+            let mut encrypted: Vec<u8> = content
+                .as_bytes()
+                .iter()
                 .map(|b| b.wrapping_add(key))
                 .collect();
             // null 終端も暗号化
@@ -2082,7 +2226,9 @@ fn string_encryption(program: &mut TackyProgram, ctx: &mut ObfCtx, key: u8) {
         for (label, _, byte_len) in &encrypted_strings {
             // base_ptr = &encrypted_string
             let base_ptr = ctx.fresh_tmp();
-            main_func.var_types.insert(base_ptr.clone(), Type::Pointer(Box::new(Type::Char)));
+            main_func
+                .var_types
+                .insert(base_ptr.clone(), Type::Pointer(Box::new(Type::Char)));
 
             decrypt_instrs.push(TackyInstruction::GetAddress {
                 src: TackyVal::Var(label.clone()),
@@ -2096,7 +2242,9 @@ fn string_encryption(program: &mut TackyProgram, ctx: &mut ObfCtx, key: u8) {
                 let enc_int = ctx.fresh_tmp();
                 let dec_int = ctx.fresh_tmp();
                 let dec_byte = ctx.fresh_tmp();
-                main_func.var_types.insert(byte_ptr.clone(), Type::Pointer(Box::new(Type::Char)));
+                main_func
+                    .var_types
+                    .insert(byte_ptr.clone(), Type::Pointer(Box::new(Type::Char)));
                 main_func.var_types.insert(enc_byte.clone(), Type::Char);
                 main_func.var_types.insert(enc_int.clone(), Type::Int);
                 main_func.var_types.insert(dec_int.clone(), Type::Int);
@@ -2166,7 +2314,10 @@ fn constant_encoding(
 
     for instr in instrs {
         match &instr {
-            TackyInstruction::Copy { src: TackyVal::Constant(c), dst } => {
+            TackyInstruction::Copy {
+                src: TackyVal::Constant(c),
+                dst,
+            } => {
                 if let Some(encoded) = encode_constant(c, dst, ctx, var_types) {
                     result.extend(encoded);
                     continue;
@@ -2188,18 +2339,54 @@ fn encode_constant(
     var_types: &mut std::collections::HashMap<String, Type>,
 ) -> Option<Vec<TackyInstruction>> {
     match c {
-        TackyConst::Int(v) => Some(encode_int_constant(*v as i64, Type::Int, dst, ctx, var_types,
-            |x| TackyConst::Int(x as i32))),
-        TackyConst::Long(v) => Some(encode_int_constant(*v, Type::Long, dst, ctx, var_types,
-            |x| TackyConst::Long(x))),
-        TackyConst::UInt(v) => Some(encode_int_constant(*v as i64, Type::UInt, dst, ctx, var_types,
-            |x| TackyConst::UInt(x as u32))),
-        TackyConst::ULong(v) => Some(encode_int_constant(*v as i64, Type::ULong, dst, ctx, var_types,
-            |x| TackyConst::ULong(x as u64))),
-        TackyConst::Char(v) => Some(encode_int_constant(*v as i64, Type::Char, dst, ctx, var_types,
-            |x| TackyConst::Char(x as i8))),
-        TackyConst::UChar(v) => Some(encode_int_constant(*v as i64, Type::UChar, dst, ctx, var_types,
-            |x| TackyConst::UChar(x as u8))),
+        TackyConst::Int(v) => Some(encode_int_constant(
+            *v as i64,
+            Type::Int,
+            dst,
+            ctx,
+            var_types,
+            |x| TackyConst::Int(x as i32),
+        )),
+        TackyConst::Long(v) => Some(encode_int_constant(
+            *v,
+            Type::Long,
+            dst,
+            ctx,
+            var_types,
+            TackyConst::Long,
+        )),
+        TackyConst::UInt(v) => Some(encode_int_constant(
+            *v as i64,
+            Type::UInt,
+            dst,
+            ctx,
+            var_types,
+            |x| TackyConst::UInt(x as u32),
+        )),
+        TackyConst::ULong(v) => Some(encode_int_constant(
+            *v as i64,
+            Type::ULong,
+            dst,
+            ctx,
+            var_types,
+            |x| TackyConst::ULong(x as u64),
+        )),
+        TackyConst::Char(v) => Some(encode_int_constant(
+            *v as i64,
+            Type::Char,
+            dst,
+            ctx,
+            var_types,
+            |x| TackyConst::Char(x as i8),
+        )),
+        TackyConst::UChar(v) => Some(encode_int_constant(
+            *v as i64,
+            Type::UChar,
+            dst,
+            ctx,
+            var_types,
+            |x| TackyConst::UChar(x as u8),
+        )),
         // Double は精度問題があるためスキップ
         TackyConst::Double(_) => None,
     }
@@ -2328,7 +2515,12 @@ fn arithmetic_substitution(
 
     for instr in instrs {
         match &instr {
-            TackyInstruction::Binary { op, left, right, dst } => {
+            TackyInstruction::Binary {
+                op,
+                left,
+                right,
+                dst,
+            } => {
                 // obf_tmp.* 変数への操作はスキップ（カスケード防止）
                 let dst_is_obf = if let TackyVal::Var(name) = dst {
                     name.starts_with("obf_tmp.")
@@ -2345,8 +2537,10 @@ fn arithmetic_substitution(
                                 let pattern = ctx.label_counter % 2;
                                 ctx.label_counter += 1;
                                 match pattern {
-                                    0 => result.extend(arith_add_affine(left, right, dst, ctx, var_types)),
-                                    _ => result.extend(arith_add_coeff(left, right, dst, ctx, var_types)),
+                                    0 => result
+                                        .extend(arith_add_affine(left, right, dst, ctx, var_types)),
+                                    _ => result
+                                        .extend(arith_add_coeff(left, right, dst, ctx, var_types)),
                                 }
                                 continue;
                             }
@@ -2358,8 +2552,10 @@ fn arithmetic_substitution(
                                 let pattern = ctx.label_counter % 2;
                                 ctx.label_counter += 1;
                                 match pattern {
-                                    0 => result.extend(arith_sub_affine(left, right, dst, ctx, var_types)),
-                                    _ => result.extend(arith_sub_coeff(left, right, dst, ctx, var_types)),
+                                    0 => result
+                                        .extend(arith_sub_affine(left, right, dst, ctx, var_types)),
+                                    _ => result
+                                        .extend(arith_sub_coeff(left, right, dst, ctx, var_types)),
                                 }
                                 continue;
                             }
@@ -2643,19 +2839,19 @@ fn junk_code_insertion(
     freq: usize,
 ) -> Vec<TackyInstruction> {
     let mut result = Vec::new();
-    let mut count = 0;
 
-    for (i, instr) in instrs.iter().enumerate() {
+    for (count, (i, instr)) in instrs.iter().enumerate().enumerate() {
         // N命令ごとにジャンクコードを挿入（ただし Label の直前は避ける）
         if count > 0 && count % freq == 0 {
-            let next_is_label = instrs.get(i).map_or(false, |next| matches!(next, TackyInstruction::Label(_)));
+            let next_is_label = instrs
+                .get(i)
+                .is_some_and(|next| matches!(next, TackyInstruction::Label(_)));
             if !next_is_label {
                 result.extend(generate_junk(ctx, var_types));
             }
         }
 
         result.push(instr.clone());
-        count += 1;
     }
 
     result
@@ -2706,7 +2902,7 @@ fn opaque_predicates(
     let mut result = Vec::new();
     let mut candidate_count = 0;
 
-    for (_idx, instr) in instrs.iter().enumerate() {
+    for instr in instrs.iter() {
         if is_value_producing(instr) {
             candidate_count += 1;
             if candidate_count % freq == 0 {
@@ -2723,13 +2919,14 @@ fn opaque_predicates(
 /// 値を生成する命令かどうか判定する。
 /// 副作用のある命令（FunCall, Store, Return）や制御フロー命令（Jump, Label）は除外。
 fn is_value_producing(instr: &TackyInstruction) -> bool {
-    matches!(instr,
+    matches!(
+        instr,
         TackyInstruction::Copy { .. }
-        | TackyInstruction::Unary { .. }
-        | TackyInstruction::Binary { .. }
-        | TackyInstruction::SignExtend { .. }
-        | TackyInstruction::ZeroExtend { .. }
-        | TackyInstruction::Truncate { .. }
+            | TackyInstruction::Unary { .. }
+            | TackyInstruction::Binary { .. }
+            | TackyInstruction::SignExtend { .. }
+            | TackyInstruction::ZeroExtend { .. }
+            | TackyInstruction::Truncate { .. }
     )
 }
 
@@ -3166,7 +3363,10 @@ fn vm_virtualize(program: &mut TackyProgram, ctx: &mut ObfCtx) {
         let handler_addr_var = ctx.fresh_tmp();
         var_types.insert(fetch_ptr_var.clone(), Type::Pointer(Box::new(Type::Int)));
         var_types.insert(handler_idx_var.clone(), Type::Int);
-        var_types.insert(handler_addr_ptr_var.clone(), Type::Pointer(Box::new(Type::Long)));
+        var_types.insert(
+            handler_addr_ptr_var.clone(),
+            Type::Pointer(Box::new(Type::Long)),
+        );
         var_types.insert(handler_addr_var.clone(), Type::Long);
 
         // fetch_ptr = AddPtr(bc_ptr, pc, scale=4)  — bytecode[pc] のアドレス
@@ -3334,7 +3534,8 @@ fn control_flow_flattening(
     }
 
     // ラベル → ブロックインデックスのマッピングを構築
-    let mut label_to_block: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut label_to_block: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for (i, block) in blocks.iter().enumerate() {
         if let Some(TackyInstruction::Label(label)) = block.first() {
             label_to_block.insert(label.clone(), i);
@@ -3350,9 +3551,7 @@ fn control_flow_flattening(
     let mut result = Vec::new();
 
     // 各ブロック用のラベルを生成
-    let block_labels: Vec<String> = (0..blocks.len())
-        .map(|_| ctx.fresh_label())
-        .collect();
+    let block_labels: Vec<String> = (0..blocks.len()).map(|_| ctx.fresh_label()).collect();
 
     // ── ジャンプテーブルを静的変数として登録（Feature 1）──
     let jt_name = format!(".Lobf_jt_{}", ctx.label_counter);
@@ -3366,9 +3565,7 @@ fn control_flow_flattening(
     });
 
     // ── エンコード関数: index → index * A + B ──
-    let encode = |index: usize| -> i32 {
-        (index as i32).wrapping_mul(cff_a).wrapping_add(cff_b)
-    };
+    let encode = |index: usize| -> i32 { (index as i32).wrapping_mul(cff_a).wrapping_add(cff_b) };
 
     // obf_state = encode(0) = 0 * A + B = B
     result.push(TackyInstruction::Copy {
@@ -3496,7 +3693,10 @@ fn control_flow_flattening(
                         result.push(TackyInstruction::Jump(dispatch_label.clone()));
 
                         // Taken: state = encode(target)
-                        result.push(TackyInstruction::Label(format!("{}_taken", block_labels[i])));
+                        result.push(TackyInstruction::Label(format!(
+                            "{}_taken",
+                            block_labels[i]
+                        )));
                         result.push(TackyInstruction::Copy {
                             src: TackyVal::Constant(TackyConst::Int(encode(target_block))),
                             dst: TackyVal::Var(state_var.clone()),
@@ -3527,7 +3727,10 @@ fn control_flow_flattening(
                         result.push(TackyInstruction::Jump(dispatch_label.clone()));
 
                         // Taken: state = encode(target)
-                        result.push(TackyInstruction::Label(format!("{}_taken", block_labels[i])));
+                        result.push(TackyInstruction::Label(format!(
+                            "{}_taken",
+                            block_labels[i]
+                        )));
                         result.push(TackyInstruction::Copy {
                             src: TackyVal::Constant(TackyConst::Int(encode(target_block))),
                             dst: TackyVal::Var(state_var.clone()),
@@ -3547,11 +3750,16 @@ fn control_flow_flattening(
 
         // ブロックの最後が制御フロー命令でない場合、次のブロックへフォールスルー
         let last = block.last();
-        let is_terminator = last.map_or(false, |l| matches!(l,
-            TackyInstruction::Jump(_) | TackyInstruction::JumpIfZero { .. }
-            | TackyInstruction::JumpIfNotZero { .. }
-            | TackyInstruction::Return(_) | TackyInstruction::ReturnVoid
-        ));
+        let is_terminator = last.is_some_and(|l| {
+            matches!(
+                l,
+                TackyInstruction::Jump(_)
+                    | TackyInstruction::JumpIfZero { .. }
+                    | TackyInstruction::JumpIfNotZero { .. }
+                    | TackyInstruction::Return(_)
+                    | TackyInstruction::ReturnVoid
+            )
+        });
 
         if !is_terminator {
             let next_block = i + 1;
@@ -3561,7 +3769,6 @@ fn control_flow_flattening(
                     dst: TackyVal::Var(state_var.clone()),
                 });
                 result.push(TackyInstruction::Jump(dispatch_label.clone()));
-            } else {
             }
         }
     }
@@ -3616,6 +3823,342 @@ fn split_into_blocks(instrs: &[TackyInstruction]) -> Vec<Vec<TackyInstruction>> 
 }
 
 // ─────────────────────────────────────────────────────────────
+// Pass 16: OPSEC 衛生化（シンボルリネーム + 文字列リーク警告）
+// ─────────────────────────────────────────────────────────────
+
+/// OPSEC 文字列リーク警告 — 文字列リテラルに疑わしいパターンが含まれていれば stderr に警告
+///
+/// 検出対象:
+/// - IP アドレスパターン
+/// - ファイルパス
+/// - URL
+/// - デバッグ系キーワード
+/// - 資格情報関連キーワード
+fn opsec_warn_strings(program: &TackyProgram) {
+    for sc in &program.static_constants {
+        if let TackyStaticInit::StringInit(content, _) = &sc.init {
+            let lower = content.to_lowercase();
+
+            // IP アドレスパターン（簡易マッチ: N.N.N.N）
+            if contains_ip_pattern(content) {
+                eprintln!(
+                    "[OPSEC WARNING] String literal may contain IP address: \"{}\"",
+                    truncate_str(content, 60)
+                );
+            }
+
+            // ファイルパス
+            if content.contains("/home/")
+                || content.contains("/tmp/")
+                || content.contains("/etc/")
+                || content.contains("C:\\")
+                || content.contains("\\\\")
+            {
+                eprintln!(
+                    "[OPSEC WARNING] String literal may contain file path: \"{}\"",
+                    truncate_str(content, 60)
+                );
+            }
+
+            // URL
+            if lower.contains("http://") || lower.contains("https://") || lower.contains("ftp://") {
+                eprintln!(
+                    "[OPSEC WARNING] String literal may contain URL: \"{}\"",
+                    truncate_str(content, 60)
+                );
+            }
+
+            // デバッグ系キーワード
+            for keyword in &["debug", "todo", "fixme"] {
+                if lower.contains(keyword) {
+                    eprintln!(
+                        "[OPSEC WARNING] String literal contains debug keyword \"{}\": \"{}\"",
+                        keyword,
+                        truncate_str(content, 60)
+                    );
+                    break;
+                }
+            }
+
+            // 資格情報関連キーワード
+            for keyword in &[
+                "password",
+                "passwd",
+                "secret",
+                "api_key",
+                "token",
+                "credential",
+            ] {
+                if lower.contains(keyword) {
+                    eprintln!(
+                        "[OPSEC WARNING] String literal contains sensitive keyword \"{}\": \"{}\"",
+                        keyword,
+                        truncate_str(content, 60)
+                    );
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// 文字列中に IP アドレスパターン（N.N.N.N）が含まれるか簡易判定
+fn contains_ip_pattern(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // 数字の開始位置を探す
+        if bytes[i].is_ascii_digit() {
+            let mut dots = 0;
+            let mut j = i;
+            let mut valid = true;
+            // N.N.N.N の4つのオクテットを検証
+            for _ in 0..4 {
+                if j >= len || !bytes[j].is_ascii_digit() {
+                    valid = false;
+                    break;
+                }
+                // 1〜3桁の数字を読む
+                let start = j;
+                while j < len && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j - start > 3 {
+                    valid = false;
+                    break;
+                }
+                dots += 1;
+                if dots < 4 {
+                    if j >= len || bytes[j] != b'.' {
+                        valid = false;
+                        break;
+                    }
+                    j += 1; // skip '.'
+                }
+            }
+            if valid && dots == 4 {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// 文字列を最大 max_len 文字に切り詰める
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len])
+    }
+}
+
+/// OPSEC シンボル難読化 — 関数名・グローバル変数名・静的定数名をリネーム
+///
+/// リネーム対象外:
+/// - `main`（エントリポイント）
+/// - 外部関数（定義がなく宣言のみ: `printf`, `strcmp` 等）
+/// - ラベル名（`.L` プレフィックス）
+fn opsec_sanitize(program: &mut TackyProgram, ctx: &mut ObfCtx) {
+    let mut rename_map: HashMap<String, String> = HashMap::new();
+
+    // 定義済み関数の名前セットを構築（外部関数の判定に使用）
+    let defined_funcs: HashSet<String> = program.functions.iter().map(|f| f.name.clone()).collect();
+
+    // 関数名のリネームマップ構築
+    for func in &program.functions {
+        if func.name == "main" {
+            continue;
+        }
+        let new_name = format!("_f{}", ctx.opsec_counter);
+        ctx.opsec_counter += 1;
+        rename_map.insert(func.name.clone(), new_name);
+    }
+
+    // グローバル変数名のリネームマップ構築
+    for sv in &program.static_vars {
+        if !rename_map.contains_key(&sv.name) {
+            let new_name = format!("_v{}", ctx.opsec_counter);
+            ctx.opsec_counter += 1;
+            rename_map.insert(sv.name.clone(), new_name);
+        }
+    }
+
+    // 静的定数名のリネームマップ構築
+    for sc in &program.static_constants {
+        if !rename_map.contains_key(&sc.name) {
+            let new_name = format!("_c{}", ctx.opsec_counter);
+            ctx.opsec_counter += 1;
+            rename_map.insert(sc.name.clone(), new_name);
+        }
+    }
+
+    // 関数名をリネーム
+    for func in &mut program.functions {
+        if let Some(new_name) = rename_map.get(&func.name) {
+            func.name = new_name.clone();
+        }
+        // body 内の全命令を走査してリネーム
+        opsec_rename_body(&mut func.body, &rename_map, &defined_funcs);
+    }
+
+    // グローバル変数名をリネーム
+    for sv in &mut program.static_vars {
+        if let Some(new_name) = rename_map.get(&sv.name) {
+            sv.name = new_name.clone();
+        }
+        // PointerArrayInit 内のラベル参照もリネーム
+        opsec_rename_init(&mut sv.init, &rename_map);
+    }
+
+    // 静的定数名をリネーム
+    for sc in &mut program.static_constants {
+        if let Some(new_name) = rename_map.get(&sc.name) {
+            sc.name = new_name.clone();
+        }
+    }
+}
+
+/// TackyVal 内の変数名をリネームマップに従って置換
+fn opsec_rename_val(val: &mut TackyVal, rename_map: &HashMap<String, String>) {
+    if let TackyVal::Var(name) = val
+        && let Some(new_name) = rename_map.get(name.as_str())
+    {
+        *name = new_name.clone();
+    }
+}
+
+/// 静的初期化子内のラベル参照をリネーム
+fn opsec_rename_init(init: &mut TackyStaticInit, rename_map: &HashMap<String, String>) {
+    match init {
+        TackyStaticInit::PointerArrayInit(labels) => {
+            for label in labels {
+                if let Some(new_name) = rename_map.get(label.as_str()) {
+                    *label = new_name.clone();
+                }
+            }
+        }
+        TackyStaticInit::ArrayInit(inits) => {
+            for sub in inits {
+                opsec_rename_init(sub, rename_map);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 命令列中の関数呼び出し・変数参照をリネーム
+fn opsec_rename_body(
+    body: &mut [TackyInstruction],
+    rename_map: &HashMap<String, String>,
+    defined_funcs: &HashSet<String>,
+) {
+    for instr in body.iter_mut() {
+        match instr {
+            TackyInstruction::Return(val) => {
+                opsec_rename_val(val, rename_map);
+            }
+            TackyInstruction::ReturnVoid => {}
+            TackyInstruction::Unary { src, dst, .. } => {
+                opsec_rename_val(src, rename_map);
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::Binary {
+                left, right, dst, ..
+            } => {
+                opsec_rename_val(left, rename_map);
+                opsec_rename_val(right, rename_map);
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::Copy { src, dst } => {
+                opsec_rename_val(src, rename_map);
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::Jump(_) => {}
+            TackyInstruction::JumpIfZero { condition, .. } => {
+                opsec_rename_val(condition, rename_map);
+            }
+            TackyInstruction::JumpIfNotZero { condition, .. } => {
+                opsec_rename_val(condition, rename_map);
+            }
+            TackyInstruction::Label(_) => {}
+            TackyInstruction::FunCall {
+                name, args, dst, ..
+            } => {
+                // 外部関数（定義がない）はリネームしない
+                if defined_funcs.contains(name.as_str())
+                    && let Some(new_name) = rename_map.get(name.as_str())
+                {
+                    *name = new_name.clone();
+                }
+                for arg in args {
+                    opsec_rename_val(arg, rename_map);
+                }
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::SignExtend { src, dst }
+            | TackyInstruction::ZeroExtend { src, dst }
+            | TackyInstruction::Truncate { src, dst }
+            | TackyInstruction::IntToDouble { src, dst }
+            | TackyInstruction::DoubleToInt { src, dst }
+            | TackyInstruction::UIntToDouble { src, dst }
+            | TackyInstruction::DoubleToUInt { src, dst } => {
+                opsec_rename_val(src, rename_map);
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::GetAddress { src, dst } => {
+                opsec_rename_val(src, rename_map);
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::Load { src_ptr, dst } => {
+                opsec_rename_val(src_ptr, rename_map);
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::Store { src, dst_ptr } => {
+                opsec_rename_val(src, rename_map);
+                opsec_rename_val(dst_ptr, rename_map);
+            }
+            TackyInstruction::AddPtr {
+                ptr, index, dst, ..
+            } => {
+                opsec_rename_val(ptr, rename_map);
+                opsec_rename_val(index, rename_map);
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::CopyToOffset { src, dst, .. } => {
+                opsec_rename_val(src, rename_map);
+                if let Some(new_name) = rename_map.get(dst.as_str()) {
+                    *dst = new_name.clone();
+                }
+            }
+            TackyInstruction::CopyFromOffset { src, dst, .. } => {
+                if let Some(new_name) = rename_map.get(src.as_str()) {
+                    *src = new_name.clone();
+                }
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::CopyStruct { src, dst, .. } => {
+                opsec_rename_val(src, rename_map);
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::JumpIndirect { target, .. } => {
+                opsec_rename_val(target, rename_map);
+            }
+            TackyInstruction::VaStart { ap, .. } => {
+                opsec_rename_val(ap, rename_map);
+            }
+            TackyInstruction::VaArg { ap, dst, .. } => {
+                opsec_rename_val(ap, rename_map);
+                opsec_rename_val(dst, rename_map);
+            }
+            TackyInstruction::VaEnd => {}
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // ユニットテスト
 // ─────────────────────────────────────────────────────────────
 
@@ -3654,37 +4197,47 @@ mod tests {
         assert!(!has_direct_42, "constant 42 should be encoded");
 
         // Binary 演算（Multiply）が含まれていること
-        let has_multiply = result.iter().any(|i| matches!(i,
-            TackyInstruction::Binary { op: TackyBinaryOp::Multiply, .. }));
+        let has_multiply = result.iter().any(|i| {
+            matches!(
+                i,
+                TackyInstruction::Binary {
+                    op: TackyBinaryOp::Multiply,
+                    ..
+                }
+            )
+        });
         assert!(has_multiply, "should contain a multiply operation");
     }
 
     #[test]
     fn test_constant_encoding_zero_uses_subtract() {
-        let instrs = vec![
-            TackyInstruction::Copy {
-                src: TackyVal::Constant(TackyConst::Int(0)),
-                dst: make_int_var("x"),
-            },
-        ];
+        let instrs = vec![TackyInstruction::Copy {
+            src: TackyVal::Constant(TackyConst::Int(0)),
+            dst: make_int_var("x"),
+        }];
         let mut ctx = ObfCtx::new();
         let mut var_types = make_var_types(&["x"]);
 
         let result = constant_encoding(instrs, &mut ctx, &mut var_types);
 
-        let has_subtract = result.iter().any(|i| matches!(i,
-            TackyInstruction::Binary { op: TackyBinaryOp::Subtract, .. }));
+        let has_subtract = result.iter().any(|i| {
+            matches!(
+                i,
+                TackyInstruction::Binary {
+                    op: TackyBinaryOp::Subtract,
+                    ..
+                }
+            )
+        });
         assert!(has_subtract, "zero should use a-a subtract pattern");
     }
 
     #[test]
     fn test_constant_encoding_skips_double() {
-        let instrs = vec![
-            TackyInstruction::Copy {
-                src: TackyVal::Constant(TackyConst::Double(3.14)),
-                dst: make_int_var("x"),
-            },
-        ];
+        let instrs = vec![TackyInstruction::Copy {
+            src: TackyVal::Constant(TackyConst::Double(3.15)),
+            dst: make_int_var("x"),
+        }];
         let mut ctx = ObfCtx::new();
         let mut var_types = make_var_types(&["x"]);
 
@@ -3692,8 +4245,13 @@ mod tests {
 
         // Double はそのまま残る
         assert_eq!(result.len(), 1);
-        assert!(matches!(&result[0],
-            TackyInstruction::Copy { src: TackyVal::Constant(TackyConst::Double(_)), .. }));
+        assert!(matches!(
+            &result[0],
+            TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Double(_)),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3723,18 +4281,36 @@ mod tests {
 
         let result = junk_code_insertion(instrs, &mut ctx, &mut var_types, 4);
 
-        assert!(result.len() > original_len, "junk code should increase instruction count");
+        assert!(
+            result.len() > original_len,
+            "junk code should increase instruction count"
+        );
     }
 
     #[test]
     fn test_opaque_predicates_inserts_branches() {
         // 5つ以上の値生成命令があると、不透明述語が挿入される
         let instrs = vec![
-            TackyInstruction::Copy { src: TackyVal::Constant(TackyConst::Int(1)), dst: make_int_var("a") },
-            TackyInstruction::Copy { src: TackyVal::Constant(TackyConst::Int(2)), dst: make_int_var("b") },
-            TackyInstruction::Copy { src: TackyVal::Constant(TackyConst::Int(3)), dst: make_int_var("c") },
-            TackyInstruction::Copy { src: TackyVal::Constant(TackyConst::Int(4)), dst: make_int_var("d") },
-            TackyInstruction::Copy { src: TackyVal::Constant(TackyConst::Int(5)), dst: make_int_var("e") },
+            TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Int(1)),
+                dst: make_int_var("a"),
+            },
+            TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Int(2)),
+                dst: make_int_var("b"),
+            },
+            TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Int(3)),
+                dst: make_int_var("c"),
+            },
+            TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Int(4)),
+                dst: make_int_var("d"),
+            },
+            TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Int(5)),
+                dst: make_int_var("e"),
+            },
             TackyInstruction::Return(make_int_var("e")),
         ];
         let mut ctx = ObfCtx::new();
@@ -3743,8 +4319,13 @@ mod tests {
         let result = opaque_predicates(instrs, &mut ctx, &mut var_types, 5);
 
         // JumpIfZero（不透明述語の分岐）が挿入されていること
-        let has_jump_if_zero = result.iter().any(|i| matches!(i, TackyInstruction::JumpIfZero { .. }));
-        assert!(has_jump_if_zero, "opaque predicates should insert conditional branches");
+        let has_jump_if_zero = result
+            .iter()
+            .any(|i| matches!(i, TackyInstruction::JumpIfZero { .. }));
+        assert!(
+            has_jump_if_zero,
+            "opaque predicates should insert conditional branches"
+        );
     }
 
     #[test]
@@ -3775,7 +4356,14 @@ mod tests {
         let mut var_types = make_var_types(&["x", "r"]);
         let mut static_vars = Vec::new();
 
-        let result = control_flow_flattening(instrs, &mut ctx, &mut var_types, &mut static_vars, 37, 0xCAFE);
+        let result = control_flow_flattening(
+            instrs,
+            &mut ctx,
+            &mut var_types,
+            &mut static_vars,
+            37,
+            0xCAFE,
+        );
 
         // dispatch ラベル（.Lobf_）が存在すること
         let has_dispatch_label = result.iter().any(|i| {
@@ -3789,7 +4377,11 @@ mod tests {
 
         // state 変数（obf_tmp.）が使用されていること
         let has_state_var = result.iter().any(|i| {
-            if let TackyInstruction::Copy { dst: TackyVal::Var(n), .. } = i {
+            if let TackyInstruction::Copy {
+                dst: TackyVal::Var(n),
+                ..
+            } = i
+            {
                 n.starts_with("obf_tmp.")
             } else {
                 false
@@ -3798,18 +4390,32 @@ mod tests {
         assert!(has_state_var, "CFF should use obf_tmp state variable");
 
         // ジャンプテーブルが static_vars に追加されていること（Feature 1）
-        assert!(!static_vars.is_empty(), "CFF should create jump table static var");
+        assert!(
+            !static_vars.is_empty(),
+            "CFF should create jump table static var"
+        );
         let jt_var = &static_vars[0];
-        assert!(matches!(&jt_var.init, TackyStaticInit::PointerArrayInit(_)),
-            "jump table should use PointerArrayInit");
+        assert!(
+            matches!(&jt_var.init, TackyStaticInit::PointerArrayInit(_)),
+            "jump table should use PointerArrayInit"
+        );
 
         // JumpIndirect が存在すること（Feature 1）
-        let has_jump_indirect = result.iter().any(|i| matches!(i, TackyInstruction::JumpIndirect { .. }));
-        assert!(has_jump_indirect, "CFF should use JumpIndirect for dispatch");
+        let has_jump_indirect = result
+            .iter()
+            .any(|i| matches!(i, TackyInstruction::JumpIndirect { .. }));
+        assert!(
+            has_jump_indirect,
+            "CFF should use JumpIndirect for dispatch"
+        );
 
         // 状態エンコード定数（CFF_B = 0xCAFE）が使用されていること（Feature 4）
         let has_cafe = result.iter().any(|i| {
-            if let TackyInstruction::Copy { src: TackyVal::Constant(TackyConst::Int(v)), .. } = i {
+            if let TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Int(v)),
+                ..
+            } = i
+            {
                 *v == 0xCAFE_u16 as i32
             } else {
                 false
@@ -3834,7 +4440,9 @@ mod tests {
             let result = wrap_with_opaque_predicate(instr, &mut ctx, &mut var_types);
 
             // JumpIfZero が必ず含まれること
-            let has_jump = result.iter().any(|i| matches!(i, TackyInstruction::JumpIfZero { .. }));
+            let has_jump = result
+                .iter()
+                .any(|i| matches!(i, TackyInstruction::JumpIfZero { .. }));
             assert!(has_jump, "pattern {i} should generate JumpIfZero");
         }
     }
@@ -3842,21 +4450,23 @@ mod tests {
     #[test]
     fn test_arith_subst_expands_add() {
         // freq=1 で全ての Add が置換されることを確認
-        let instrs = vec![
-            TackyInstruction::Binary {
-                op: TackyBinaryOp::Add,
-                left: make_int_var("a"),
-                right: make_int_var("b"),
-                dst: make_int_var("c"),
-            },
-        ];
+        let instrs = vec![TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: make_int_var("a"),
+            right: make_int_var("b"),
+            dst: make_int_var("c"),
+        }];
         let mut ctx = ObfCtx::new();
         let mut var_types = make_var_types(&["a", "b", "c"]);
 
         let result = arithmetic_substitution(instrs, &mut ctx, &mut var_types, 1);
 
         // 元の1命令が3命令以上に展開されること
-        assert!(result.len() >= 3, "Add should be expanded to 3+ instructions, got {}", result.len());
+        assert!(
+            result.len() >= 3,
+            "Add should be expanded to 3+ instructions, got {}",
+            result.len()
+        );
         // 元のAdd命令がそのまま残っていないこと
         let has_original = result.len() == 1;
         assert!(!has_original, "original Add should be replaced");
@@ -3864,32 +4474,32 @@ mod tests {
 
     #[test]
     fn test_arith_subst_expands_subtract() {
-        let instrs = vec![
-            TackyInstruction::Binary {
-                op: TackyBinaryOp::Subtract,
-                left: make_int_var("a"),
-                right: make_int_var("b"),
-                dst: make_int_var("c"),
-            },
-        ];
+        let instrs = vec![TackyInstruction::Binary {
+            op: TackyBinaryOp::Subtract,
+            left: make_int_var("a"),
+            right: make_int_var("b"),
+            dst: make_int_var("c"),
+        }];
         let mut ctx = ObfCtx::new();
         let mut var_types = make_var_types(&["a", "b", "c"]);
 
         let result = arithmetic_substitution(instrs, &mut ctx, &mut var_types, 1);
 
-        assert!(result.len() >= 3, "Subtract should be expanded to 3+ instructions, got {}", result.len());
+        assert!(
+            result.len() >= 3,
+            "Subtract should be expanded to 3+ instructions, got {}",
+            result.len()
+        );
     }
 
     #[test]
     fn test_arith_subst_skips_multiply() {
-        let instrs = vec![
-            TackyInstruction::Binary {
-                op: TackyBinaryOp::Multiply,
-                left: make_int_var("a"),
-                right: make_int_var("b"),
-                dst: make_int_var("c"),
-            },
-        ];
+        let instrs = vec![TackyInstruction::Binary {
+            op: TackyBinaryOp::Multiply,
+            left: make_int_var("a"),
+            right: make_int_var("b"),
+            dst: make_int_var("c"),
+        }];
         let mut ctx = ObfCtx::new();
         let mut var_types = make_var_types(&["a", "b", "c"]);
 
@@ -3902,14 +4512,12 @@ mod tests {
     #[test]
     fn test_arith_subst_skips_obf_tmp() {
         // obf_tmp.* への操作はカスケード防止でスキップされる
-        let instrs = vec![
-            TackyInstruction::Binary {
-                op: TackyBinaryOp::Add,
-                left: make_int_var("a"),
-                right: make_int_var("b"),
-                dst: TackyVal::Var("obf_tmp.0".to_string()),
-            },
-        ];
+        let instrs = vec![TackyInstruction::Binary {
+            op: TackyBinaryOp::Add,
+            left: make_int_var("a"),
+            right: make_int_var("b"),
+            dst: TackyVal::Var("obf_tmp.0".to_string()),
+        }];
         let mut ctx = ObfCtx::new();
         let mut var_types = make_var_types(&["a", "b"]);
         var_types.insert("obf_tmp.0".to_string(), Type::Int);
@@ -3943,10 +4551,22 @@ mod tests {
         let result = arithmetic_substitution(instrs, &mut ctx, &mut var_types, 2);
 
         // 最初の Add はそのまま、2番目が展開される → 1 + 3+ = 4+ 命令
-        assert!(result.len() >= 4, "only every 2nd Add should be expanded, got {} instructions", result.len());
+        assert!(
+            result.len() >= 4,
+            "only every 2nd Add should be expanded, got {} instructions",
+            result.len()
+        );
         // 最初の命令は元の Add のままであること
-        assert!(matches!(&result[0], TackyInstruction::Binary { op: TackyBinaryOp::Add, .. }),
-            "first Add should remain unchanged");
+        assert!(
+            matches!(
+                &result[0],
+                TackyInstruction::Binary {
+                    op: TackyBinaryOp::Add,
+                    ..
+                }
+            ),
+            "first Add should remain unchanged"
+        );
     }
 
     #[test]
@@ -3954,10 +4574,13 @@ mod tests {
         // Feature 4: エンコード/デコードの一貫性を検証
         let cff_a: i32 = 37;
         let cff_b: i32 = 0xCAFE;
-        for i in 0..20 {
-            let encoded = (i as i32).wrapping_mul(cff_a).wrapping_add(cff_b);
+        for i in 0i32..20 {
+            let encoded = i.wrapping_mul(cff_a).wrapping_add(cff_b);
             let decoded = (encoded.wrapping_sub(cff_b)) / cff_a;
-            assert_eq!(decoded, i as i32, "encode/decode should be consistent for index {i}");
+            assert_eq!(
+                decoded, i,
+                "encode/decode should be consistent for index {i}"
+            );
         }
     }
 }
