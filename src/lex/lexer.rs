@@ -6,7 +6,7 @@
 //! ソースを先頭から1バイトずつ走査し、以下のルールでトークンを切り出す:
 //! 1. 空白文字 → スキップ（改行なら行番号を更新）
 //! 2. 単一文字の記号 (`(`, `)`, `{`, `}`, `;`, `~`, `?`, `:`, `,`) → 即座にトークン化
-//! 2b. 先読みが必要な記号 → 次の文字を見て判定
+//!    2b. 先読みが必要な記号 → 次の文字を見て判定
 //!    - `!` → `!=` or `!`
 //!    - `<` → `<=` or `<`  /  `>` → `>=` or `>`
 //!    - `=` → `==` or `=`  /  `&` → `&&` or `&`  /  `|` → `||`
@@ -31,8 +31,8 @@
 //! assert_eq!(tokens[2].kind, TokenKind::Semicolon);
 //! ```
 
+use super::token::{Span, Token, TokenKind};
 use crate::error::{CompileError, Result};
-use super::token::{Token, TokenKind, Span};
 
 /// ソースコード文字列を字句解析してトークン列に変換する。
 ///
@@ -41,9 +41,9 @@ use super::token::{Token, TokenKind, Span};
 pub fn lex(source: &str) -> Result<Vec<Token>> {
     let mut tokens = Vec::new();
     let bytes = source.as_bytes();
-    let mut pos = 0;        // 現在のバイト位置
-    let mut line = 1;       // 現在の行番号（1始まり）
-    let mut column = 1;     // 現在の列番号（1始まり）
+    let mut pos = 0; // 現在のバイト位置
+    let mut line = 1; // 現在の行番号（1始まり）
+    let mut column = 1; // 現在の列番号（1始まり）
 
     while pos < bytes.len() {
         let b = bytes[pos];
@@ -85,7 +85,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
         if let Some(kind) = single {
             tokens.push(Token {
                 kind,
-                span: Span { offset: pos, len: 1, line, column },
+                span: Span {
+                    offset: pos,
+                    len: 1,
+                    line,
+                    column,
+                },
             });
             pos += 1;
             column += 1;
@@ -186,7 +191,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
         } {
             tokens.push(Token {
                 kind,
-                span: Span { offset: pos, len, line, column },
+                span: Span {
+                    offset: pos,
+                    len,
+                    line,
+                    column,
+                },
             });
             pos += len;
             column += len;
@@ -199,7 +209,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             if pos + 2 < bytes.len() && bytes[pos + 1] == b'.' && bytes[pos + 2] == b'.' {
                 tokens.push(Token {
                     kind: TokenKind::Ellipsis,
-                    span: Span { offset: pos, len: 3, line, column },
+                    span: Span {
+                        offset: pos,
+                        len: 3,
+                        line,
+                        column,
+                    },
                 });
                 pos += 3;
                 column += 3;
@@ -207,7 +222,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             }
             tokens.push(Token {
                 kind: TokenKind::Dot,
-                span: Span { offset: pos, len: 1, line, column },
+                span: Span {
+                    offset: pos,
+                    len: 1,
+                    line,
+                    column,
+                },
             });
             pos += 1;
             column += 1;
@@ -217,7 +237,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
         // ── 数値リテラル（整数 or 浮動小数点）──
         // 数字で始まる場合: `.` か `e`/`E` があれば浮動小数点、なければ整数。
         // `.` で始まり次が数字の場合も浮動小数点（`.5` 等）。
-        if b.is_ascii_digit() || (b == b'.' && pos + 1 < bytes.len() && bytes[pos + 1].is_ascii_digit()) {
+        if b.is_ascii_digit()
+            || (b == b'.' && pos + 1 < bytes.len() && bytes[pos + 1].is_ascii_digit())
+        {
             let start = pos;
             let start_col = column;
             let mut is_float = false;
@@ -270,7 +292,11 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
 
             if is_float {
                 // 後続文字チェック（英字, _, . は不正）
-                if pos < bytes.len() && (bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' || bytes[pos] == b'.') {
+                if pos < bytes.len()
+                    && (bytes[pos].is_ascii_alphabetic()
+                        || bytes[pos] == b'_'
+                        || bytes[pos] == b'.')
+                {
                     return Err(CompileError::LexError(format!(
                         "invalid token at line {line}, column {start_col}: \
                          invalid suffix on floating-point literal"
@@ -285,7 +311,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 })?;
                 tokens.push(Token {
                     kind: TokenKind::DoubleLiteral(value),
-                    span: Span { offset: start, len: pos - start, line, column: start_col },
+                    span: Span {
+                        offset: start,
+                        len: pos - start,
+                        line,
+                        column: start_col,
+                    },
                 });
                 continue;
             }
@@ -300,7 +331,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                     has_u = true;
                     pos += 1;
                     column += 1;
-                } else if pos < bytes.len() && (bytes[pos] == b'L' || bytes[pos] == b'l') && !has_l {
+                } else if pos < bytes.len() && (bytes[pos] == b'L' || bytes[pos] == b'l') && !has_l
+                {
                     has_l = true;
                     pos += 1;
                     column += 1;
@@ -343,7 +375,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             };
             tokens.push(Token {
                 kind,
-                span: Span { offset: start, len: pos - start, line, column: start_col },
+                span: Span {
+                    offset: start,
+                    len: pos - start,
+                    line,
+                    column: start_col,
+                },
             });
             continue;
         }
@@ -375,18 +412,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 pos += 1;
                 column += 1;
                 match esc {
-                    b'n'  => 10,
-                    b't'  => 9,
-                    b'r'  => 13,
+                    b'n' => 10,
+                    b't' => 9,
+                    b'r' => 13,
                     b'\\' => 92,
                     b'\'' => 39,
-                    b'"'  => 34,
-                    b'0'  => 0,
-                    b'a'  => 7,
-                    b'b'  => 8,
-                    b'f'  => 12,
-                    b'v'  => 11,
-                    b'?'  => 63,
+                    b'"' => 34,
+                    b'0' => 0,
+                    b'a' => 7,
+                    b'b' => 8,
+                    b'f' => 12,
+                    b'v' => 11,
+                    b'?' => 63,
                     _ => {
                         return Err(CompileError::LexError(format!(
                             "unknown escape sequence '\\{}' at line {line}, column {start_col}",
@@ -411,7 +448,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
 
             tokens.push(Token {
                 kind: TokenKind::CharLiteral(value),
-                span: Span { offset: start, len: pos - start, line, column: start_col },
+                span: Span {
+                    offset: start,
+                    len: pos - start,
+                    line,
+                    column: start_col,
+                },
             });
             continue;
         }
@@ -448,18 +490,18 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                     pos += 1;
                     column += 1;
                     let ch = match esc {
-                        b'n'  => '\n',
-                        b't'  => '\t',
-                        b'r'  => '\r',
+                        b'n' => '\n',
+                        b't' => '\t',
+                        b'r' => '\r',
                         b'\\' => '\\',
                         b'\'' => '\'',
-                        b'"'  => '"',
-                        b'0'  => '\0',
-                        b'a'  => '\x07',
-                        b'b'  => '\x08',
-                        b'f'  => '\x0C',
-                        b'v'  => '\x0B',
-                        b'?'  => '?',
+                        b'"' => '"',
+                        b'0' => '\0',
+                        b'a' => '\x07',
+                        b'b' => '\x08',
+                        b'f' => '\x0C',
+                        b'v' => '\x0B',
+                        b'?' => '?',
                         _ => {
                             return Err(CompileError::LexError(format!(
                                 "unknown escape sequence '\\{}' in string literal at line {line}, column {start_col}",
@@ -482,7 +524,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
 
             tokens.push(Token {
                 kind: TokenKind::StringLiteral(content),
-                span: Span { offset: start, len: pos - start, line, column: start_col },
+                span: Span {
+                    offset: start,
+                    len: pos - start,
+                    line,
+                    column: start_col,
+                },
             });
             continue;
         }
@@ -500,35 +547,40 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             }
             let text = &source[start..pos];
             let kind = match text {
-                "int"    => TokenKind::KwInt,
-                "void"   => TokenKind::KwVoid,
+                "int" => TokenKind::KwInt,
+                "void" => TokenKind::KwVoid,
                 "return" => TokenKind::KwReturn,
-                "if"       => TokenKind::KwIf,
-                "else"     => TokenKind::KwElse,
-                "while"    => TokenKind::KwWhile,
-                "do"       => TokenKind::KwDo,
-                "for"      => TokenKind::KwFor,
-                "break"    => TokenKind::KwBreak,
+                "if" => TokenKind::KwIf,
+                "else" => TokenKind::KwElse,
+                "while" => TokenKind::KwWhile,
+                "do" => TokenKind::KwDo,
+                "for" => TokenKind::KwFor,
+                "break" => TokenKind::KwBreak,
                 "continue" => TokenKind::KwContinue,
-                "static"   => TokenKind::KwStatic,
-                "extern"   => TokenKind::KwExtern,
-                "long"     => TokenKind::KwLong,
+                "static" => TokenKind::KwStatic,
+                "extern" => TokenKind::KwExtern,
+                "long" => TokenKind::KwLong,
                 "unsigned" => TokenKind::KwUnsigned,
-                "signed"   => TokenKind::KwSigned,
-                "double"   => TokenKind::KwDouble,
-                "sizeof"   => TokenKind::KwSizeof,
-                "char"     => TokenKind::KwChar,
-                "struct"   => TokenKind::KwStruct,
-                "typedef"  => TokenKind::KwTypedef,
-                "enum"     => TokenKind::KwEnum,
-                "switch"   => TokenKind::KwSwitch,
-                "case"     => TokenKind::KwCase,
-                "default"  => TokenKind::KwDefault,
-                _        => TokenKind::Identifier(text.to_string()),
+                "signed" => TokenKind::KwSigned,
+                "double" => TokenKind::KwDouble,
+                "sizeof" => TokenKind::KwSizeof,
+                "char" => TokenKind::KwChar,
+                "struct" => TokenKind::KwStruct,
+                "typedef" => TokenKind::KwTypedef,
+                "enum" => TokenKind::KwEnum,
+                "switch" => TokenKind::KwSwitch,
+                "case" => TokenKind::KwCase,
+                "default" => TokenKind::KwDefault,
+                _ => TokenKind::Identifier(text.to_string()),
             };
             tokens.push(Token {
                 kind,
-                span: Span { offset: start, len: pos - start, line, column: start_col },
+                span: Span {
+                    offset: start,
+                    len: pos - start,
+                    line,
+                    column: start_col,
+                },
             });
             continue;
         }
@@ -575,7 +627,10 @@ mod tests {
         let tokens = lex(source).unwrap();
         assert_eq!(tokens.len(), 10);
         // 'return' は2行目にあるはず
-        let ret_token = tokens.iter().find(|t| t.kind == TokenKind::KwReturn).unwrap();
+        let ret_token = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::KwReturn)
+            .unwrap();
         assert_eq!(ret_token.span.line, 2);
     }
 
@@ -719,7 +774,13 @@ mod tests {
     fn lex_single_ampersand() {
         let tokens = lex("&x").unwrap();
         let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
-        assert_eq!(kinds, vec![&TokenKind::Ampersand, &TokenKind::Identifier("x".to_string())]);
+        assert_eq!(
+            kinds,
+            vec![
+                &TokenKind::Ampersand,
+                &TokenKind::Identifier("x".to_string())
+            ]
+        );
     }
 
     /// `|` 単体はエラー
@@ -846,13 +907,7 @@ mod tests {
     fn lex_storage_class_keywords() {
         let tokens = lex("static extern").unwrap();
         let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
-        assert_eq!(
-            kinds,
-            vec![
-                &TokenKind::KwStatic,
-                &TokenKind::KwExtern,
-            ]
-        );
+        assert_eq!(kinds, vec![&TokenKind::KwStatic, &TokenKind::KwExtern,]);
     }
 
     /// Chapter 11: long キーワードのトークン化

@@ -89,7 +89,10 @@ pub enum Type {
     Array(Box<Type>, usize),
     /// 構造体型（Chapter 18）。tag 名とメンバリストを保持。
     /// members が空の場合は前方宣言（不完全型）。
-    Struct { tag: String, members: Vec<MemberDecl> },
+    Struct {
+        tag: String,
+        members: Vec<MemberDecl>,
+    },
     /// `va_list` 型 — 可変長引数アクセス用の24バイト構造体（System V AMD64 ABI）
     VaList,
 }
@@ -200,7 +203,11 @@ impl Type {
 
 /// 構造体のアラインメントを計算する（最大メンバアラインメント）。
 pub fn struct_alignment(members: &[MemberDecl]) -> usize {
-    members.iter().map(|m| m.member_type.alignment()).max().unwrap_or(1)
+    members
+        .iter()
+        .map(|m| m.member_type.alignment())
+        .max()
+        .unwrap_or(1)
 }
 
 /// 構造体の全体サイズを計算する（パディング込み）。
@@ -370,6 +377,7 @@ pub enum ForInit {
 ///
 /// 式は値を持つ構文要素。定数、単項演算、二項演算、変数参照、代入がある。
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 pub enum Expr {
     /// 整数定数（例: `42`）
     Constant(i64),
@@ -383,7 +391,11 @@ pub enum Expr {
     ConstantDouble(f64),
     /// 型変換（Chapter 11, 12）。型検査パスが挿入する。
     /// `source_type` はコード生成で符号付き/なし拡張を区別するために使う。
-    Cast { target_type: Type, source_type: Type, expr: Box<Expr> },
+    Cast {
+        target_type: Type,
+        source_type: Type,
+        expr: Box<Expr>,
+    },
     /// 単項演算（Chapter 2）。演算子と被演算子を持つ。
     ///
     /// 例: `-5` → `Unary(Negate, Constant(5))`

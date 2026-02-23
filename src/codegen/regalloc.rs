@@ -33,8 +33,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::parse::ast::Type;
 use super::asm_ast::*;
+use crate::parse::ast::Type;
 
 // ────────────────────────────────────────────
 // 公開インターフェース
@@ -74,7 +74,9 @@ pub fn allocate_registers(
         apply_merge_map(&mut coloring, &merge_map);
         coloring
     } else {
-        ColoringResult { assignments: HashMap::new() }
+        ColoringResult {
+            assignments: HashMap::new(),
+        }
     };
 
     // XMM グラフの彩色（coalescing 付き）
@@ -85,7 +87,9 @@ pub fn allocate_registers(
         apply_merge_map(&mut coloring, &merge_map);
         coloring
     } else {
-        ColoringResult { assignments: HashMap::new() }
+        ColoringResult {
+            assignments: HashMap::new(),
+        }
     };
 
     // Pseudo 置換
@@ -129,9 +133,7 @@ pub fn allocate_registers(
 
     // callee-saved の順序を固定（push/pop の一貫性のため）
     let mut callee_saved_used: Vec<Reg> = callee_saved_set.into_iter().collect();
-    callee_saved_used.sort_by_key(|r| {
-        GP_CALLEE_SAVED.iter().position(|x| x == r).unwrap_or(99)
-    });
+    callee_saved_used.sort_by_key(|r| GP_CALLEE_SAVED.iter().position(|x| x == r).unwrap_or(99));
 
     RegAllocResult {
         instructions,
@@ -179,7 +181,7 @@ fn classify_pseudos(
         for_each_operand(instr, |op| {
             if let Operand::Pseudo(name) = op {
                 let ty = var_types.get(name);
-                if ty.map_or(false, |t| t.is_double()) {
+                if ty.is_some_and(|t| t.is_double()) {
                     xmm.insert(name.clone());
                 } else {
                     gp.insert(name.clone());
@@ -467,18 +469,22 @@ fn analyze_liveness(instructions: &[Instruction]) -> LivenessInfo {
             }
         }
         // フォールスルー（Jmp, JmpIndirect, Ret 以外）
-        if !matches!(instructions[i], Instruction::Jmp(_) | Instruction::JmpIndirect(_, _) | Instruction::Ret) {
-            if i + 1 < n {
-                successors[i].push(i + 1);
-            }
+        if !matches!(
+            instructions[i],
+            Instruction::Jmp(_) | Instruction::JmpIndirect(_, _) | Instruction::Ret
+        ) && i + 1 < n
+        {
+            successors[i].push(i + 1);
         }
     }
 
     // 各命令の use/def を事前計算
-    let uses: Vec<HashSet<GraphNode>> = instructions.iter()
+    let uses: Vec<HashSet<GraphNode>> = instructions
+        .iter()
         .map(|instr| instruction_uses(instr).into_iter().collect())
         .collect();
-    let defs: Vec<HashSet<GraphNode>> = instructions.iter()
+    let defs: Vec<HashSet<GraphNode>> = instructions
+        .iter()
         .map(|instr| instruction_defs(instr).into_iter().collect())
         .collect();
 
@@ -538,13 +544,15 @@ impl InterferenceGraph {
     }
 
     fn add_node(&mut self, node: GraphNode) {
-        self.adj.entry(node).or_insert_with(HashSet::new);
+        self.adj.entry(node).or_default();
     }
 
     fn add_edge(&mut self, a: &GraphNode, b: &GraphNode) {
-        if a == b { return; }
-        self.adj.entry(a.clone()).or_insert_with(HashSet::new).insert(b.clone());
-        self.adj.entry(b.clone()).or_insert_with(HashSet::new).insert(a.clone());
+        if a == b {
+            return;
+        }
+        self.adj.entry(a.clone()).or_default().insert(b.clone());
+        self.adj.entry(b.clone()).or_default().insert(a.clone());
     }
 }
 
@@ -591,10 +599,14 @@ fn build_interference_graph(
         let defined = instruction_defs(instr);
         let live_after = &liveness.live_after[i];
 
-        let is_mov = matches!(instr,
-            Instruction::Mov { .. } | Instruction::Movsx { .. }
-            | Instruction::MovsxByte { .. } | Instruction::MovZeroExtend { .. }
-            | Instruction::MovZeroExtendByte { .. } | Instruction::Truncate { .. }
+        let is_mov = matches!(
+            instr,
+            Instruction::Mov { .. }
+                | Instruction::Movsx { .. }
+                | Instruction::MovsxByte { .. }
+                | Instruction::MovZeroExtend { .. }
+                | Instruction::MovZeroExtendByte { .. }
+                | Instruction::Truncate { .. }
         );
 
         // Mov のソースを取得（coalescing のため干渉辺を張らない）
@@ -606,17 +618,24 @@ fn build_interference_graph(
         };
 
         for d in &defined {
-            if !is_relevant(d) { continue; }
+            if !is_relevant(d) {
+                continue;
+            }
             graph.add_node(d.clone());
 
             for v in live_after {
-                if !is_relevant(v) { continue; }
-                if v == d { continue; }
+                if !is_relevant(v) {
+                    continue;
+                }
+                if v == d {
+                    continue;
+                }
                 // Mov の場合、src と dst の間には辺を張らない
-                if is_mov {
-                    if let Some(ref src_node) = mov_src {
-                        if v == src_node { continue; }
-                    }
+                if is_mov
+                    && let Some(ref src_node) = mov_src
+                    && v == src_node
+                {
+                    continue;
                 }
                 graph.add_edge(d, v);
             }
@@ -624,12 +643,12 @@ fn build_interference_graph(
 
         // Mov 辺を収集（coalescing 候補 — plain Mov のみ）
         // Movsx/Truncate 等の型変換命令は値が変わるため coalescing しない。
-        if matches!(instr, Instruction::Mov { .. }) {
-            if let Some(ref src_node) = mov_src {
-                for d in &defined {
-                    if is_relevant(src_node) && is_relevant(d) && src_node != d {
-                        graph.mov_edges.push((src_node.clone(), d.clone()));
-                    }
+        if matches!(instr, Instruction::Mov { .. })
+            && let Some(ref src_node) = mov_src
+        {
+            for d in &defined {
+                if is_relevant(src_node) && is_relevant(d) && src_node != d {
+                    graph.mov_edges.push((src_node.clone(), d.clone()));
                 }
             }
         }
@@ -659,10 +678,7 @@ fn find_canonical(merge_map: &HashMap<GraphNode, GraphNode>, node: &GraphNode) -
 ///   HardReg とも干渉するか degree < k なら安全
 ///
 /// 戻り値の merge_map は「このノードはあのノードに合体された」を記録する。
-fn coalesce_graph(
-    graph: &mut InterferenceGraph,
-    k: usize,
-) -> HashMap<GraphNode, GraphNode> {
+fn coalesce_graph(graph: &mut InterferenceGraph, k: usize) -> HashMap<GraphNode, GraphNode> {
     let mut merge_map: HashMap<GraphNode, GraphNode> = HashMap::new();
 
     let mut changed = true;
@@ -673,25 +689,21 @@ fn coalesce_graph(
         for (raw_u, raw_v) in &mov_edges_snapshot {
             let u = find_canonical(&merge_map, raw_u);
             let v = find_canonical(&merge_map, raw_v);
-            if u == v { continue; } // 既に合体済み
+            if u == v {
+                continue;
+            } // 既に合体済み
 
             // 干渉していたら合体不可
-            if graph.adj.get(&u).map_or(false, |s| s.contains(&v)) {
+            if graph.adj.get(&u).is_some_and(|s| s.contains(&v)) {
                 continue;
             }
 
             let can_coalesce = match (&u, &v) {
                 // Pseudo-Pseudo: Briggs 基準
-                (GraphNode::Pseudo(_), GraphNode::Pseudo(_)) => {
-                    briggs_criterion(graph, &u, &v, k)
-                }
+                (GraphNode::Pseudo(_), GraphNode::Pseudo(_)) => briggs_criterion(graph, &u, &v, k),
                 // Pseudo-HardReg: George 基準（Pseudo を HardReg に合体）
-                (GraphNode::Pseudo(_), GraphNode::HardReg(_)) => {
-                    george_criterion(graph, &u, &v, k)
-                }
-                (GraphNode::HardReg(_), GraphNode::Pseudo(_)) => {
-                    george_criterion(graph, &v, &u, k)
-                }
+                (GraphNode::Pseudo(_), GraphNode::HardReg(_)) => george_criterion(graph, &u, &v, k),
+                (GraphNode::HardReg(_), GraphNode::Pseudo(_)) => george_criterion(graph, &v, &u, k),
                 // HardReg-HardReg: 同じレジスタでない限り合体不可
                 (GraphNode::HardReg(_), GraphNode::HardReg(_)) => false,
             };
@@ -715,12 +727,7 @@ fn coalesce_graph(
 }
 
 /// Briggs 基準: 合体後のノードが k 未満の高次隣接ノードを持つか判定。
-fn briggs_criterion(
-    graph: &InterferenceGraph,
-    u: &GraphNode,
-    v: &GraphNode,
-    k: usize,
-) -> bool {
+fn briggs_criterion(graph: &InterferenceGraph, u: &GraphNode, v: &GraphNode, k: usize) -> bool {
     let u_neighbors = graph.adj.get(u).cloned().unwrap_or_default();
     let v_neighbors = graph.adj.get(v).cloned().unwrap_or_default();
     let mut merged_neighbors: HashSet<GraphNode> = u_neighbors;
@@ -728,7 +735,8 @@ fn briggs_criterion(
     merged_neighbors.remove(u);
     merged_neighbors.remove(v);
 
-    let high_degree_count = merged_neighbors.iter()
+    let high_degree_count = merged_neighbors
+        .iter()
         .filter(|n| match n {
             GraphNode::HardReg(_) => true, // precolored は常に高次
             GraphNode::Pseudo(_) => graph.adj.get(n).map_or(0, |s| s.len()) >= k,
@@ -749,8 +757,12 @@ fn george_criterion(
     let v_neighbors = graph.adj.get(v).cloned().unwrap_or_default();
 
     for t in &u_neighbors {
-        if t == v { continue; }
-        if v_neighbors.contains(t) { continue; } // t は v とも干渉 → OK
+        if t == v {
+            continue;
+        }
+        if v_neighbors.contains(t) {
+            continue;
+        } // t は v とも干渉 → OK
         match t {
             GraphNode::HardReg(_) => return false, // HardReg が v と非干渉 → 不安全
             GraphNode::Pseudo(_) => {
@@ -764,15 +776,13 @@ fn george_criterion(
 }
 
 /// ノード `from` を `into` に合体する。隣接リストを更新。
-fn merge_nodes(
-    graph: &mut InterferenceGraph,
-    from: &GraphNode,
-    into: &GraphNode,
-) {
+fn merge_nodes(graph: &mut InterferenceGraph, from: &GraphNode, into: &GraphNode) {
     let from_neighbors = graph.adj.remove(from).unwrap_or_default();
 
     for n in &from_neighbors {
-        if n == into { continue; }
+        if n == into {
+            continue;
+        }
         // n の隣接リストから from を削除し into を追加
         if let Some(s) = graph.adj.get_mut(n) {
             s.remove(from);
@@ -794,10 +804,7 @@ fn merge_nodes(
 ///
 /// merge_map 内の各 (from → into) エントリについて、
 /// from の Pseudo に into の割り当て（色）をコピーする。
-fn apply_merge_map(
-    coloring: &mut ColoringResult,
-    merge_map: &HashMap<GraphNode, GraphNode>,
-) {
+fn apply_merge_map(coloring: &mut ColoringResult, merge_map: &HashMap<GraphNode, GraphNode>) {
     for (from, into) in merge_map {
         if let GraphNode::Pseudo(from_name) = from {
             let canonical = find_canonical(merge_map, into);
@@ -808,7 +815,9 @@ fn apply_merge_map(
                     }
                 }
                 GraphNode::HardReg(reg) => {
-                    coloring.assignments.insert(from_name.clone(), Assignment::Register(*reg));
+                    coloring
+                        .assignments
+                        .insert(from_name.clone(), Assignment::Register(*reg));
                 }
             }
         }
@@ -837,18 +846,16 @@ struct ColoringResult {
 /// 3. **Select**: スタックから pop し、隣接ノードが使っていない色を割り当て。
 ///    spill 候補でも色が見つかれば割り当てる（楽観的彩色）。
 ///    色が見つからなければ実際に spill（スタック退避）。
-fn color_graph(
-    graph: InterferenceGraph,
-    allocatable: &[Reg],
-    _is_xmm: bool,
-) -> ColoringResult {
+fn color_graph(graph: InterferenceGraph, allocatable: &[Reg], _is_xmm: bool) -> ColoringResult {
     let k = allocatable.len();
 
     // オリジナルの隣接リストを保存
     let original_adj = graph.adj.clone();
 
     // Pseudo ノードだけをリストアップ
-    let pseudo_nodes: Vec<String> = graph.adj.keys()
+    let pseudo_nodes: Vec<String> = graph
+        .adj
+        .keys()
         .filter_map(|node| {
             if let GraphNode::Pseudo(name) = node {
                 Some(name.clone())
@@ -859,7 +866,9 @@ fn color_graph(
         .collect();
 
     if pseudo_nodes.is_empty() {
-        return ColoringResult { assignments: HashMap::new() };
+        return ColoringResult {
+            assignments: HashMap::new(),
+        };
     }
 
     // Simplify + Potential Spill（working copy で）
@@ -888,7 +897,8 @@ fn color_graph(
         let mut progress = true;
         while progress {
             progress = false;
-            let candidates: Vec<String> = remaining.iter()
+            let candidates: Vec<String> = remaining
+                .iter()
                 .filter(|name| working_degree(&working_adj, name) < k)
                 .cloned()
                 .collect();
@@ -903,7 +913,8 @@ fn color_graph(
 
         // Phase 2: spill 候補
         if !remaining.is_empty() {
-            let spill_name = remaining.iter()
+            let spill_name = remaining
+                .iter()
                 .max_by_key(|name| working_degree(&working_adj, name))
                 .cloned()
                 .unwrap();
@@ -917,7 +928,8 @@ fn color_graph(
     // Select: スタックから pop して色を割り当て
     let mut assignments: HashMap<String, Assignment> = HashMap::new();
     // HardReg の「色」は自分自身
-    let reg_to_color: HashMap<Reg, usize> = allocatable.iter()
+    let reg_to_color: HashMap<Reg, usize> = allocatable
+        .iter()
         .enumerate()
         .map(|(i, &reg)| (reg, i))
         .collect();
@@ -936,10 +948,10 @@ fn color_graph(
                     }
                 }
                 GraphNode::Pseudo(n) => {
-                    if let Some(Assignment::Register(reg)) = assignments.get(n) {
-                        if let Some(&color) = reg_to_color.get(reg) {
-                            used_colors.insert(color);
-                        }
+                    if let Some(Assignment::Register(reg)) = assignments.get(n)
+                        && let Some(&color) = reg_to_color.get(reg)
+                    {
+                        used_colors.insert(color);
                     }
                 }
             }
@@ -975,27 +987,36 @@ fn replace_pseudos(
     instructions: Vec<Instruction>,
     assignments: &HashMap<String, Operand>,
 ) -> Vec<Instruction> {
-    instructions.into_iter().map(|instr| replace_in_instruction(instr, assignments)).collect()
+    instructions
+        .into_iter()
+        .map(|instr| replace_in_instruction(instr, assignments))
+        .collect()
 }
 
 fn replace_operand(op: Operand, assignments: &HashMap<String, Operand>) -> Operand {
     match op {
-        Operand::Pseudo(ref name) => {
-            assignments.get(name).cloned().unwrap_or(op)
-        }
+        Operand::Pseudo(ref name) => assignments.get(name).cloned().unwrap_or(op),
         _ => op,
     }
 }
 
-fn replace_in_instruction(instr: Instruction, assignments: &HashMap<String, Operand>) -> Instruction {
+fn replace_in_instruction(
+    instr: Instruction,
+    assignments: &HashMap<String, Operand>,
+) -> Instruction {
     match instr {
         Instruction::Mov { asm_type, src, dst } => Instruction::Mov {
             asm_type,
             src: replace_operand(src, assignments),
             dst: replace_operand(dst, assignments),
         },
-        Instruction::Unary { asm_type, op, operand } => Instruction::Unary {
-            asm_type, op,
+        Instruction::Unary {
+            asm_type,
+            op,
+            operand,
+        } => Instruction::Unary {
+            asm_type,
+            op,
             operand: replace_operand(operand, assignments),
         },
         Instruction::Cmp { asm_type, src, dst } => Instruction::Cmp {
@@ -1007,8 +1028,14 @@ fn replace_in_instruction(instr: Instruction, assignments: &HashMap<String, Oper
             condition,
             operand: replace_operand(operand, assignments),
         },
-        Instruction::Binary { asm_type, op, src, dst } => Instruction::Binary {
-            asm_type, op,
+        Instruction::Binary {
+            asm_type,
+            op,
+            src,
+            dst,
+        } => Instruction::Binary {
+            asm_type,
+            op,
             src: replace_operand(src, assignments),
             dst: replace_operand(dst, assignments),
         },
@@ -1058,18 +1085,22 @@ fn replace_in_instruction(instr: Instruction, assignments: &HashMap<String, Oper
             src: replace_operand(src, assignments),
             dst: replace_operand(dst, assignments),
         },
-        Instruction::JmpIndirect(op, ref targets) => Instruction::JmpIndirect(replace_operand(op, assignments), targets.clone()),
-        Instruction::CallIndirect(op) => Instruction::CallIndirect(replace_operand(op, assignments)),
+        Instruction::JmpIndirect(op, ref targets) => {
+            Instruction::JmpIndirect(replace_operand(op, assignments), targets.clone())
+        }
+        Instruction::CallIndirect(op) => {
+            Instruction::CallIndirect(replace_operand(op, assignments))
+        }
         // These don't have operands to replace
         instr @ (Instruction::SignExtend(_)
-            | Instruction::Jmp(_)
-            | Instruction::JmpCC(_, _)
-            | Instruction::Label(_)
-            | Instruction::AllocateStack(_)
-            | Instruction::DeallocateStack(_)
-            | Instruction::Call(_)
-            | Instruction::Ret
-            | Instruction::RawBytes(_)) => instr,
+        | Instruction::Jmp(_)
+        | Instruction::JmpCC(_, _)
+        | Instruction::Label(_)
+        | Instruction::AllocateStack(_)
+        | Instruction::DeallocateStack(_)
+        | Instruction::Call(_)
+        | Instruction::Ret
+        | Instruction::RawBytes(_)) => instr,
     }
 }
 
@@ -1078,7 +1109,10 @@ fn replace_in_instruction(instr: Instruction, assignments: &HashMap<String, Oper
 // ────────────────────────────────────────────
 
 fn is_memory_operand(op: &Operand) -> bool {
-    matches!(op, Operand::Stack(_) | Operand::Data(_) | Operand::Memory(_) | Operand::MemoryOffset(_, _))
+    matches!(
+        op,
+        Operand::Stack(_) | Operand::Data(_) | Operand::Memory(_) | Operand::MemoryOffset(_, _)
+    )
 }
 
 fn is_imm(op: &Operand) -> bool {
@@ -1096,191 +1130,425 @@ fn is_large_imm(op: &Operand) -> bool {
 fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
     match instr {
         // Mov: memory,memory → via scratch
-        Instruction::Mov { asm_type, ref src, ref dst }
-            if is_memory_operand(src) && is_memory_operand(dst) =>
-        {
+        Instruction::Mov {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_memory_operand(src) && is_memory_operand(dst) => {
             if asm_type == AsmType::Double {
-                out.push(Instruction::Mov { asm_type, src: src.clone(), dst: Operand::Register(Reg::XMM15) });
-                out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::XMM15), dst: dst.clone() });
+                out.push(Instruction::Mov {
+                    asm_type,
+                    src: src.clone(),
+                    dst: Operand::Register(Reg::XMM15),
+                });
+                out.push(Instruction::Mov {
+                    asm_type,
+                    src: Operand::Register(Reg::XMM15),
+                    dst: dst.clone(),
+                });
             } else {
-                out.push(Instruction::Mov { asm_type, src: src.clone(), dst: Operand::Register(Reg::R10) });
-                out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R10), dst: dst.clone() });
+                out.push(Instruction::Mov {
+                    asm_type,
+                    src: src.clone(),
+                    dst: Operand::Register(Reg::R10),
+                });
+                out.push(Instruction::Mov {
+                    asm_type,
+                    src: Operand::Register(Reg::R10),
+                    dst: dst.clone(),
+                });
             }
         }
 
         // Mov: large immediate to memory → via R10
-        Instruction::Mov { asm_type, ref src, ref dst }
-            if is_large_imm(src) && is_memory_operand(dst) =>
-        {
-            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: src.clone(), dst: Operand::Register(Reg::R10) });
-            out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        Instruction::Mov {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_large_imm(src) && is_memory_operand(dst) => {
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Mov {
+                asm_type,
+                src: Operand::Register(Reg::R10),
+                dst: dst.clone(),
+            });
         }
 
         // Mov src,src (same register) → remove noop
-        Instruction::Mov { ref src, ref dst, .. } if src == dst => {
+        Instruction::Mov {
+            ref src, ref dst, ..
+        } if src == dst => {
             // Skip noop moves
         }
 
         // Binary: memory,memory → via scratch (non-double)
-        Instruction::Binary { asm_type, op, ref src, ref dst }
-            if asm_type != AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) =>
-        {
+        Instruction::Binary {
+            asm_type,
+            op,
+            ref src,
+            ref dst,
+        } if asm_type != AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) => {
             // imul cannot have memory dst, so load dst into R11
             if matches!(op, AsmBinaryOp::Mult) {
-                out.push(Instruction::Mov { asm_type, src: dst.clone(), dst: Operand::Register(Reg::R11) });
-                out.push(Instruction::Binary { asm_type, op, src: src.clone(), dst: Operand::Register(Reg::R11) });
-                out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
+                out.push(Instruction::Mov {
+                    asm_type,
+                    src: dst.clone(),
+                    dst: Operand::Register(Reg::R11),
+                });
+                out.push(Instruction::Binary {
+                    asm_type,
+                    op,
+                    src: src.clone(),
+                    dst: Operand::Register(Reg::R11),
+                });
+                out.push(Instruction::Mov {
+                    asm_type,
+                    src: Operand::Register(Reg::R11),
+                    dst: dst.clone(),
+                });
             } else {
-                out.push(Instruction::Mov { asm_type, src: src.clone(), dst: Operand::Register(Reg::R10) });
-                out.push(Instruction::Binary { asm_type, op, src: Operand::Register(Reg::R10), dst: dst.clone() });
+                out.push(Instruction::Mov {
+                    asm_type,
+                    src: src.clone(),
+                    dst: Operand::Register(Reg::R10),
+                });
+                out.push(Instruction::Binary {
+                    asm_type,
+                    op,
+                    src: Operand::Register(Reg::R10),
+                    dst: dst.clone(),
+                });
             }
         }
 
         // Binary: double memory,memory → via XMM15
-        Instruction::Binary { asm_type, op, ref src, ref dst }
-            if asm_type == AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) =>
-        {
-            out.push(Instruction::Mov { asm_type: AsmType::Double, src: src.clone(), dst: Operand::Register(Reg::XMM15) });
-            out.push(Instruction::Binary { asm_type, op, src: Operand::Register(Reg::XMM15), dst: dst.clone() });
+        Instruction::Binary {
+            asm_type,
+            op,
+            ref src,
+            ref dst,
+        } if asm_type == AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) => {
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Double,
+                src: src.clone(),
+                dst: Operand::Register(Reg::XMM15),
+            });
+            out.push(Instruction::Binary {
+                asm_type,
+                op,
+                src: Operand::Register(Reg::XMM15),
+                dst: dst.clone(),
+            });
         }
 
         // Binary: imul with memory dst → via R11
-        Instruction::Binary { asm_type, op: AsmBinaryOp::Mult, ref src, ref dst }
-            if asm_type != AsmType::Double && is_memory_operand(dst) =>
-        {
-            out.push(Instruction::Mov { asm_type, src: dst.clone(), dst: Operand::Register(Reg::R11) });
-            out.push(Instruction::Binary { asm_type, op: AsmBinaryOp::Mult, src: src.clone(), dst: Operand::Register(Reg::R11) });
-            out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        Instruction::Binary {
+            asm_type,
+            op: AsmBinaryOp::Mult,
+            ref src,
+            ref dst,
+        } if asm_type != AsmType::Double && is_memory_operand(dst) => {
+            out.push(Instruction::Mov {
+                asm_type,
+                src: dst.clone(),
+                dst: Operand::Register(Reg::R11),
+            });
+            out.push(Instruction::Binary {
+                asm_type,
+                op: AsmBinaryOp::Mult,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R11),
+            });
+            out.push(Instruction::Mov {
+                asm_type,
+                src: Operand::Register(Reg::R11),
+                dst: dst.clone(),
+            });
         }
 
         // Cmp: memory,memory → via R10
-        Instruction::Cmp { asm_type, ref src, ref dst }
-            if asm_type != AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) =>
-        {
-            out.push(Instruction::Mov { asm_type, src: dst.clone(), dst: Operand::Register(Reg::R10) });
-            out.push(Instruction::Cmp { asm_type, src: src.clone(), dst: Operand::Register(Reg::R10) });
+        Instruction::Cmp {
+            asm_type,
+            ref src,
+            ref dst,
+        } if asm_type != AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) => {
+            out.push(Instruction::Mov {
+                asm_type,
+                src: dst.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Cmp {
+                asm_type,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
         }
 
         // Cmp: large immediate → via R10
-        Instruction::Cmp { asm_type, ref src, ref dst }
-            if is_large_imm(src) =>
-        {
-            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: src.clone(), dst: Operand::Register(Reg::R10) });
-            out.push(Instruction::Cmp { asm_type, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        Instruction::Cmp {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_large_imm(src) => {
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Cmp {
+                asm_type,
+                src: Operand::Register(Reg::R10),
+                dst: dst.clone(),
+            });
         }
 
         // Idiv/Div: immediate operand → via R10
-        Instruction::Idiv { asm_type, ref operand } if is_imm(operand) => {
-            out.push(Instruction::Mov { asm_type, src: operand.clone(), dst: Operand::Register(Reg::R10) });
-            out.push(Instruction::Idiv { asm_type, operand: Operand::Register(Reg::R10) });
+        Instruction::Idiv {
+            asm_type,
+            ref operand,
+        } if is_imm(operand) => {
+            out.push(Instruction::Mov {
+                asm_type,
+                src: operand.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Idiv {
+                asm_type,
+                operand: Operand::Register(Reg::R10),
+            });
         }
-        Instruction::Div { asm_type, ref operand } if is_imm(operand) => {
-            out.push(Instruction::Mov { asm_type, src: operand.clone(), dst: Operand::Register(Reg::R10) });
-            out.push(Instruction::Div { asm_type, operand: Operand::Register(Reg::R10) });
+        Instruction::Div {
+            asm_type,
+            ref operand,
+        } if is_imm(operand) => {
+            out.push(Instruction::Mov {
+                asm_type,
+                src: operand.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Div {
+                asm_type,
+                operand: Operand::Register(Reg::R10),
+            });
         }
 
         // Movsx: immediate → just a regular quadword mov (sign extension of a constant is a no-op)
         Instruction::Movsx { ref src, ref dst } if is_imm(src) => {
-            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: src.clone(), dst: dst.clone() });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: src.clone(),
+                dst: dst.clone(),
+            });
         }
 
         // Movsx: dst is memory → via R11 (movslq requires register destination)
-        Instruction::Movsx { ref src, ref dst }
-            if is_memory_operand(dst) =>
-        {
-            out.push(Instruction::Movsx { src: src.clone(), dst: Operand::Register(Reg::R11) });
-            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        Instruction::Movsx { ref src, ref dst } if is_memory_operand(dst) => {
+            out.push(Instruction::Movsx {
+                src: src.clone(),
+                dst: Operand::Register(Reg::R11),
+            });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::R11),
+                dst: dst.clone(),
+            });
         }
 
         // MovsxByte: immediate → just a regular mov
-        Instruction::MovsxByte { asm_type, ref src, ref dst } if is_imm(src) => {
-            out.push(Instruction::Mov { asm_type, src: src.clone(), dst: dst.clone() });
+        Instruction::MovsxByte {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_imm(src) => {
+            out.push(Instruction::Mov {
+                asm_type,
+                src: src.clone(),
+                dst: dst.clone(),
+            });
         }
 
         // MovsxByte: dst is memory → via R11 (movsbl/movsbq requires register destination)
-        Instruction::MovsxByte { asm_type, ref src, ref dst }
-            if is_memory_operand(dst) =>
-        {
-            out.push(Instruction::MovsxByte { asm_type, src: src.clone(), dst: Operand::Register(Reg::R11) });
-            out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        Instruction::MovsxByte {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_memory_operand(dst) => {
+            out.push(Instruction::MovsxByte {
+                asm_type,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R11),
+            });
+            out.push(Instruction::Mov {
+                asm_type,
+                src: Operand::Register(Reg::R11),
+                dst: dst.clone(),
+            });
         }
 
         // MovZeroExtend: immediate → just a regular mov
         Instruction::MovZeroExtend { ref src, ref dst } if is_imm(src) => {
-            out.push(Instruction::Mov { asm_type: AsmType::Longword, src: src.clone(), dst: dst.clone() });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Longword,
+                src: src.clone(),
+                dst: dst.clone(),
+            });
         }
 
         // MovZeroExtend: dst is memory → via R11 (requires register destination)
-        Instruction::MovZeroExtend { ref src, ref dst }
-            if is_memory_operand(dst) =>
-        {
-            out.push(Instruction::MovZeroExtend { src: src.clone(), dst: Operand::Register(Reg::R11) });
-            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        Instruction::MovZeroExtend { ref src, ref dst } if is_memory_operand(dst) => {
+            out.push(Instruction::MovZeroExtend {
+                src: src.clone(),
+                dst: Operand::Register(Reg::R11),
+            });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::R11),
+                dst: dst.clone(),
+            });
         }
 
         // MovZeroExtendByte: immediate → just a regular mov
-        Instruction::MovZeroExtendByte { asm_type, ref src, ref dst } if is_imm(src) => {
-            out.push(Instruction::Mov { asm_type, src: src.clone(), dst: dst.clone() });
+        Instruction::MovZeroExtendByte {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_imm(src) => {
+            out.push(Instruction::Mov {
+                asm_type,
+                src: src.clone(),
+                dst: dst.clone(),
+            });
         }
 
         // MovZeroExtendByte: dst is memory → via R11 (movzbl/movzbq requires register destination)
-        Instruction::MovZeroExtendByte { asm_type, ref src, ref dst }
-            if is_memory_operand(dst) =>
-        {
-            out.push(Instruction::MovZeroExtendByte { asm_type, src: src.clone(), dst: Operand::Register(Reg::R11) });
-            out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        Instruction::MovZeroExtendByte {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_memory_operand(dst) => {
+            out.push(Instruction::MovZeroExtendByte {
+                asm_type,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R11),
+            });
+            out.push(Instruction::Mov {
+                asm_type,
+                src: Operand::Register(Reg::R11),
+                dst: dst.clone(),
+            });
         }
 
         // Truncate: memory,memory → via R10
         Instruction::Truncate { ref src, ref dst }
             if is_memory_operand(src) && is_memory_operand(dst) =>
         {
-            out.push(Instruction::Mov { asm_type: AsmType::Longword, src: src.clone(), dst: Operand::Register(Reg::R10) });
-            out.push(Instruction::Mov { asm_type: AsmType::Longword, src: Operand::Register(Reg::R10), dst: dst.clone() });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Longword,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Longword,
+                src: Operand::Register(Reg::R10),
+                dst: dst.clone(),
+            });
         }
 
         // Truncate: memory dst → via R10
-        Instruction::Truncate { ref src, ref dst }
-            if is_memory_operand(dst) =>
-        {
-            out.push(Instruction::Truncate { src: src.clone(), dst: Operand::Register(Reg::R10) });
-            out.push(Instruction::Mov { asm_type: AsmType::Longword, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        Instruction::Truncate { ref src, ref dst } if is_memory_operand(dst) => {
+            out.push(Instruction::Truncate {
+                src: src.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Longword,
+                src: Operand::Register(Reg::R10),
+                dst: dst.clone(),
+            });
         }
 
         // Lea: memory,memory → via R10
-        Instruction::Lea { ref src, ref dst }
-            if is_memory_operand(dst) =>
-        {
-            out.push(Instruction::Lea { src: src.clone(), dst: Operand::Register(Reg::R10) });
-            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        Instruction::Lea { ref src, ref dst } if is_memory_operand(dst) => {
+            out.push(Instruction::Lea {
+                src: src.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::R10),
+                dst: dst.clone(),
+            });
         }
 
         // Cvtsi2sd: immediate src → load to R10 first
-        Instruction::Cvtsi2sd { asm_type, ref src, ref dst } if is_imm(src) => {
-            out.push(Instruction::Mov { asm_type, src: src.clone(), dst: Operand::Register(Reg::R10) });
-            out.push(Instruction::Cvtsi2sd { asm_type, src: Operand::Register(Reg::R10), dst: dst.clone() });
+        Instruction::Cvtsi2sd {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_imm(src) => {
+            out.push(Instruction::Mov {
+                asm_type,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Cvtsi2sd {
+                asm_type,
+                src: Operand::Register(Reg::R10),
+                dst: dst.clone(),
+            });
         }
 
         // Cvtsi2sd: memory dst → via XMM15
-        Instruction::Cvtsi2sd { asm_type, ref src, ref dst }
-            if is_memory_operand(dst) =>
-        {
-            out.push(Instruction::Cvtsi2sd { asm_type, src: src.clone(), dst: Operand::Register(Reg::XMM15) });
-            out.push(Instruction::Mov { asm_type: AsmType::Double, src: Operand::Register(Reg::XMM15), dst: dst.clone() });
+        Instruction::Cvtsi2sd {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_memory_operand(dst) => {
+            out.push(Instruction::Cvtsi2sd {
+                asm_type,
+                src: src.clone(),
+                dst: Operand::Register(Reg::XMM15),
+            });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Double,
+                src: Operand::Register(Reg::XMM15),
+                dst: dst.clone(),
+            });
         }
 
         // Cvttsd2si: memory dst → via R11
-        Instruction::Cvttsd2si { asm_type, ref src, ref dst }
-            if is_memory_operand(dst) =>
-        {
-            out.push(Instruction::Cvttsd2si { asm_type, src: src.clone(), dst: Operand::Register(Reg::R11) });
-            out.push(Instruction::Mov { asm_type, src: Operand::Register(Reg::R11), dst: dst.clone() });
+        Instruction::Cvttsd2si {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_memory_operand(dst) => {
+            out.push(Instruction::Cvttsd2si {
+                asm_type,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R11),
+            });
+            out.push(Instruction::Mov {
+                asm_type,
+                src: Operand::Register(Reg::R11),
+                dst: dst.clone(),
+            });
         }
 
         // JmpIndirect: memory operand → load via R10
         Instruction::JmpIndirect(ref op, ref targets) if is_memory_operand(op) => {
-            out.push(Instruction::Mov { asm_type: AsmType::Quadword, src: op.clone(), dst: Operand::Register(Reg::R10) });
-            out.push(Instruction::JmpIndirect(Operand::Register(Reg::R10), targets.clone()));
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: op.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::JmpIndirect(
+                Operand::Register(Reg::R10),
+                targets.clone(),
+            ));
         }
 
         // Default: no fixup needed
@@ -1328,7 +1596,11 @@ fn insert_prologue_epilogue(
     // 全命令の Stack() オペランドをスキャンし、最も深い負オフセットを取得。
     // これはスピル変数と強制スタック変数の両方を含む実際のスタック使用量を反映する。
     let min_stack_offset = scan_min_stack_offset(&instructions);
-    let stack_bytes_from_scan = if min_stack_offset < 0 { (-min_stack_offset) as usize } else { 0 };
+    let stack_bytes_from_scan = if min_stack_offset < 0 {
+        (-min_stack_offset) as usize
+    } else {
+        0
+    };
     let needed_stack = std::cmp::max(spill_bytes, stack_bytes_from_scan);
 
     let total = callee_bytes + needed_stack;
@@ -1341,7 +1613,10 @@ fn insert_prologue_epilogue(
     // callee_bytes 分だけ下にシフトして衝突を回避する。
     let shift = -(callee_bytes as i32);
     let instructions: Vec<Instruction> = if callee_bytes > 0 {
-        instructions.into_iter().map(|instr| shift_stack_offsets(instr, shift)).collect()
+        instructions
+            .into_iter()
+            .map(|instr| shift_stack_offsets(instr, shift))
+            .collect()
     } else {
         instructions
     };
@@ -1398,8 +1673,13 @@ fn shift_stack_offsets(instr: Instruction, shift: i32) -> Instruction {
             src: shift_stack_op(src, shift),
             dst: shift_stack_op(dst, shift),
         },
-        Instruction::Unary { asm_type, op, operand } => Instruction::Unary {
-            asm_type, op,
+        Instruction::Unary {
+            asm_type,
+            op,
+            operand,
+        } => Instruction::Unary {
+            asm_type,
+            op,
             operand: shift_stack_op(operand, shift),
         },
         Instruction::Cmp { asm_type, src, dst } => Instruction::Cmp {
@@ -1411,8 +1691,14 @@ fn shift_stack_offsets(instr: Instruction, shift: i32) -> Instruction {
             condition,
             operand: shift_stack_op(operand, shift),
         },
-        Instruction::Binary { asm_type, op, src, dst } => Instruction::Binary {
-            asm_type, op,
+        Instruction::Binary {
+            asm_type,
+            op,
+            src,
+            dst,
+        } => Instruction::Binary {
+            asm_type,
+            op,
             src: shift_stack_op(src, shift),
             dst: shift_stack_op(dst, shift),
         },
@@ -1462,17 +1748,19 @@ fn shift_stack_offsets(instr: Instruction, shift: i32) -> Instruction {
             src: shift_stack_op(src, shift),
             dst: shift_stack_op(dst, shift),
         },
-        Instruction::JmpIndirect(op, targets) => Instruction::JmpIndirect(shift_stack_op(op, shift), targets),
+        Instruction::JmpIndirect(op, targets) => {
+            Instruction::JmpIndirect(shift_stack_op(op, shift), targets)
+        }
         Instruction::CallIndirect(op) => Instruction::CallIndirect(shift_stack_op(op, shift)),
         instr @ (Instruction::SignExtend(_)
-            | Instruction::Jmp(_)
-            | Instruction::JmpCC(_, _)
-            | Instruction::Label(_)
-            | Instruction::AllocateStack(_)
-            | Instruction::DeallocateStack(_)
-            | Instruction::Call(_)
-            | Instruction::Ret
-            | Instruction::RawBytes(_)) => instr,
+        | Instruction::Jmp(_)
+        | Instruction::JmpCC(_, _)
+        | Instruction::Label(_)
+        | Instruction::AllocateStack(_)
+        | Instruction::DeallocateStack(_)
+        | Instruction::Call(_)
+        | Instruction::Ret
+        | Instruction::RawBytes(_)) => instr,
     }
 }
 
@@ -1486,10 +1774,10 @@ fn scan_min_stack_offset(instructions: &[Instruction]) -> i32 {
     let mut min_offset: i32 = 0;
     for instr in instructions {
         for_each_operand(instr, |op| {
-            if let Operand::Stack(offset) = op {
-                if *offset < min_offset {
-                    min_offset = *offset;
-                }
+            if let Operand::Stack(offset) = op
+                && *offset < min_offset
+            {
+                min_offset = *offset;
             }
         });
     }
@@ -1499,26 +1787,79 @@ fn scan_min_stack_offset(instructions: &[Instruction]) -> i32 {
 /// 命令の全オペランドに対してクロージャを適用
 fn for_each_operand<F: FnMut(&Operand)>(instr: &Instruction, mut f: F) {
     match instr {
-        Instruction::Mov { src, dst, .. } => { f(src); f(dst); }
-        Instruction::Unary { operand, .. } => { f(operand); }
-        Instruction::Cmp { src, dst, .. } => { f(src); f(dst); }
-        Instruction::SetCC { operand, .. } => { f(operand); }
-        Instruction::Binary { src, dst, .. } => { f(src); f(dst); }
-        Instruction::Idiv { operand, .. } => { f(operand); }
-        Instruction::Div { operand, .. } => { f(operand); }
-        Instruction::Movsx { src, dst } => { f(src); f(dst); }
-        Instruction::MovsxByte { src, dst, .. } => { f(src); f(dst); }
-        Instruction::MovZeroExtend { src, dst } => { f(src); f(dst); }
-        Instruction::MovZeroExtendByte { src, dst, .. } => { f(src); f(dst); }
-        Instruction::Truncate { src, dst } => { f(src); f(dst); }
-        Instruction::Push(op) | Instruction::Pop(op) => { f(op); }
-        Instruction::Cvtsi2sd { src, dst, .. } => { f(src); f(dst); }
-        Instruction::Cvttsd2si { src, dst, .. } => { f(src); f(dst); }
-        Instruction::Lea { src, dst } => { f(src); f(dst); }
-        Instruction::JmpIndirect(op, _) => { f(op); }
-        Instruction::CallIndirect(op) => { f(op); }
-        Instruction::SignExtend(_) | Instruction::Jmp(_) | Instruction::JmpCC(_, _)
-        | Instruction::Label(_) | Instruction::AllocateStack(_) | Instruction::DeallocateStack(_)
-        | Instruction::Call(_) | Instruction::Ret | Instruction::RawBytes(_) => {}
+        Instruction::Mov { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::Unary { operand, .. } => {
+            f(operand);
+        }
+        Instruction::Cmp { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::SetCC { operand, .. } => {
+            f(operand);
+        }
+        Instruction::Binary { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::Idiv { operand, .. } => {
+            f(operand);
+        }
+        Instruction::Div { operand, .. } => {
+            f(operand);
+        }
+        Instruction::Movsx { src, dst } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::MovsxByte { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::MovZeroExtend { src, dst } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::MovZeroExtendByte { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::Truncate { src, dst } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::Push(op) | Instruction::Pop(op) => {
+            f(op);
+        }
+        Instruction::Cvtsi2sd { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::Cvttsd2si { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::Lea { src, dst } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::JmpIndirect(op, _) => {
+            f(op);
+        }
+        Instruction::CallIndirect(op) => {
+            f(op);
+        }
+        Instruction::SignExtend(_)
+        | Instruction::Jmp(_)
+        | Instruction::JmpCC(_, _)
+        | Instruction::Label(_)
+        | Instruction::AllocateStack(_)
+        | Instruction::DeallocateStack(_)
+        | Instruction::Call(_)
+        | Instruction::Ret
+        | Instruction::RawBytes(_) => {}
     }
 }

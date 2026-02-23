@@ -44,11 +44,11 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             continue;
         }
 
-        if let Some(label) = trimmed.strip_suffix(':') {
-            if symbols.contains(label) {
-                result.push(format!("_{label}:"));
-                continue;
-            }
+        if let Some(label) = trimmed.strip_suffix(':')
+            && symbols.contains(label)
+        {
+            result.push(format!("_{label}:"));
+            continue;
         }
 
         if trimmed.starts_with("call ") {
@@ -59,20 +59,21 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             }
         }
 
-        if trimmed.starts_with("leaq ") {
-            if let Some(rip_pos) = trimmed.find("(%rip)") {
-                let after_leaq = &trimmed[5..rip_pos];
-                if symbols.contains(after_leaq) {
-                    let suffix = &trimmed[rip_pos..];
-                    result.push(format!("    leaq _{after_leaq}{suffix}"));
-                    continue;
-                }
+        if trimmed.starts_with("leaq ")
+            && let Some(rip_pos) = trimmed.find("(%rip)")
+        {
+            let after_leaq = &trimmed[5..rip_pos];
+            if symbols.contains(after_leaq) {
+                let suffix = &trimmed[rip_pos..];
+                result.push(format!("    leaq _{after_leaq}{suffix}"));
+                continue;
             }
         }
 
         if let Some(rip_pos) = trimmed.find("(%rip)") {
             let before_rip = &trimmed[..rip_pos];
-            let sym_start = before_rip.rfind(|c: char| c == ' ' || c == ',' || c == '\t')
+            let sym_start = before_rip
+                .rfind([' ', ',', '\t'])
                 .map(|i| i + 1)
                 .unwrap_or(0);
             let sym_name = &before_rip[sym_start..];
@@ -163,7 +164,9 @@ fn compile_and_run(source: &str) -> i32 {
 /// 基本 enum: RED=0, GREEN=1, BLUE=2
 #[test]
 fn enum_basic() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 enum Color { RED, GREEN, BLUE };
 int main(void) {
@@ -176,7 +179,9 @@ int main(void) {
 /// 明示値 + 自動インクリメント
 #[test]
 fn enum_explicit_values() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 enum Nums { A = 10, B, C = 20, D };
 int main(void) {
@@ -190,7 +195,9 @@ int main(void) {
 /// 負値 enum
 #[test]
 fn enum_negative() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 enum Sign { NEG = -1, ZERO = 0, POS = 1 };
 int main(void) {
@@ -204,7 +211,9 @@ int main(void) {
 /// enum 変数宣言
 #[test]
 fn enum_variable() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 enum Dir { UP, DOWN, LEFT, RIGHT };
 int main(void) {
@@ -218,7 +227,9 @@ int main(void) {
 /// typedef enum
 #[test]
 fn enum_typedef() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 typedef enum { OFF, ON } State;
 int main(void) {
@@ -232,7 +243,9 @@ int main(void) {
 /// 無名 enum
 #[test]
 fn enum_anonymous() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 enum { X = 5, Y = 10 };
 int main(void) {
@@ -245,7 +258,9 @@ int main(void) {
 /// enum の算術演算
 #[test]
 fn enum_arithmetic() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 enum { A = 3, B = 7 };
 int main(void) {
@@ -263,7 +278,9 @@ int main(void) {
 /// 基本 switch + break
 #[test]
 fn switch_basic_break() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int x = 2;
@@ -282,7 +299,9 @@ int main(void) {
 /// fall-through（break なし）
 #[test]
 fn switch_fallthrough() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int x = 1;
@@ -302,7 +321,9 @@ int main(void) {
 /// default ケース
 #[test]
 fn switch_default() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int x = 99;
@@ -321,7 +342,9 @@ int main(void) {
 /// default なし（マッチしない場合）
 #[test]
 fn switch_no_match() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int x = 99;
@@ -339,7 +362,9 @@ int main(void) {
 /// switch + enum 定数の case ラベル
 #[test]
 fn switch_with_enum() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 enum Color { RED, GREEN, BLUE };
 int main(void) {
@@ -359,7 +384,9 @@ int main(void) {
 /// ネストした switch
 #[test]
 fn switch_nested() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int a = 1;
@@ -385,7 +412,9 @@ int main(void) {
 /// switch 内 break vs ループ内 continue
 #[test]
 fn switch_break_loop_continue() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int sum = 0;
@@ -411,7 +440,9 @@ int main(void) {
 /// case に負値
 #[test]
 fn switch_negative_case() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int x = -1;
@@ -430,7 +461,9 @@ int main(void) {
 /// default が先頭にある場合
 #[test]
 fn switch_default_first() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int x = 2;
@@ -449,7 +482,9 @@ int main(void) {
 /// 空の switch body
 #[test]
 fn switch_empty_body() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int x = 1;
@@ -464,7 +499,9 @@ int main(void) {
 /// switch in while loop with break
 #[test]
 fn switch_in_while_loop() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int i = 0;

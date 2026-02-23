@@ -46,11 +46,11 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             continue;
         }
 
-        if let Some(label) = trimmed.strip_suffix(':') {
-            if symbols.contains(label) {
-                result.push(format!("_{label}:"));
-                continue;
-            }
+        if let Some(label) = trimmed.strip_suffix(':')
+            && symbols.contains(label)
+        {
+            result.push(format!("_{label}:"));
+            continue;
         }
 
         if trimmed.starts_with("call ") {
@@ -61,14 +61,14 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             }
         }
 
-        if trimmed.starts_with("leaq ") {
-            if let Some(rip_pos) = trimmed.find("(%rip)") {
-                let after_leaq = &trimmed[5..rip_pos];
-                if symbols.contains(after_leaq) {
-                    let suffix = &trimmed[rip_pos..];
-                    result.push(format!("    leaq _{after_leaq}{suffix}"));
-                    continue;
-                }
+        if trimmed.starts_with("leaq ")
+            && let Some(rip_pos) = trimmed.find("(%rip)")
+        {
+            let after_leaq = &trimmed[5..rip_pos];
+            if symbols.contains(after_leaq) {
+                let suffix = &trimmed[rip_pos..];
+                result.push(format!("    leaq _{after_leaq}{suffix}"));
+                continue;
             }
         }
 
@@ -76,7 +76,8 @@ fn fixup_asm_for_macos(asm: &str) -> String {
         if let Some(rip_pos) = trimmed.find("(%rip)") {
             // Find the symbol name before (%rip): scan backwards for whitespace or comma
             let before_rip = &trimmed[..rip_pos];
-            let sym_start = before_rip.rfind(|c: char| c == ' ' || c == ',' || c == '\t')
+            let sym_start = before_rip
+                .rfind([' ', ',', '\t'])
                 .map(|i| i + 1)
                 .unwrap_or(0);
             let sym_name = &before_rip[sym_start..];
@@ -169,7 +170,9 @@ fn compile_and_run(source: &str) -> i32 {
 /// 基本: int a = 1, b = 2, c = 3; return a + b + c; → 終了コード 6
 #[test]
 fn multi_decl_basic() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int a = 1, b = 2, c = 3;
@@ -182,7 +185,9 @@ int main(void) {
 /// ポインタ混在: int x = 10, *p = &x; return *p; → 終了コード 10
 #[test]
 fn multi_decl_pointer_mix() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int x = 10, *p = &x;
@@ -195,7 +200,9 @@ int main(void) {
 /// 初期化なし混在: int a = 5, b, c = 3; b = 7; return a + b + c; → 終了コード 15
 #[test]
 fn multi_decl_partial_init() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int a = 5, b, c = 3;
@@ -209,7 +216,9 @@ int main(void) {
 /// グローバル: int g1 = 10, g2 = 20; int main() { return g1 + g2; } → 終了コード 30
 #[test]
 fn multi_decl_global() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int g1 = 10, g2 = 20;
 int main(void) {
@@ -222,7 +231,9 @@ int main(void) {
 /// for ループ: for (int i = 0, sum = 0; ...) → 終了コード 10
 #[test]
 fn multi_decl_for_loop() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int result;
@@ -239,7 +250,9 @@ int main(void) {
 /// long 型混在: long a = 100, b = 200; return (a + b) == 300; → 終了コード 1
 #[test]
 fn multi_decl_long() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     long a = 100, b = 200;
@@ -252,7 +265,9 @@ int main(void) {
 /// 配列混在: int x = 1, arr[3] = {2, 3, 4}; return x + arr[0] + arr[1] + arr[2]; → 終了コード 10
 #[test]
 fn multi_decl_array_mix() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     int x = 1, arr[3] = {2, 3, 4};
@@ -265,7 +280,9 @@ int main(void) {
 /// static: static int a = 10, b = 20; return a + b; → 終了コード 30
 #[test]
 fn multi_decl_static() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     static int a = 10, b = 20;

@@ -11,8 +11,8 @@
 //!   `possible_targets` で生存解析に正しい CFG 後続ブロック情報を提供
 //! - 型情報: `var_types` マップで全変数の型を追跡（最適化パスで使用）
 
-use std::collections::HashMap;
 use crate::parse::ast::Type;
+use std::collections::HashMap;
 
 /// TACKY プログラム全体
 #[derive(Debug, Clone)]
@@ -46,9 +46,18 @@ pub enum TackyInstruction {
     /// `return` (void)
     ReturnVoid,
     /// `dst = op src`
-    Unary { op: TackyUnaryOp, src: TackyVal, dst: TackyVal },
+    Unary {
+        op: TackyUnaryOp,
+        src: TackyVal,
+        dst: TackyVal,
+    },
     /// `dst = left op right`
-    Binary { op: TackyBinaryOp, left: TackyVal, right: TackyVal, dst: TackyVal },
+    Binary {
+        op: TackyBinaryOp,
+        left: TackyVal,
+        right: TackyVal,
+        dst: TackyVal,
+    },
     /// `dst = src`
     Copy { src: TackyVal, dst: TackyVal },
     /// `goto target`
@@ -60,7 +69,13 @@ pub enum TackyInstruction {
     /// `target:`
     Label(String),
     /// `dst = name(args...)`
-    FunCall { name: String, args: Vec<TackyVal>, dst: TackyVal, dst_type: Type, is_variadic: bool },
+    FunCall {
+        name: String,
+        args: Vec<TackyVal>,
+        dst: TackyVal,
+        dst_type: Type,
+        is_variadic: bool,
+    },
     /// `dst = sign_extend(src)`
     SignExtend { src: TackyVal, dst: TackyVal },
     /// `dst = zero_extend(src)`
@@ -82,18 +97,38 @@ pub enum TackyInstruction {
     /// `*dst_ptr = src`
     Store { src: TackyVal, dst_ptr: TackyVal },
     /// `dst = ptr + index * scale`
-    AddPtr { ptr: TackyVal, index: TackyVal, scale: usize, dst: TackyVal },
+    AddPtr {
+        ptr: TackyVal,
+        index: TackyVal,
+        scale: usize,
+        dst: TackyVal,
+    },
     /// `dst[offset..] = src` (構造体メンバへのコピー)
-    CopyToOffset { src: TackyVal, dst: String, offset: usize },
+    CopyToOffset {
+        src: TackyVal,
+        dst: String,
+        offset: usize,
+    },
     /// `dst = src[offset..]` (構造体メンバからのコピー)
-    CopyFromOffset { src: String, offset: usize, dst: TackyVal },
+    CopyFromOffset {
+        src: String,
+        offset: usize,
+        dst: TackyVal,
+    },
     /// `dst = memcpy(src, size)` (構造体全体のコピー)
-    CopyStruct { src: TackyVal, dst: TackyVal, size: usize },
+    CopyStruct {
+        src: TackyVal,
+        dst: TackyVal,
+        size: usize,
+    },
     /// `jmp *target` — 間接ジャンプ（難読化の CFF ジャンプテーブル用）
     /// `possible_targets` はジャンプテーブルの全エントリ。
     /// コード生成時は `jmp *target` のみ出力するが、レジスタ割り当ての
     /// 生存解析で正しい後続ブロック情報を提供するために使う。
-    JumpIndirect { target: TackyVal, possible_targets: Vec<String> },
+    JumpIndirect {
+        target: TackyVal,
+        possible_targets: Vec<String>,
+    },
     /// `va_start(ap)` — va_list の初期化
     VaStart {
         ap: TackyVal,
@@ -175,6 +210,7 @@ pub struct TackyStaticVar {
 
 /// 静的初期値
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 pub enum TackyStaticInit {
     IntInit(i64),
     DoubleInit(f64),

@@ -9,8 +9,8 @@
 //!      OpenBrace, KwReturn, IntLiteral(2), Semicolon, CloseBrace]
 //! ```
 
-pub mod token;
 pub mod lexer;
+pub mod token;
 
-pub use token::{Token, TokenKind};
 pub use lexer::lex;
+pub use token::{Token, TokenKind};

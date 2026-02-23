@@ -46,11 +46,11 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             continue;
         }
 
-        if let Some(label) = trimmed.strip_suffix(':') {
-            if symbols.contains(label) {
-                result.push(format!("_{label}:"));
-                continue;
-            }
+        if let Some(label) = trimmed.strip_suffix(':')
+            && symbols.contains(label)
+        {
+            result.push(format!("_{label}:"));
+            continue;
         }
 
         // call 命令: ローカルラベル以外は全て _ プレフィックス
@@ -63,14 +63,14 @@ fn fixup_asm_for_macos(asm: &str) -> String {
         }
 
         // leaq 命令
-        if trimmed.starts_with("leaq ") {
-            if let Some(rip_pos) = trimmed.find("(%rip)") {
-                let after_leaq = &trimmed[5..rip_pos];
-                if symbols.contains(after_leaq) {
-                    let suffix = &trimmed[rip_pos..];
-                    result.push(format!("    leaq _{after_leaq}{suffix}"));
-                    continue;
-                }
+        if trimmed.starts_with("leaq ")
+            && let Some(rip_pos) = trimmed.find("(%rip)")
+        {
+            let after_leaq = &trimmed[5..rip_pos];
+            if symbols.contains(after_leaq) {
+                let suffix = &trimmed[rip_pos..];
+                result.push(format!("    leaq _{after_leaq}{suffix}"));
+                continue;
             }
         }
 

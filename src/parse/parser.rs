@@ -63,10 +63,13 @@
 //! <args>           ::= <assignment> ("," <assignment>)*
 //! ```
 
+use super::ast::{
+    BinaryOp, BlockItem, Declaration, Expr, ForInit, FunctionDecl, MemberDecl, Program, Statement,
+    StorageClass, TopLevelDecl, Type, UnaryOp,
+};
 use crate::error::{CompileError, Result};
 use crate::lex::{Token, TokenKind};
 use std::collections::HashMap;
-use super::ast::{Program, FunctionDecl, BlockItem, Declaration, Statement, Expr, UnaryOp, BinaryOp, ForInit, StorageClass, TopLevelDecl, Type, MemberDecl};
 
 /// トークン列を構文解析して AST に変換する。
 ///
@@ -114,16 +117,17 @@ impl<'a> Parser<'a> {
     /// 現在位置のトークンを消費せずに参照する（先読み）。
     /// 式のパースで「次のトークンが何か」に応じて分岐する際に使う。
     fn peek(&self) -> Result<&'a Token> {
-        self.tokens.get(self.pos).ok_or_else(|| {
-            CompileError::ParseError("unexpected end of input".to_string())
-        })
+        self.tokens
+            .get(self.pos)
+            .ok_or_else(|| CompileError::ParseError("unexpected end of input".to_string()))
     }
 
     /// 現在位置のトークンを消費して返す。位置を1つ進める。
     fn advance(&mut self) -> Result<&'a Token> {
-        let token = self.tokens.get(self.pos).ok_or_else(|| {
-            CompileError::ParseError("unexpected end of input".to_string())
-        })?;
+        let token = self
+            .tokens
+            .get(self.pos)
+            .ok_or_else(|| CompileError::ParseError("unexpected end of input".to_string()))?;
         self.pos += 1;
         Ok(token)
     }
@@ -169,10 +173,18 @@ impl<'a> Parser<'a> {
             return false;
         }
         match &self.tokens[self.pos].kind {
-            TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
-            | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
-            | TokenKind::KwVoid | TokenKind::KwStruct | TokenKind::KwEnum => true,
-            TokenKind::Identifier(name) => name == "va_list" || self.typedef_names.contains_key(name),
+            TokenKind::KwInt
+            | TokenKind::KwLong
+            | TokenKind::KwUnsigned
+            | TokenKind::KwSigned
+            | TokenKind::KwDouble
+            | TokenKind::KwChar
+            | TokenKind::KwVoid
+            | TokenKind::KwStruct
+            | TokenKind::KwEnum => true,
+            TokenKind::Identifier(name) => {
+                name == "va_list" || self.typedef_names.contains_key(name)
+            }
             _ => false,
         }
     }
@@ -183,10 +195,18 @@ impl<'a> Parser<'a> {
             return false;
         }
         match &self.tokens[pos].kind {
-            TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned
-            | TokenKind::KwSigned | TokenKind::KwDouble | TokenKind::KwChar
-            | TokenKind::KwVoid | TokenKind::KwStruct | TokenKind::KwEnum => true,
-            TokenKind::Identifier(name) => name == "va_list" || self.typedef_names.contains_key(name),
+            TokenKind::KwInt
+            | TokenKind::KwLong
+            | TokenKind::KwUnsigned
+            | TokenKind::KwSigned
+            | TokenKind::KwDouble
+            | TokenKind::KwChar
+            | TokenKind::KwVoid
+            | TokenKind::KwStruct
+            | TokenKind::KwEnum => true,
+            TokenKind::Identifier(name) => {
+                name == "va_list" || self.typedef_names.contains_key(name)
+            }
             _ => false,
         }
     }
@@ -217,12 +237,12 @@ impl<'a> Parser<'a> {
                 TokenKind::KwVoid => {
                     if has_void {
                         return Err(CompileError::ParseError(
-                            "duplicate 'void' type specifier".to_string()
+                            "duplicate 'void' type specifier".to_string(),
                         ));
                     }
                     if has_int || has_long || has_unsigned || has_signed || has_double || has_char {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'void' with other type specifiers".to_string()
+                            "cannot combine 'void' with other type specifiers".to_string(),
                         ));
                     }
                     has_void = true;
@@ -232,22 +252,22 @@ impl<'a> Parser<'a> {
                 TokenKind::KwInt => {
                     if has_int {
                         return Err(CompileError::ParseError(
-                            "duplicate 'int' type specifier".to_string()
+                            "duplicate 'int' type specifier".to_string(),
                         ));
                     }
                     if has_double {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'double' with other type specifiers".to_string()
+                            "cannot combine 'double' with other type specifiers".to_string(),
                         ));
                     }
                     if has_char {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'char' with 'int'".to_string()
+                            "cannot combine 'char' with 'int'".to_string(),
                         ));
                     }
                     if has_void {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'void' with other type specifiers".to_string()
+                            "cannot combine 'void' with other type specifiers".to_string(),
                         ));
                     }
                     has_int = true;
@@ -257,22 +277,22 @@ impl<'a> Parser<'a> {
                 TokenKind::KwLong => {
                     if has_long {
                         return Err(CompileError::ParseError(
-                            "duplicate 'long' type specifier".to_string()
+                            "duplicate 'long' type specifier".to_string(),
                         ));
                     }
                     if has_double {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'double' with other type specifiers".to_string()
+                            "cannot combine 'double' with other type specifiers".to_string(),
                         ));
                     }
                     if has_char {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'char' with 'long'".to_string()
+                            "cannot combine 'char' with 'long'".to_string(),
                         ));
                     }
                     if has_void {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'void' with other type specifiers".to_string()
+                            "cannot combine 'void' with other type specifiers".to_string(),
                         ));
                     }
                     has_long = true;
@@ -282,22 +302,22 @@ impl<'a> Parser<'a> {
                 TokenKind::KwUnsigned => {
                     if has_unsigned {
                         return Err(CompileError::ParseError(
-                            "duplicate 'unsigned' type specifier".to_string()
+                            "duplicate 'unsigned' type specifier".to_string(),
                         ));
                     }
                     if has_signed {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'signed' and 'unsigned'".to_string()
+                            "cannot combine 'signed' and 'unsigned'".to_string(),
                         ));
                     }
                     if has_double {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'double' with other type specifiers".to_string()
+                            "cannot combine 'double' with other type specifiers".to_string(),
                         ));
                     }
                     if has_void {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'void' with other type specifiers".to_string()
+                            "cannot combine 'void' with other type specifiers".to_string(),
                         ));
                     }
                     has_unsigned = true;
@@ -307,22 +327,22 @@ impl<'a> Parser<'a> {
                 TokenKind::KwSigned => {
                     if has_signed {
                         return Err(CompileError::ParseError(
-                            "duplicate 'signed' type specifier".to_string()
+                            "duplicate 'signed' type specifier".to_string(),
                         ));
                     }
                     if has_unsigned {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'signed' and 'unsigned'".to_string()
+                            "cannot combine 'signed' and 'unsigned'".to_string(),
                         ));
                     }
                     if has_double {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'double' with other type specifiers".to_string()
+                            "cannot combine 'double' with other type specifiers".to_string(),
                         ));
                     }
                     if has_void {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'void' with other type specifiers".to_string()
+                            "cannot combine 'void' with other type specifiers".to_string(),
                         ));
                     }
                     has_signed = true;
@@ -332,12 +352,12 @@ impl<'a> Parser<'a> {
                 TokenKind::KwDouble => {
                     if has_double {
                         return Err(CompileError::ParseError(
-                            "duplicate 'double' type specifier".to_string()
+                            "duplicate 'double' type specifier".to_string(),
                         ));
                     }
                     if has_int || has_long || has_unsigned || has_signed || has_char || has_void {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'double' with other type specifiers".to_string()
+                            "cannot combine 'double' with other type specifiers".to_string(),
                         ));
                     }
                     has_double = true;
@@ -347,12 +367,12 @@ impl<'a> Parser<'a> {
                 TokenKind::KwChar => {
                     if has_char {
                         return Err(CompileError::ParseError(
-                            "duplicate 'char' type specifier".to_string()
+                            "duplicate 'char' type specifier".to_string(),
                         ));
                     }
                     if has_int || has_long || has_double || has_void {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'char' with other type specifiers".to_string()
+                            "cannot combine 'char' with other type specifiers".to_string(),
                         ));
                     }
                     has_char = true;
@@ -362,7 +382,7 @@ impl<'a> Parser<'a> {
                 TokenKind::KwStruct => {
                     if count > 0 {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'struct' with other type specifiers".to_string()
+                            "cannot combine 'struct' with other type specifiers".to_string(),
                         ));
                     }
                     return self.parse_struct_type();
@@ -370,7 +390,7 @@ impl<'a> Parser<'a> {
                 TokenKind::KwEnum => {
                     if count > 0 {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'enum' with other type specifiers".to_string()
+                            "cannot combine 'enum' with other type specifiers".to_string(),
                         ));
                     }
                     return self.parse_enum_type();
@@ -395,7 +415,8 @@ impl<'a> Parser<'a> {
         if count == 0 {
             let token = self.advance()?;
             return Err(CompileError::ParseError(format!(
-                "expected type specifier, got {:?}", token.kind
+                "expected type specifier, got {:?}",
+                token.kind
             )));
         }
 
@@ -440,7 +461,7 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 return Err(CompileError::ParseError(
-                    "expected struct tag name".to_string()
+                    "expected struct tag name".to_string(),
                 ));
             }
         };
@@ -454,7 +475,10 @@ impl<'a> Parser<'a> {
                 let member_base = self.parse_type_specifier()?;
                 let (member_type, member_name) = self.parse_declarator(member_base)?;
                 self.expect(&TokenKind::Semicolon)?;
-                members.push(MemberDecl { name: member_name, member_type });
+                members.push(MemberDecl {
+                    name: member_name,
+                    member_type,
+                });
             }
             self.expect(&TokenKind::CloseBrace)?;
 
@@ -501,7 +525,8 @@ impl<'a> Parser<'a> {
                     TokenKind::Identifier(name) => name.clone(),
                     other => {
                         return Err(CompileError::ParseError(format!(
-                            "expected enum constant name, got {:?}", other
+                            "expected enum constant name, got {:?}",
+                            other
                         )));
                     }
                 };
@@ -522,7 +547,8 @@ impl<'a> Parser<'a> {
                         TokenKind::LongLiteral(v) => *v,
                         other => {
                             return Err(CompileError::ParseError(format!(
-                                "expected integer constant for enum value, got {:?}", other
+                                "expected integer constant for enum value, got {:?}",
+                                other
                             )));
                         }
                     };
@@ -563,7 +589,8 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier(name) => name.clone(),
             other => {
                 return Err(CompileError::ParseError(format!(
-                    "expected identifier in declarator, got {:?}", other
+                    "expected identifier in declarator, got {:?}",
+                    other
                 )));
             }
         };
@@ -585,7 +612,7 @@ impl<'a> Parser<'a> {
                 ty = Type::Array(Box::new(ty), 0);
             } else {
                 return Err(CompileError::ParseError(
-                    "expected array size or ']' in declarator".to_string()
+                    "expected array size or ']' in declarator".to_string(),
                 ));
             }
             self.expect(&TokenKind::CloseBracket)?;
@@ -633,13 +660,15 @@ impl<'a> Parser<'a> {
         let mut results = Vec::new();
 
         let (resolved_type, name) = self.parse_declarator(base_type.clone())?;
-        self.typedef_names.insert(name.clone(), resolved_type.clone());
+        self.typedef_names
+            .insert(name.clone(), resolved_type.clone());
         results.push((name, resolved_type));
 
         while self.peek()?.kind == TokenKind::Comma {
             self.advance()?;
             let (resolved_type, name) = self.parse_declarator(base_type.clone())?;
-            self.typedef_names.insert(name.clone(), resolved_type.clone());
+            self.typedef_names
+                .insert(name.clone(), resolved_type.clone());
             results.push((name, resolved_type));
         }
 
@@ -665,8 +694,12 @@ impl<'a> Parser<'a> {
         // typedef 宣言のチェック
         if self.peek()?.kind == TokenKind::KwTypedef {
             let results = self.parse_typedef()?;
-            return Ok(results.into_iter()
-                .map(|(name, ty)| TopLevelDecl::Typedef { name, underlying_type: ty })
+            return Ok(results
+                .into_iter()
+                .map(|(name, ty)| TopLevelDecl::Typedef {
+                    name,
+                    underlying_type: ty,
+                })
                 .collect());
         }
 
@@ -675,7 +708,10 @@ impl<'a> Parser<'a> {
 
         // Chapter 18: `struct tag { ... };` — 構造体定義のみ（変数宣言なし）
         // enum { ... }; — enum 定義のみ（変数宣言なし）
-        if (base_type.is_struct() || self.last_parsed_enum_def) && self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
+        if (base_type.is_struct() || self.last_parsed_enum_def)
+            && self.pos < self.tokens.len()
+            && self.peek()?.kind == TokenKind::Semicolon
+        {
             self.last_parsed_enum_def = false;
             self.advance()?; // consume ';'
             return Ok(vec![TopLevelDecl::Variable(Declaration {
@@ -744,7 +780,14 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            Ok(vec![TopLevelDecl::Function(FunctionDecl { name, return_type: decl_type, params, body, storage_class, is_variadic })])
+            Ok(vec![TopLevelDecl::Function(FunctionDecl {
+                name,
+                return_type: decl_type,
+                params,
+                body,
+                storage_class,
+                is_variadic,
+            })])
         } else {
             // 変数宣言 — カンマ区切り対応
             let mut declarations = Vec::new();
@@ -760,7 +803,12 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            declarations.push(TopLevelDecl::Variable(Declaration { name, var_type: decl_type, init, storage_class }));
+            declarations.push(TopLevelDecl::Variable(Declaration {
+                name,
+                var_type: decl_type,
+                init,
+                storage_class,
+            }));
 
             // カンマ区切りの追加変数
             while self.peek()?.kind == TokenKind::Comma {
@@ -776,7 +824,12 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                declarations.push(TopLevelDecl::Variable(Declaration { name, var_type, init, storage_class }));
+                declarations.push(TopLevelDecl::Variable(Declaration {
+                    name,
+                    var_type,
+                    init,
+                    storage_class,
+                }));
             }
 
             self.expect(&TokenKind::Semicolon)?;
@@ -790,28 +843,39 @@ impl<'a> Parser<'a> {
     /// カンマ区切り宣言は複数の `BlockItem::Declaration` に展開される。
     fn parse_block_item(&mut self) -> Result<Vec<BlockItem>> {
         match &self.peek()?.kind {
-            TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
-            | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
-            | TokenKind::KwStatic | TokenKind::KwExtern
-            | TokenKind::KwStruct | TokenKind::KwEnum => {
+            TokenKind::KwInt
+            | TokenKind::KwLong
+            | TokenKind::KwUnsigned
+            | TokenKind::KwSigned
+            | TokenKind::KwDouble
+            | TokenKind::KwChar
+            | TokenKind::KwVoid
+            | TokenKind::KwStatic
+            | TokenKind::KwExtern
+            | TokenKind::KwStruct
+            | TokenKind::KwEnum => {
                 let decls = self.parse_declaration()?;
                 Ok(decls.into_iter().map(BlockItem::Declaration).collect())
             }
             TokenKind::KwTypedef => {
                 // ブロック内 typedef
                 let results = self.parse_typedef()?;
-                Ok(results.into_iter()
-                    .map(|(name, ty)| BlockItem::Typedef { name, underlying_type: ty })
+                Ok(results
+                    .into_iter()
+                    .map(|(name, ty)| BlockItem::Typedef {
+                        name,
+                        underlying_type: ty,
+                    })
                     .collect())
             }
-            TokenKind::Identifier(name) if name == "va_list" || self.typedef_names.contains_key(name) => {
+            TokenKind::Identifier(name)
+                if name == "va_list" || self.typedef_names.contains_key(name) =>
+            {
                 // typedef 名または va_list で始まる宣言
                 let decls = self.parse_declaration()?;
                 Ok(decls.into_iter().map(BlockItem::Declaration).collect())
             }
-            _ => {
-                Ok(vec![BlockItem::Statement(self.parse_statement()?)])
-            }
+            _ => Ok(vec![BlockItem::Statement(self.parse_statement()?)]),
         }
     }
 
@@ -826,7 +890,10 @@ impl<'a> Parser<'a> {
 
         // Chapter 18: `struct tag { ... };` — 構造体定義のみ（変数宣言なし）
         // enum { ... }; — enum 定義のみ（変数宣言なし）
-        if (base_type.is_struct() || self.last_parsed_enum_def) && self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
+        if (base_type.is_struct() || self.last_parsed_enum_def)
+            && self.pos < self.tokens.len()
+            && self.peek()?.kind == TokenKind::Semicolon
+        {
             self.last_parsed_enum_def = false;
             self.advance()?; // consume ';'
             // ダミー宣言を返す（コード生成では無視される）
@@ -854,7 +921,12 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        declarations.push(Declaration { name, var_type, init, storage_class });
+        declarations.push(Declaration {
+            name,
+            var_type,
+            init,
+            storage_class,
+        });
 
         // カンマ区切りの追加宣言子
         while self.peek()?.kind == TokenKind::Comma {
@@ -870,7 +942,12 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            declarations.push(Declaration { name, var_type, init, storage_class });
+            declarations.push(Declaration {
+                name,
+                var_type,
+                init,
+                storage_class,
+            });
         }
 
         self.expect(&TokenKind::Semicolon)?;
@@ -923,14 +1000,13 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::CloseParen)?;
                 let then_branch = Box::new(self.parse_statement()?);
                 // ダングリング else: 貪欲マッチ
-                let else_branch = if self.pos < self.tokens.len()
-                    && self.peek()?.kind == TokenKind::KwElse
-                {
-                    self.advance()?; // consume 'else'
-                    Some(Box::new(self.parse_statement()?))
-                } else {
-                    None
-                };
+                let else_branch =
+                    if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::KwElse {
+                        self.advance()?; // consume 'else'
+                        Some(Box::new(self.parse_statement()?))
+                    } else {
+                        None
+                    };
                 Ok(Statement::If {
                     condition,
                     then_branch,
@@ -973,14 +1049,23 @@ impl<'a> Parser<'a> {
 
                 // for-init: 宣言 or 式文 or 空文
                 let init = match &self.peek()?.kind {
-                    TokenKind::KwInt | TokenKind::KwLong | TokenKind::KwUnsigned | TokenKind::KwSigned
-                    | TokenKind::KwDouble | TokenKind::KwChar | TokenKind::KwVoid
-                    | TokenKind::KwStatic | TokenKind::KwExtern
-                    | TokenKind::KwStruct | TokenKind::KwEnum => {
+                    TokenKind::KwInt
+                    | TokenKind::KwLong
+                    | TokenKind::KwUnsigned
+                    | TokenKind::KwSigned
+                    | TokenKind::KwDouble
+                    | TokenKind::KwChar
+                    | TokenKind::KwVoid
+                    | TokenKind::KwStatic
+                    | TokenKind::KwExtern
+                    | TokenKind::KwStruct
+                    | TokenKind::KwEnum => {
                         // parse_declaration() returns Vec<Declaration> for comma-separated decls
                         ForInit::Declaration(self.parse_declaration()?)
                     }
-                    TokenKind::Identifier(name) if name == "va_list" || self.typedef_names.contains_key(name) => {
+                    TokenKind::Identifier(name)
+                        if name == "va_list" || self.typedef_names.contains_key(name) =>
+                    {
                         // typedef 名または va_list で始まる宣言
                         ForInit::Declaration(self.parse_declaration()?)
                     }
@@ -1012,7 +1097,12 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::CloseParen)?;
 
                 let body = Box::new(self.parse_statement()?);
-                Ok(Statement::For { init, condition, post, body })
+                Ok(Statement::For {
+                    init,
+                    condition,
+                    post,
+                    body,
+                })
             }
             // Chapter 8: break
             TokenKind::KwBreak => {
@@ -1067,13 +1157,15 @@ impl<'a> Parser<'a> {
                         self.advance()?;
                         *self.enum_constants.get(&name).ok_or_else(|| {
                             CompileError::ParseError(format!(
-                                "expected constant expression in case label, got '{}'", name
+                                "expected constant expression in case label, got '{}'",
+                                name
                             ))
                         })?
                     }
                     other => {
                         return Err(CompileError::ParseError(format!(
-                            "expected constant expression in case label, got {:?}", other
+                            "expected constant expression in case label, got {:?}",
+                            other
                         )));
                     }
                 };
@@ -1371,7 +1463,7 @@ impl<'a> Parser<'a> {
                 }
                 // sizeof expr (unary precedence)
                 let inner = self.parse_unary()?;
-                return Ok(Expr::SizeOfExpr(Box::new(inner)));
+                Ok(Expr::SizeOfExpr(Box::new(inner)))
             }
             TokenKind::Minus | TokenKind::Tilde | TokenKind::Bang => {
                 let op_token = self.advance()?;
@@ -1444,9 +1536,12 @@ impl<'a> Parser<'a> {
                     let member_token = self.advance()?;
                     let member_name = match &member_token.kind {
                         TokenKind::Identifier(name) => name.clone(),
-                        other => return Err(CompileError::ParseError(format!(
-                            "expected member name after '.', got {:?}", other
-                        ))),
+                        other => {
+                            return Err(CompileError::ParseError(format!(
+                                "expected member name after '.', got {:?}",
+                                other
+                            )));
+                        }
                     };
                     expr = Expr::Dot(Box::new(expr), member_name);
                 }
@@ -1456,9 +1551,12 @@ impl<'a> Parser<'a> {
                     let member_token = self.advance()?;
                     let member_name = match &member_token.kind {
                         TokenKind::Identifier(name) => name.clone(),
-                        other => return Err(CompileError::ParseError(format!(
-                            "expected member name after '->', got {:?}", other
-                        ))),
+                        other => {
+                            return Err(CompileError::ParseError(format!(
+                                "expected member name after '->', got {:?}",
+                                other
+                            )));
+                        }
                     };
                     expr = Expr::Dot(Box::new(Expr::Dereref(Box::new(expr))), member_name);
                 }
@@ -1559,7 +1657,10 @@ impl<'a> Parser<'a> {
                         let arg_type = self.parse_type_specifier()?;
                         let arg_type = self.parse_abstract_declarator(arg_type)?;
                         self.expect(&TokenKind::CloseParen)?;
-                        return Ok(Expr::VaArg { ap: Box::new(ap), arg_type });
+                        return Ok(Expr::VaArg {
+                            ap: Box::new(ap),
+                            arg_type,
+                        });
                     }
 
                     // va_end(ap)
@@ -1629,7 +1730,9 @@ mod tests {
         assert_eq!(func.name, "main");
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Some(Expr::Constant(2))))]
+            vec![BlockItem::Statement(Statement::Return(Some(
+                Expr::Constant(2)
+            )))]
         );
     }
 
@@ -1643,7 +1746,9 @@ mod tests {
         };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Some(Expr::Constant(0))))]
+            vec![BlockItem::Statement(Statement::Return(Some(
+                Expr::Constant(0)
+            )))]
         );
     }
 
@@ -1668,10 +1773,16 @@ mod tests {
     fn parse_negation() {
         let tokens = lex::lex("int main(void) { return -5; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(UnaryOp::Negate, Box::new(Expr::Constant(5))))))]
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(
+                UnaryOp::Negate,
+                Box::new(Expr::Constant(5))
+            ))))]
         );
     }
 
@@ -1680,10 +1791,16 @@ mod tests {
     fn parse_complement() {
         let tokens = lex::lex("int main(void) { return ~0; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(UnaryOp::Complement, Box::new(Expr::Constant(0))))))]
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(
+                UnaryOp::Complement,
+                Box::new(Expr::Constant(0))
+            ))))]
         );
     }
 
@@ -1692,10 +1809,16 @@ mod tests {
     fn parse_logical_not() {
         let tokens = lex::lex("int main(void) { return !1; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(UnaryOp::Not, Box::new(Expr::Constant(1))))))]
+            vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(
+                UnaryOp::Not,
+                Box::new(Expr::Constant(1))
+            ))))]
         );
     }
 
@@ -1704,7 +1827,10 @@ mod tests {
     fn parse_pre_decrement_literal() {
         let tokens = lex::lex("int main(void) { return --5; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(
@@ -1719,7 +1845,10 @@ mod tests {
     fn parse_nested_negation() {
         let tokens = lex::lex("int main(void) { return - -5; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(
@@ -1734,7 +1863,10 @@ mod tests {
     fn parse_complement_of_negation() {
         let tokens = lex::lex("int main(void) { return ~(-3); }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Unary(
@@ -1751,7 +1883,10 @@ mod tests {
     fn parse_addition() {
         let tokens = lex::lex("int main(void) { return 1 + 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1767,7 +1902,10 @@ mod tests {
     fn parse_precedence() {
         let tokens = lex::lex("int main(void) { return 1 + 2 * 3; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1787,7 +1925,10 @@ mod tests {
     fn parse_left_associativity() {
         let tokens = lex::lex("int main(void) { return 1 - 2 - 3; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1807,7 +1948,10 @@ mod tests {
     fn parse_parenthesized_binary() {
         let tokens = lex::lex("int main(void) { return (1 + 2) * 3; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1827,7 +1971,10 @@ mod tests {
     fn parse_division() {
         let tokens = lex::lex("int main(void) { return 7 / 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1843,7 +1990,10 @@ mod tests {
     fn parse_remainder() {
         let tokens = lex::lex("int main(void) { return 7 % 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1861,7 +2011,10 @@ mod tests {
     fn parse_less_than() {
         let tokens = lex::lex("int main(void) { return 1 < 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1877,7 +2030,10 @@ mod tests {
     fn parse_equal() {
         let tokens = lex::lex("int main(void) { return 1 == 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1893,7 +2049,10 @@ mod tests {
     fn parse_logical_and() {
         let tokens = lex::lex("int main(void) { return 1 && 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1909,7 +2068,10 @@ mod tests {
     fn parse_logical_or() {
         let tokens = lex::lex("int main(void) { return 1 || 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1925,7 +2087,10 @@ mod tests {
     fn parse_relational_and_logical() {
         let tokens = lex::lex("int main(void) { return 1 < 2 && 3 > 1; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1949,7 +2114,10 @@ mod tests {
     fn parse_additive_in_relational() {
         let tokens = lex::lex("int main(void) { return 2 + 3 > 4; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1969,7 +2137,10 @@ mod tests {
     fn parse_or_and_precedence() {
         let tokens = lex::lex("int main(void) { return 1 || 2 && 3; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -1989,7 +2160,10 @@ mod tests {
     fn parse_unary_in_binary() {
         let tokens = lex::lex("int main(void) { return -1 + 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::Return(Some(Expr::Binary(
@@ -2007,7 +2181,10 @@ mod tests {
     fn parse_declaration_with_init() {
         let tokens = lex::lex("int main(void) { int a = 5; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![
@@ -2027,7 +2204,10 @@ mod tests {
     fn parse_declaration_without_init() {
         let tokens = lex::lex("int main(void) { int a; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![
@@ -2047,7 +2227,10 @@ mod tests {
     fn parse_assignment() {
         let tokens = lex::lex("int main(void) { int a; a = 10; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![
@@ -2057,9 +2240,10 @@ mod tests {
                     init: None,
                     storage_class: None,
                 }),
-                BlockItem::Statement(Statement::Expression(
-                    Expr::Assign(Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(10)))
-                )),
+                BlockItem::Statement(Statement::Expression(Expr::Assign(
+                    Box::new(Expr::Var("a".to_string())),
+                    Box::new(Expr::Constant(10))
+                ))),
                 BlockItem::Statement(Statement::Return(Some(Expr::Var("a".to_string())))),
             ]
         );
@@ -2070,7 +2254,10 @@ mod tests {
     fn parse_multiple_declarations() {
         let tokens = lex::lex("int main(void) { int a = 2; int b = 3; return a + b; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![
@@ -2100,7 +2287,10 @@ mod tests {
     fn parse_null_statement() {
         let tokens = lex::lex("int main(void) { ; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![
@@ -2117,7 +2307,10 @@ mod tests {
     fn parse_if_statement() {
         let tokens = lex::lex("int main(void) { if (1) return 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
@@ -2133,7 +2326,10 @@ mod tests {
     fn parse_if_else_statement() {
         let tokens = lex::lex("int main(void) { if (0) return 2; else return 3; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
@@ -2149,14 +2345,19 @@ mod tests {
     fn parse_ternary() {
         let tokens = lex::lex("int main(void) { return 1 ? 5 : 10; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
-            vec![BlockItem::Statement(Statement::Return(Some(Expr::Conditional {
-                condition: Box::new(Expr::Constant(1)),
-                then_expr: Box::new(Expr::Constant(5)),
-                else_expr: Box::new(Expr::Constant(10)),
-            })))]
+            vec![BlockItem::Statement(Statement::Return(Some(
+                Expr::Conditional {
+                    condition: Box::new(Expr::Constant(1)),
+                    then_expr: Box::new(Expr::Constant(5)),
+                    else_expr: Box::new(Expr::Constant(10)),
+                }
+            )))]
         );
     }
 
@@ -2165,18 +2366,21 @@ mod tests {
     fn parse_compound_statement() {
         let tokens = lex::lex("int main(void) { { int a = 2; } return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![
-                BlockItem::Statement(Statement::Compound(vec![
-                    BlockItem::Declaration(Declaration {
+                BlockItem::Statement(Statement::Compound(vec![BlockItem::Declaration(
+                    Declaration {
                         name: "a".to_string(),
                         var_type: Type::Int,
                         init: Some(Expr::Constant(2)),
                         storage_class: None,
-                    }),
-                ])),
+                    }
+                ),])),
                 BlockItem::Statement(Statement::Return(Some(Expr::Constant(0)))),
             ]
         );
@@ -2188,7 +2392,10 @@ mod tests {
     fn parse_dangling_else() {
         let tokens = lex::lex("int main(void) { if (0) if (0) return 1; else return 2; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             *func.body.as_ref().unwrap(),
             vec![BlockItem::Statement(Statement::If {
@@ -2210,12 +2417,17 @@ mod tests {
     fn parse_compound_assign() {
         let tokens = lex::lex("int main(void) { int a = 5; a += 3; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[1],
-            BlockItem::Statement(Statement::Expression(
-                Expr::CompoundAssign(BinaryOp::Add, Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(3)))
-            ))
+            BlockItem::Statement(Statement::Expression(Expr::CompoundAssign(
+                BinaryOp::Add,
+                Box::new(Expr::Var("a".to_string())),
+                Box::new(Expr::Constant(3))
+            )))
         );
     }
 
@@ -2224,12 +2436,16 @@ mod tests {
     fn parse_prefix_increment() {
         let tokens = lex::lex("int main(void) { int a = 5; return ++a; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[1],
-            BlockItem::Statement(Statement::Return(Some(
-                Expr::Unary(UnaryOp::PreIncrement, Box::new(Expr::Var("a".to_string())))
-            )))
+            BlockItem::Statement(Statement::Return(Some(Expr::Unary(
+                UnaryOp::PreIncrement,
+                Box::new(Expr::Var("a".to_string()))
+            ))))
         );
     }
 
@@ -2238,12 +2454,15 @@ mod tests {
     fn parse_postfix_increment() {
         let tokens = lex::lex("int main(void) { int a = 5; return a++; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[1],
-            BlockItem::Statement(Statement::Return(Some(
-                Expr::PostfixIncrement(Box::new(Expr::Var("a".to_string())))
-            )))
+            BlockItem::Statement(Statement::Return(Some(Expr::PostfixIncrement(Box::new(
+                Expr::Var("a".to_string())
+            )))))
         );
     }
 
@@ -2252,12 +2471,15 @@ mod tests {
     fn parse_postfix_decrement() {
         let tokens = lex::lex("int main(void) { int a = 5; return a--; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[1],
-            BlockItem::Statement(Statement::Return(Some(
-                Expr::PostfixDecrement(Box::new(Expr::Var("a".to_string())))
-            )))
+            BlockItem::Statement(Statement::Return(Some(Expr::PostfixDecrement(Box::new(
+                Expr::Var("a".to_string())
+            )))))
         );
     }
 
@@ -2266,20 +2488,21 @@ mod tests {
     fn parse_comma_operator() {
         let tokens = lex::lex("int main(void) { return (1, 2, 3); }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
-            BlockItem::Statement(Statement::Return(Some(
-                Expr::Binary(
+            BlockItem::Statement(Statement::Return(Some(Expr::Binary(
+                BinaryOp::Comma,
+                Box::new(Expr::Binary(
                     BinaryOp::Comma,
-                    Box::new(Expr::Binary(
-                        BinaryOp::Comma,
-                        Box::new(Expr::Constant(1)),
-                        Box::new(Expr::Constant(2)),
-                    )),
-                    Box::new(Expr::Constant(3)),
-                )
-            )))
+                    Box::new(Expr::Constant(1)),
+                    Box::new(Expr::Constant(2)),
+                )),
+                Box::new(Expr::Constant(3)),
+            ))))
         );
     }
 
@@ -2289,7 +2512,10 @@ mod tests {
         // `int a = (1, 2);` — 括弧の中ではカンマが使える
         let tokens = lex::lex("int main(void) { int a = (1, 2); return a; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
             BlockItem::Declaration(Declaration {
@@ -2310,15 +2536,19 @@ mod tests {
     fn parse_chained_assignment() {
         let tokens = lex::lex("int main(void) { int a; int b; a = b = 5; return a; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[2],
-            BlockItem::Statement(Statement::Expression(
-                Expr::Assign(
-                    Box::new(Expr::Var("a".to_string())),
-                    Box::new(Expr::Assign(Box::new(Expr::Var("b".to_string())), Box::new(Expr::Constant(5))))
-                )
-            ))
+            BlockItem::Statement(Statement::Expression(Expr::Assign(
+                Box::new(Expr::Var("a".to_string())),
+                Box::new(Expr::Assign(
+                    Box::new(Expr::Var("b".to_string())),
+                    Box::new(Expr::Constant(5))
+                ))
+            )))
         );
     }
 
@@ -2329,7 +2559,10 @@ mod tests {
     fn parse_while_statement() {
         let tokens = lex::lex("int main(void) { while (1) return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::While {
@@ -2344,15 +2577,19 @@ mod tests {
     fn parse_do_while_statement() {
         let tokens = lex::lex("int main(void) { int a; do { a = 1; } while (0); }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[1],
             BlockItem::Statement(Statement::DoWhile {
-                body: Box::new(Statement::Compound(vec![
-                    BlockItem::Statement(Statement::Expression(
-                        Expr::Assign(Box::new(Expr::Var("a".to_string())), Box::new(Expr::Constant(1)))
-                    )),
-                ])),
+                body: Box::new(Statement::Compound(vec![BlockItem::Statement(
+                    Statement::Expression(Expr::Assign(
+                        Box::new(Expr::Var("a".to_string())),
+                        Box::new(Expr::Constant(1))
+                    ))
+                ),])),
                 condition: Expr::Constant(0),
             })
         );
@@ -2361,16 +2598,29 @@ mod tests {
     /// for文（宣言付き）: `for (int i = 0; i < 5; i++) a++;`
     #[test]
     fn parse_for_with_declaration() {
-        let tokens = lex::lex("int main(void) { int a; for (int i = 0; i < 5; i++) a++; }").unwrap();
+        let tokens =
+            lex::lex("int main(void) { int a; for (int i = 0; i < 5; i++) a++; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
-        if let BlockItem::Statement(Statement::For { init, condition, post, body: _ }) = &func.body.as_ref().unwrap()[1] {
-            assert_eq!(*init, ForInit::Declaration(vec![Declaration {
-                name: "i".to_string(),
-                var_type: Type::Int,
-                init: Some(Expr::Constant(0)),
-                storage_class: None,
-            }]));
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
+        if let BlockItem::Statement(Statement::For {
+            init,
+            condition,
+            post,
+            body: _,
+        }) = &func.body.as_ref().unwrap()[1]
+        {
+            assert_eq!(
+                *init,
+                ForInit::Declaration(vec![Declaration {
+                    name: "i".to_string(),
+                    var_type: Type::Int,
+                    init: Some(Expr::Constant(0)),
+                    storage_class: None,
+                }])
+            );
             assert!(condition.is_some());
             assert!(post.is_some());
         } else {
@@ -2383,7 +2633,10 @@ mod tests {
     fn parse_for_empty() {
         let tokens = lex::lex("int main(void) { for (;;) break; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::For {
@@ -2400,7 +2653,10 @@ mod tests {
     fn parse_break_statement() {
         let tokens = lex::lex("int main(void) { while (1) break; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::While {
@@ -2415,7 +2671,10 @@ mod tests {
     fn parse_continue_statement() {
         let tokens = lex::lex("int main(void) { while (1) continue; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::While {
@@ -2430,52 +2689,77 @@ mod tests {
     /// 関数呼び出し: `foo()`
     #[test]
     fn parse_function_call_no_args() {
-        let tokens = lex::lex("int five(void) { return 5; } int main(void) { return five(); }").unwrap();
+        let tokens =
+            lex::lex("int five(void) { return 5; } int main(void) { return five(); }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(program.declarations.len(), 2);
-        let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
-        let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let f0 = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
+        let f1 = match &program.declarations[1] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(f0.name, "five");
         assert_eq!(f0.params, Vec::<(Type, String)>::new());
         assert_eq!(f1.name, "main");
         assert_eq!(
             f1.body.as_ref().unwrap()[0],
-            BlockItem::Statement(Statement::Return(Some(
-                Expr::FunctionCall("five".to_string(), vec![])
-            )))
+            BlockItem::Statement(Statement::Return(Some(Expr::FunctionCall(
+                "five".to_string(),
+                vec![]
+            ))))
         );
     }
 
     /// 関数呼び出し: `add(2, 3)`
     #[test]
     fn parse_function_call_with_args() {
-        let tokens = lex::lex("int add(int a, int b) { return a + b; } int main(void) { return add(2, 3); }").unwrap();
+        let tokens = lex::lex(
+            "int add(int a, int b) { return a + b; } int main(void) { return add(2, 3); }",
+        )
+        .unwrap();
         let program = parse(&tokens).unwrap();
-        let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
-        let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let f0 = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
+        let f1 = match &program.declarations[1] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(f0.name, "add");
-        assert_eq!(f0.params, vec![(Type::Int, "a".to_string()), (Type::Int, "b".to_string())]);
+        assert_eq!(
+            f0.params,
+            vec![(Type::Int, "a".to_string()), (Type::Int, "b".to_string())]
+        );
         assert_eq!(
             f1.body.as_ref().unwrap()[0],
-            BlockItem::Statement(Statement::Return(Some(
-                Expr::FunctionCall("add".to_string(), vec![
-                    Expr::Constant(2),
-                    Expr::Constant(3),
-                ])
-            )))
+            BlockItem::Statement(Statement::Return(Some(Expr::FunctionCall(
+                "add".to_string(),
+                vec![Expr::Constant(2), Expr::Constant(3),]
+            ))))
         );
     }
 
     /// 関数宣言（プロトタイプ）
     #[test]
     fn parse_function_declaration() {
-        let tokens = lex::lex("int add(int a, int b); int main(void) { return add(1, 2); }").unwrap();
+        let tokens =
+            lex::lex("int add(int a, int b); int main(void) { return add(1, 2); }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(program.declarations.len(), 2);
-        let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let f0 = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(f0.name, "add");
         assert!(f0.body.is_none());
-        assert_eq!(f0.params, vec![(Type::Int, "a".to_string()), (Type::Int, "b".to_string())]);
+        assert_eq!(
+            f0.params,
+            vec![(Type::Int, "a".to_string()), (Type::Int, "b".to_string())]
+        );
     }
 
     /// 複数関数: 宣言+定義
@@ -2484,9 +2768,18 @@ mod tests {
         let tokens = lex::lex("int add(int a, int b); int main(void) { return add(10, 20); } int add(int a, int b) { return a + b; }").unwrap();
         let program = parse(&tokens).unwrap();
         assert_eq!(program.declarations.len(), 3);
-        let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
-        let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
-        let f2 = match &program.declarations[2] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let f0 = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
+        let f1 = match &program.declarations[1] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
+        let f2 = match &program.declarations[2] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert!(f0.body.is_none());
         assert!(f1.body.is_some());
         assert!(f2.body.is_some());
@@ -2495,18 +2788,21 @@ mod tests {
     /// 引数中のカンマはカンマ演算子ではなく引数区切りとしてパースされる
     #[test]
     fn parse_function_call_comma_not_operator() {
-        let tokens = lex::lex("int foo(int a, int b, int c) { return a; } int main(void) { return foo(1, 2, 3); }").unwrap();
+        let tokens = lex::lex(
+            "int foo(int a, int b, int c) { return a; } int main(void) { return foo(1, 2, 3); }",
+        )
+        .unwrap();
         let program = parse(&tokens).unwrap();
-        let f1 = match &program.declarations[1] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let f1 = match &program.declarations[1] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             f1.body.as_ref().unwrap()[0],
-            BlockItem::Statement(Statement::Return(Some(
-                Expr::FunctionCall("foo".to_string(), vec![
-                    Expr::Constant(1),
-                    Expr::Constant(2),
-                    Expr::Constant(3),
-                ])
-            )))
+            BlockItem::Statement(Statement::Return(Some(Expr::FunctionCall(
+                "foo".to_string(),
+                vec![Expr::Constant(1), Expr::Constant(2), Expr::Constant(3),]
+            ))))
         );
     }
 
@@ -2531,9 +2827,14 @@ mod tests {
     /// static 関数
     #[test]
     fn parse_static_function() {
-        let tokens = lex::lex("static int helper(void) { return 42; } int main(void) { return helper(); }").unwrap();
+        let tokens =
+            lex::lex("static int helper(void) { return 42; } int main(void) { return helper(); }")
+                .unwrap();
         let program = parse(&tokens).unwrap();
-        let f0 = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let f0 = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(f0.name, "helper");
         assert_eq!(f0.storage_class, Some(StorageClass::Static));
     }
@@ -2558,7 +2859,10 @@ mod tests {
     fn parse_block_static_variable() {
         let tokens = lex::lex("int main(void) { static int c = 0; return c; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
             BlockItem::Declaration(Declaration {
@@ -2575,7 +2879,10 @@ mod tests {
     fn parse_block_extern_variable() {
         let tokens = lex::lex("int main(void) { extern int x; return x; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
             BlockItem::Declaration(Declaration {
@@ -2594,7 +2901,10 @@ mod tests {
     fn parse_pointer_declaration() {
         let tokens = lex::lex("int main(void) { int *ptr; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
             BlockItem::Declaration(Declaration {
@@ -2611,7 +2921,10 @@ mod tests {
     fn parse_double_pointer_declaration() {
         let tokens = lex::lex("int main(void) { int **pp; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[0],
             BlockItem::Declaration(Declaration {
@@ -2628,7 +2941,10 @@ mod tests {
     fn parse_address_of() {
         let tokens = lex::lex("int main(void) { int x; int *p = &x; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[1],
             BlockItem::Declaration(Declaration {
@@ -2645,12 +2961,15 @@ mod tests {
     fn parse_dereference() {
         let tokens = lex::lex("int main(void) { int x = 5; int *p = &x; return *p; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[2],
-            BlockItem::Statement(Statement::Return(Some(
-                Expr::Dereref(Box::new(Expr::Var("p".to_string())))
-            )))
+            BlockItem::Statement(Statement::Return(Some(Expr::Dereref(Box::new(Expr::Var(
+                "p".to_string()
+            ))))))
         );
     }
 
@@ -2659,15 +2978,16 @@ mod tests {
     fn parse_dereference_assign() {
         let tokens = lex::lex("int main(void) { int x; int *p = &x; *p = 42; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(
             func.body.as_ref().unwrap()[2],
-            BlockItem::Statement(Statement::Expression(
-                Expr::Assign(
-                    Box::new(Expr::Dereref(Box::new(Expr::Var("p".to_string())))),
-                    Box::new(Expr::Constant(42))
-                )
-            ))
+            BlockItem::Statement(Statement::Expression(Expr::Assign(
+                Box::new(Expr::Dereref(Box::new(Expr::Var("p".to_string())))),
+                Box::new(Expr::Constant(42))
+            )))
         );
     }
 
@@ -2676,12 +2996,17 @@ mod tests {
     fn parse_cast_to_pointer() {
         let tokens = lex::lex("int main(void) { int *p = (int *)0; return 0; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         if let BlockItem::Declaration(decl) = &func.body.as_ref().unwrap()[0] {
             assert_eq!(decl.name, "p");
             assert_eq!(decl.var_type, Type::Pointer(Box::new(Type::Int)));
             match &decl.init {
-                Some(Expr::Cast { target_type, expr, .. }) => {
+                Some(Expr::Cast {
+                    target_type, expr, ..
+                }) => {
                     assert_eq!(*target_type, Type::Pointer(Box::new(Type::Int)));
                     assert_eq!(**expr, Expr::Constant(0));
                 }
@@ -2697,14 +3022,20 @@ mod tests {
     fn parse_pointer_parameter() {
         let tokens = lex::lex("int deref(int *p) { return *p; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(func.name, "deref");
-        assert_eq!(func.params, vec![(Type::Pointer(Box::new(Type::Int)), "p".to_string())]);
+        assert_eq!(
+            func.params,
+            vec![(Type::Pointer(Box::new(Type::Int)), "p".to_string())]
+        );
         assert_eq!(
             func.body.as_ref().unwrap()[0],
-            BlockItem::Statement(Statement::Return(Some(
-                Expr::Dereref(Box::new(Expr::Var("p".to_string())))
-            )))
+            BlockItem::Statement(Statement::Return(Some(Expr::Dereref(Box::new(Expr::Var(
+                "p".to_string()
+            ))))))
         );
     }
 
@@ -2713,10 +3044,16 @@ mod tests {
     fn parse_pointer_return_type() {
         let tokens = lex::lex("int *identity(int *p) { return p; }").unwrap();
         let program = parse(&tokens).unwrap();
-        let func = match &program.declarations[0] { TopLevelDecl::Function(f) => f, _ => panic!() };
+        let func = match &program.declarations[0] {
+            TopLevelDecl::Function(f) => f,
+            _ => panic!(),
+        };
         assert_eq!(func.name, "identity");
         assert_eq!(func.return_type, Type::Pointer(Box::new(Type::Int)));
-        assert_eq!(func.params, vec![(Type::Pointer(Box::new(Type::Int)), "p".to_string())]);
+        assert_eq!(
+            func.params,
+            vec![(Type::Pointer(Box::new(Type::Int)), "p".to_string())]
+        );
     }
 
     /// グローバルポインタ変数: `int *g;`

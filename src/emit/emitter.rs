@@ -59,11 +59,11 @@
 
 use std::fmt::Write;
 
-use crate::error::{CompileError, Result};
 use crate::codegen::asm_ast::{
-    AsmProgram, AsmStaticVar, AsmStaticConstant, StaticInit,
-    AsmType, Instruction, Operand, Reg, AsmUnaryOp, AsmBinaryOp, CondCode,
+    AsmBinaryOp, AsmProgram, AsmStaticConstant, AsmStaticVar, AsmType, AsmUnaryOp, CondCode,
+    Instruction, Operand, Reg, StaticInit,
 };
+use crate::error::{CompileError, Result};
 
 /// アセンブリ AST をテキストに変換する（Chapter 11: 型サイズ対応）。
 pub fn emit(program: &AsmProgram) -> Result<String> {
@@ -94,8 +94,7 @@ fn emit_function(out: &mut String, func: &crate::codegen::asm_ast::AsmFunction) 
             .map_err(|e| CompileError::EmitError(e.to_string()))?;
     }
     // 関数ラベル
-    writeln!(out, "{}:", func.name)
-        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    writeln!(out, "{}:", func.name).map_err(|e| CompileError::EmitError(e.to_string()))?;
 
     // Chapter 20: プロローグ/エピローグは fixup パスが Push/Mov/AllocateStack/
     // DeallocateStack/Pop/Ret 命令として生成するため、ここでは出力しない。
@@ -130,10 +129,13 @@ fn static_init_size(init: &StaticInit, asm_type: &AsmType) -> usize {
 /// `global` が true のとき `.globl` ディレクティブを出力する。
 fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
     let (align, size) = match var.init {
-        StaticInit::ZeroInit(n) => (16, n),  // 配列は16バイトアラインメント
+        StaticInit::ZeroInit(n) => (16, n), // 配列は16バイトアラインメント
         StaticInit::PointerArrayInit(ref labels) => (8, labels.len() * 8),
         StaticInit::ArrayInit(ref elems) => {
-            let total_size: usize = elems.iter().map(|e| static_init_size(e, &var.asm_type)).sum();
+            let total_size: usize = elems
+                .iter()
+                .map(|e| static_init_size(e, &var.asm_type))
+                .sum();
             let elem_align = match var.asm_type {
                 AsmType::Byte => 1,
                 AsmType::Longword => 4,
@@ -174,12 +176,9 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
     };
 
     if !is_zero {
-        writeln!(out, "    .data")
-            .map_err(|e| CompileError::EmitError(e.to_string()))?;
-        writeln!(out, "    .align {align}")
-            .map_err(|e| CompileError::EmitError(e.to_string()))?;
-        writeln!(out, "{}:", var.name)
-            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "    .data").map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "    .align {align}").map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "{}:", var.name).map_err(|e| CompileError::EmitError(e.to_string()))?;
         match &var.init {
             StaticInit::IntInit(v) => {
                 let directive = match var.asm_type {
@@ -215,14 +214,10 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
             }
         }
     } else {
-        writeln!(out, "    .bss")
-            .map_err(|e| CompileError::EmitError(e.to_string()))?;
-        writeln!(out, "    .align {align}")
-            .map_err(|e| CompileError::EmitError(e.to_string()))?;
-        writeln!(out, "{}:", var.name)
-            .map_err(|e| CompileError::EmitError(e.to_string()))?;
-        writeln!(out, "    .zero {size}")
-            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "    .bss").map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "    .align {align}").map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "{}:", var.name).map_err(|e| CompileError::EmitError(e.to_string()))?;
+        writeln!(out, "    .zero {size}").map_err(|e| CompileError::EmitError(e.to_string()))?;
     }
     Ok(())
 }
@@ -256,24 +251,20 @@ fn emit_array_init_data(out: &mut String, elems: &[StaticInit], asm_type: &AsmTy
 
 /// 読み取り専用の静的定数（.rodata セクション）の出力（Chapter 13）。
 fn emit_static_constant(out: &mut String, constant: &AsmStaticConstant) -> Result<()> {
-    writeln!(out, "    .section .rodata")
-        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    writeln!(out, "    .section .rodata").map_err(|e| CompileError::EmitError(e.to_string()))?;
     writeln!(out, "    .align {}", constant.alignment)
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
-    writeln!(out, "{}:", constant.name)
-        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    writeln!(out, "{}:", constant.name).map_err(|e| CompileError::EmitError(e.to_string()))?;
     match &constant.init {
         StaticInit::IntInit(v) => {
-            writeln!(out, "    .quad {v}")
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(out, "    .quad {v}").map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         StaticInit::DoubleInit(v) => {
             writeln!(out, "    .quad {}", v.to_bits())
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         StaticInit::ZeroInit(n) => {
-            writeln!(out, "    .zero {n}")
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(out, "    .zero {n}").map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         StaticInit::StringInit(content, _) => {
             writeln!(out, "    .asciz \"{}\"", escape_string_for_asm(content))
@@ -319,34 +310,62 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
     match instr {
         Instruction::Mov { asm_type, src, dst } => {
             if *asm_type == AsmType::Double {
-                writeln!(out, "    movsd {}, {}", format_operand_typed(src, asm_type), format_operand_typed(dst, asm_type))
-                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                writeln!(
+                    out,
+                    "    movsd {}, {}",
+                    format_operand_typed(src, asm_type),
+                    format_operand_typed(dst, asm_type)
+                )
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
             } else {
                 let suffix = type_suffix(asm_type);
-                writeln!(out, "    mov{suffix} {}, {}", format_operand_typed(src, asm_type), format_operand_typed(dst, asm_type))
-                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                writeln!(
+                    out,
+                    "    mov{suffix} {}, {}",
+                    format_operand_typed(src, asm_type),
+                    format_operand_typed(dst, asm_type)
+                )
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
             }
         }
         // Chapter 2: 単項演算命令
-        Instruction::Unary { asm_type, op, operand } => {
+        Instruction::Unary {
+            asm_type,
+            op,
+            operand,
+        } => {
             let base = match op {
                 AsmUnaryOp::Neg => "neg",
                 AsmUnaryOp::Not => "not",
             };
             let suffix = type_suffix(asm_type);
-            writeln!(out, "    {base}{suffix} {}", format_operand_typed(operand, asm_type))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(
+                out,
+                "    {base}{suffix} {}",
+                format_operand_typed(operand, asm_type)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 2/13: 比較命令
         Instruction::Cmp { asm_type, src, dst } => {
             if *asm_type == AsmType::Double {
                 // comisd for double comparison
-                writeln!(out, "    comisd {}, {}", format_operand_typed(src, asm_type), format_operand_typed(dst, asm_type))
-                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                writeln!(
+                    out,
+                    "    comisd {}, {}",
+                    format_operand_typed(src, asm_type),
+                    format_operand_typed(dst, asm_type)
+                )
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
             } else {
                 let suffix = type_suffix(asm_type);
-                writeln!(out, "    cmp{suffix} {}, {}", format_operand_typed(src, asm_type), format_operand_typed(dst, asm_type))
-                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                writeln!(
+                    out,
+                    "    cmp{suffix} {}, {}",
+                    format_operand_typed(src, asm_type),
+                    format_operand_typed(dst, asm_type)
+                )
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
             }
         }
         // Chapter 2: 条件付きバイト設定（論理否定 ! で使用）
@@ -357,7 +376,12 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 3/13: 二項演算命令
-        Instruction::Binary { asm_type, op, src, dst } => {
+        Instruction::Binary {
+            asm_type,
+            op,
+            src,
+            dst,
+        } => {
             if *asm_type == AsmType::Double {
                 let mnemonic = match op {
                     AsmBinaryOp::Add => "addsd",
@@ -366,8 +390,13 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
                     AsmBinaryOp::DivDouble => "divsd",
                     AsmBinaryOp::Xor => "xorpd",
                 };
-                writeln!(out, "    {mnemonic} {}, {}", format_operand_typed(src, asm_type), format_operand_typed(dst, asm_type))
-                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                writeln!(
+                    out,
+                    "    {mnemonic} {}, {}",
+                    format_operand_typed(src, asm_type),
+                    format_operand_typed(dst, asm_type)
+                )
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
             } else {
                 let base = match op {
                     AsmBinaryOp::Add => "add",
@@ -377,62 +406,97 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
                     AsmBinaryOp::Xor => unreachable!("Xor only for Double type"),
                 };
                 let suffix = type_suffix(asm_type);
-                writeln!(out, "    {base}{suffix} {}, {}", format_operand_typed(src, asm_type), format_operand_typed(dst, asm_type))
-                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                writeln!(
+                    out,
+                    "    {base}{suffix} {}, {}",
+                    format_operand_typed(src, asm_type),
+                    format_operand_typed(dst, asm_type)
+                )
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
             }
         }
         // Chapter 3: 符号付き除算
         Instruction::Idiv { asm_type, operand } => {
             let suffix = type_suffix(asm_type);
-            writeln!(out, "    idiv{suffix} {}", format_operand_typed(operand, asm_type))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(
+                out,
+                "    idiv{suffix} {}",
+                format_operand_typed(operand, asm_type)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 12: 符号なし除算
         Instruction::Div { asm_type, operand } => {
             let suffix = type_suffix(asm_type);
-            writeln!(out, "    div{suffix} {}", format_operand_typed(operand, asm_type))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(
+                out,
+                "    div{suffix} {}",
+                format_operand_typed(operand, asm_type)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 3/11: 符号拡張（cdq for Longword, cqo for Quadword）
         Instruction::SignExtend(asm_type) => {
             let mnemonic = match asm_type {
                 AsmType::Longword => "cdq",
                 AsmType::Quadword => "cqo",
-                AsmType::Byte | AsmType::Double => unreachable!("SignExtend not applicable to {:?}", asm_type),
+                AsmType::Byte | AsmType::Double => {
+                    unreachable!("SignExtend not applicable to {:?}", asm_type)
+                }
             };
-            writeln!(out, "    {mnemonic}")
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(out, "    {mnemonic}").map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 11: int → long 符号拡張（movslq）
         Instruction::Movsx { src, dst } => {
-            writeln!(out, "    movslq {}, {}", format_operand(src), format_operand_quad(dst))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(
+                out,
+                "    movslq {}, {}",
+                format_operand(src),
+                format_operand_quad(dst)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 11: long → int 切り詰め（32ビット mov で上位ビットをゼロクリア）
         Instruction::Truncate { src, dst } => {
-            writeln!(out, "    movl {}, {}", format_operand(src), format_operand(dst))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(
+                out,
+                "    movl {}, {}",
+                format_operand(src),
+                format_operand(dst)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 12: 32→64 ゼロ拡張（movl で上位32ビットを自動ゼロクリア）
         Instruction::MovZeroExtend { src, dst } => {
-            writeln!(out, "    movl {}, {}", format_operand(src), format_operand(dst))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(
+                out,
+                "    movl {}, {}",
+                format_operand(src),
+                format_operand(dst)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 16: byte → int/long 符号拡張（movsbl/movsbq）
         Instruction::MovsxByte { asm_type, src, dst } => {
             let suffix = type_suffix(asm_type);
-            writeln!(out, "    movsb{suffix} {}, {}",
+            writeln!(
+                out,
+                "    movsb{suffix} {}, {}",
                 format_operand_byte(src),
-                format_operand_typed(dst, asm_type))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                format_operand_typed(dst, asm_type)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 16: byte → int/long ゼロ拡張（movzbl/movzbq）
         Instruction::MovZeroExtendByte { asm_type, src, dst } => {
             let suffix = type_suffix(asm_type);
-            writeln!(out, "    movzb{suffix} {}, {}",
+            writeln!(
+                out,
+                "    movzb{suffix} {}, {}",
                 format_operand_byte(src),
-                format_operand_typed(dst, asm_type))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                format_operand_typed(dst, asm_type)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 3/13: スタックにプッシュ
         // XMM レジスタは push できないので subq + movsd で代替
@@ -472,8 +536,7 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
         }
         // Chapter 4: 無条件ジャンプ
         Instruction::Jmp(label) => {
-            writeln!(out, "    jmp {label}")
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(out, "    jmp {label}").map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 4: 条件ジャンプ
         Instruction::JmpCC(condition, label) => {
@@ -483,8 +546,7 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
         }
         // Chapter 4: ラベル定義
         Instruction::Label(label) => {
-            writeln!(out, "{label}:")
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(out, "{label}:").map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 5: スタック領域の確保
         Instruction::AllocateStack(size) => {
@@ -498,34 +560,43 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
         }
         // Chapter 9: 関数呼び出し
         Instruction::Call(name) => {
-            writeln!(out, "    call {name}")
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(out, "    call {name}").map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 13: 整数→double 変換
         Instruction::Cvtsi2sd { asm_type, src, dst } => {
             let suffix = type_suffix(asm_type);
-            writeln!(out, "    cvtsi2sd{suffix} {}, {}",
+            writeln!(
+                out,
+                "    cvtsi2sd{suffix} {}, {}",
                 format_operand_typed(src, asm_type),
-                format_operand_xmm(dst))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                format_operand_xmm(dst)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 13: double→整数 変換（切り捨て）
         Instruction::Cvttsd2si { asm_type, src, dst } => {
             let suffix = type_suffix(asm_type);
-            writeln!(out, "    cvttsd2si{suffix} {}, {}",
+            writeln!(
+                out,
+                "    cvttsd2si{suffix} {}, {}",
                 format_operand_xmm(src),
-                format_operand_typed(dst, asm_type))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                format_operand_typed(dst, asm_type)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 14: LEA（実効アドレスロード）
         Instruction::Lea { src, dst } => {
-            writeln!(out, "    leaq {}, {}", format_operand_quad(src), format_operand_quad(dst))
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(
+                out,
+                "    leaq {}, {}",
+                format_operand_quad(src),
+                format_operand_quad(dst)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
         // Chapter 20: ret のみ出力。エピローグは fixup パスが Ret の前に挿入する。
         Instruction::Ret => {
-            writeln!(out, "    ret")
-                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            writeln!(out, "    ret").map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
 
         // 間接ジャンプ（難読化の CFF ジャンプテーブル用）
@@ -670,11 +741,22 @@ fn format_register_quad(reg: &Reg) -> &'static str {
         Reg::R15 => "%r15",
         Reg::SP => "%rsp",
         Reg::BP => "%rbp",
-        Reg::XMM0 | Reg::XMM1 | Reg::XMM2 | Reg::XMM3
-        | Reg::XMM4 | Reg::XMM5 | Reg::XMM6 | Reg::XMM7
-        | Reg::XMM8 | Reg::XMM9 | Reg::XMM10 | Reg::XMM11
-        | Reg::XMM12 | Reg::XMM13
-        | Reg::XMM14 | Reg::XMM15 => format_register_xmm(reg),
+        Reg::XMM0
+        | Reg::XMM1
+        | Reg::XMM2
+        | Reg::XMM3
+        | Reg::XMM4
+        | Reg::XMM5
+        | Reg::XMM6
+        | Reg::XMM7
+        | Reg::XMM8
+        | Reg::XMM9
+        | Reg::XMM10
+        | Reg::XMM11
+        | Reg::XMM12
+        | Reg::XMM13
+        | Reg::XMM14
+        | Reg::XMM15 => format_register_xmm(reg),
     }
 }
 
@@ -697,11 +779,22 @@ fn format_register(reg: &Reg) -> &'static str {
         Reg::R15 => "%r15d",
         Reg::SP => "%esp",
         Reg::BP => "%ebp",
-        Reg::XMM0 | Reg::XMM1 | Reg::XMM2 | Reg::XMM3
-        | Reg::XMM4 | Reg::XMM5 | Reg::XMM6 | Reg::XMM7
-        | Reg::XMM8 | Reg::XMM9 | Reg::XMM10 | Reg::XMM11
-        | Reg::XMM12 | Reg::XMM13
-        | Reg::XMM14 | Reg::XMM15 => format_register_xmm(reg),
+        Reg::XMM0
+        | Reg::XMM1
+        | Reg::XMM2
+        | Reg::XMM3
+        | Reg::XMM4
+        | Reg::XMM5
+        | Reg::XMM6
+        | Reg::XMM7
+        | Reg::XMM8
+        | Reg::XMM9
+        | Reg::XMM10
+        | Reg::XMM11
+        | Reg::XMM12
+        | Reg::XMM13
+        | Reg::XMM14
+        | Reg::XMM15 => format_register_xmm(reg),
     }
 }
 
@@ -724,21 +817,46 @@ fn format_register_byte(reg: &Reg) -> &'static str {
         Reg::R15 => "%r15b",
         Reg::SP => "%spl",
         Reg::BP => "%bpl",
-        Reg::XMM0 | Reg::XMM1 | Reg::XMM2 | Reg::XMM3
-        | Reg::XMM4 | Reg::XMM5 | Reg::XMM6 | Reg::XMM7
-        | Reg::XMM8 | Reg::XMM9 | Reg::XMM10 | Reg::XMM11
-        | Reg::XMM12 | Reg::XMM13
-        | Reg::XMM14 | Reg::XMM15 => format_register_xmm(reg),
+        Reg::XMM0
+        | Reg::XMM1
+        | Reg::XMM2
+        | Reg::XMM3
+        | Reg::XMM4
+        | Reg::XMM5
+        | Reg::XMM6
+        | Reg::XMM7
+        | Reg::XMM8
+        | Reg::XMM9
+        | Reg::XMM10
+        | Reg::XMM11
+        | Reg::XMM12
+        | Reg::XMM13
+        | Reg::XMM14
+        | Reg::XMM15 => format_register_xmm(reg),
     }
 }
 
 /// XMM レジスタかどうかを判定する。
 fn is_xmm_register(reg: &Reg) -> bool {
-    matches!(reg, Reg::XMM0 | Reg::XMM1 | Reg::XMM2 | Reg::XMM3
-        | Reg::XMM4 | Reg::XMM5 | Reg::XMM6 | Reg::XMM7
-        | Reg::XMM8 | Reg::XMM9 | Reg::XMM10 | Reg::XMM11
-        | Reg::XMM12 | Reg::XMM13
-        | Reg::XMM14 | Reg::XMM15)
+    matches!(
+        reg,
+        Reg::XMM0
+            | Reg::XMM1
+            | Reg::XMM2
+            | Reg::XMM3
+            | Reg::XMM4
+            | Reg::XMM5
+            | Reg::XMM6
+            | Reg::XMM7
+            | Reg::XMM8
+            | Reg::XMM9
+            | Reg::XMM10
+            | Reg::XMM11
+            | Reg::XMM12
+            | Reg::XMM13
+            | Reg::XMM14
+            | Reg::XMM15
+    )
 }
 
 /// 条件コードをアセンブリの接尾辞に変換する。
@@ -891,7 +1009,7 @@ mod tests {
         ]);
         let asm = emit(&program).unwrap();
         assert!(asm.contains("cmpl $0, %eax"));
-        assert!(asm.contains("sete %al"));  // 8ビットレジスタ名になる
+        assert!(asm.contains("sete %al")); // 8ビットレジスタ名になる
     }
 
     // ── Chapter 3 テスト ──
@@ -900,9 +1018,17 @@ mod tests {
     #[test]
     fn emit_addition() {
         let program = test_program(vec![
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(1),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Push(Operand::Register(Reg::AX)),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(2),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Pop(Operand::Register(Reg::CX)),
             Instruction::Binary {
                 asm_type: LW,
@@ -922,13 +1048,28 @@ mod tests {
     #[test]
     fn emit_division() {
         let program = test_program(vec![
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(7),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Push(Operand::Register(Reg::AX)),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
-            Instruction::Mov { asm_type: LW, src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(2),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Register(Reg::CX),
+            },
             Instruction::Pop(Operand::Register(Reg::AX)),
             Instruction::SignExtend(LW),
-            Instruction::Idiv { asm_type: LW, operand: Operand::Register(Reg::CX) },
+            Instruction::Idiv {
+                asm_type: LW,
+                operand: Operand::Register(Reg::CX),
+            },
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
@@ -943,13 +1084,32 @@ mod tests {
     #[test]
     fn emit_less_than() {
         let program = test_program(vec![
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(1),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Push(Operand::Register(Reg::AX)),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(2),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Pop(Operand::Register(Reg::CX)),
-            Instruction::Cmp { asm_type: LW, src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
-            Instruction::SetCC { condition: CondCode::L, operand: Operand::Register(Reg::AX) },
+            Instruction::Cmp {
+                asm_type: LW,
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Register(Reg::CX),
+            },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::SetCC {
+                condition: CondCode::L,
+                operand: Operand::Register(Reg::AX),
+            },
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
@@ -961,16 +1121,40 @@ mod tests {
     #[test]
     fn emit_logical_and() {
         let program = test_program(vec![
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
-            Instruction::Cmp { asm_type: LW, src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(1),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Cmp {
+                asm_type: LW,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::JmpCC(CondCode::E, ".Land_false0".to_string()),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
-            Instruction::Cmp { asm_type: LW, src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(2),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Cmp {
+                asm_type: LW,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::JmpCC(CondCode::E, ".Land_false0".to_string()),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(1),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Jmp(".Land_end0".to_string()),
             Instruction::Label(".Land_false0".to_string()),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Label(".Land_end0".to_string()),
             Instruction::Ret,
         ]);
@@ -985,16 +1169,40 @@ mod tests {
     #[test]
     fn emit_logical_or() {
         let program = test_program(vec![
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
-            Instruction::Cmp { asm_type: LW, src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Cmp {
+                asm_type: LW,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::JmpCC(CondCode::NE, ".Lor_true0".to_string()),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(3), dst: Operand::Register(Reg::AX) },
-            Instruction::Cmp { asm_type: LW, src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(3),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Cmp {
+                asm_type: LW,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::JmpCC(CondCode::NE, ".Lor_true0".to_string()),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(0), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Jmp(".Lor_end0".to_string()),
             Instruction::Label(".Lor_true0".to_string()),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(1), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(1),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Label(".Lor_end0".to_string()),
             Instruction::Ret,
         ]);
@@ -1009,14 +1217,33 @@ mod tests {
     #[test]
     fn emit_remainder() {
         let program = test_program(vec![
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(7),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Push(Operand::Register(Reg::AX)),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(2), dst: Operand::Register(Reg::AX) },
-            Instruction::Mov { asm_type: LW, src: Operand::Register(Reg::AX), dst: Operand::Register(Reg::CX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(2),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Register(Reg::CX),
+            },
             Instruction::Pop(Operand::Register(Reg::AX)),
             Instruction::SignExtend(LW),
-            Instruction::Idiv { asm_type: LW, operand: Operand::Register(Reg::CX) },
-            Instruction::Mov { asm_type: LW, src: Operand::Register(Reg::DX), dst: Operand::Register(Reg::AX) },
+            Instruction::Idiv {
+                asm_type: LW,
+                operand: Operand::Register(Reg::CX),
+            },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Register(Reg::DX),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
@@ -1032,11 +1259,27 @@ mod tests {
     fn emit_allocate_stack_and_stack_operand() {
         let program = test_program(vec![
             Instruction::Push(Operand::Register(Reg::BP)),
-            Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::SP), dst: Operand::Register(Reg::BP) },
+            Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::SP),
+                dst: Operand::Register(Reg::BP),
+            },
             Instruction::AllocateStack(16),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(5), dst: Operand::Register(Reg::AX) },
-            Instruction::Mov { asm_type: LW, src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
-            Instruction::Mov { asm_type: LW, src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(5),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Stack(-4),
+            },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Stack(-4),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::DeallocateStack(16),
             Instruction::Pop(Operand::Register(Reg::BP)),
             Instruction::Ret,
@@ -1057,11 +1300,27 @@ mod tests {
     fn emit_var_declaration_full() {
         let program = test_program(vec![
             Instruction::Push(Operand::Register(Reg::BP)),
-            Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Register(Reg::SP), dst: Operand::Register(Reg::BP) },
+            Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::SP),
+                dst: Operand::Register(Reg::BP),
+            },
             Instruction::AllocateStack(16),
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(5), dst: Operand::Register(Reg::AX) },
-            Instruction::Mov { asm_type: LW, src: Operand::Register(Reg::AX), dst: Operand::Stack(-4) },
-            Instruction::Mov { asm_type: LW, src: Operand::Stack(-4), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(5),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Stack(-4),
+            },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Stack(-4),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::DeallocateStack(16),
             Instruction::Pop(Operand::Register(Reg::BP)),
             Instruction::Ret,
@@ -1080,7 +1339,11 @@ mod tests {
             functions: vec![AsmFunction {
                 name: "helper".to_string(),
                 instructions: vec![
-                    Instruction::Mov { asm_type: LW, src: Operand::Imm(42), dst: Operand::Register(Reg::AX) },
+                    Instruction::Mov {
+                        asm_type: LW,
+                        src: Operand::Imm(42),
+                        dst: Operand::Register(Reg::AX),
+                    },
                     Instruction::Ret,
                 ],
                 global: false,
@@ -1159,7 +1422,11 @@ mod tests {
     #[test]
     fn emit_data_operand() {
         let program = test_program(vec![
-            Instruction::Mov { asm_type: LW, src: Operand::Data("x".to_string()), dst: Operand::Register(Reg::AX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Data("x".to_string()),
+                dst: Operand::Register(Reg::AX),
+            },
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
@@ -1228,9 +1495,20 @@ mod tests {
     #[test]
     fn emit_unsigned_division() {
         let program = test_program(vec![
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(7), dst: Operand::Register(Reg::AX) },
-            Instruction::Mov { asm_type: LW, src: Operand::Imm(0), dst: Operand::Register(Reg::DX) },
-            Instruction::Div { asm_type: LW, operand: Operand::Register(Reg::CX) },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(7),
+                dst: Operand::Register(Reg::AX),
+            },
+            Instruction::Mov {
+                asm_type: LW,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::DX),
+            },
+            Instruction::Div {
+                asm_type: LW,
+                operand: Operand::Register(Reg::CX),
+            },
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
@@ -1241,8 +1519,15 @@ mod tests {
     #[test]
     fn emit_unsigned_division_quadword() {
         let program = test_program(vec![
-            Instruction::Mov { asm_type: AsmType::Quadword, src: Operand::Imm(0), dst: Operand::Register(Reg::DX) },
-            Instruction::Div { asm_type: AsmType::Quadword, operand: Operand::Register(Reg::CX) },
+            Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::DX),
+            },
+            Instruction::Div {
+                asm_type: AsmType::Quadword,
+                operand: Operand::Register(Reg::CX),
+            },
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
@@ -1267,10 +1552,22 @@ mod tests {
     #[test]
     fn emit_unsigned_condition_codes() {
         let program = test_program(vec![
-            Instruction::SetCC { condition: CondCode::A, operand: Operand::Register(Reg::AX) },
-            Instruction::SetCC { condition: CondCode::AE, operand: Operand::Register(Reg::AX) },
-            Instruction::SetCC { condition: CondCode::B, operand: Operand::Register(Reg::AX) },
-            Instruction::SetCC { condition: CondCode::BE, operand: Operand::Register(Reg::AX) },
+            Instruction::SetCC {
+                condition: CondCode::A,
+                operand: Operand::Register(Reg::AX),
+            },
+            Instruction::SetCC {
+                condition: CondCode::AE,
+                operand: Operand::Register(Reg::AX),
+            },
+            Instruction::SetCC {
+                condition: CondCode::B,
+                operand: Operand::Register(Reg::AX),
+            },
+            Instruction::SetCC {
+                condition: CondCode::BE,
+                operand: Operand::Register(Reg::AX),
+            },
             Instruction::JmpCC(CondCode::A, ".Ltest".to_string()),
             Instruction::JmpCC(CondCode::B, ".Ltest2".to_string()),
             Instruction::Ret,

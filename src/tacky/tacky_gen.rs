@@ -4,14 +4,13 @@
 //! 各式は `(Vec<TackyInstruction>, TackyVal)` を返す（命令列 + 結果値）。
 //! 無制限の仮想変数（`tmp.N`）を使い、レジスタ割り当ては不要。
 
-use std::collections::{HashMap, HashSet};
+use super::tacky_ast::*;
 use crate::error::{CompileError, Result};
 use crate::parse::ast::{
-    Program, FunctionDecl, BlockItem, Declaration, Statement, Expr,
-    UnaryOp, BinaryOp, ForInit, StorageClass, TopLevelDecl, Type,
-    struct_member_offset,
+    BinaryOp, BlockItem, Declaration, Expr, ForInit, FunctionDecl, Program, Statement,
+    StorageClass, TopLevelDecl, Type, UnaryOp, struct_member_offset,
 };
-use super::tacky_ast::*;
+use std::collections::{HashMap, HashSet};
 
 /// ループ/switch 内の break/continue ジャンプ先ラベル
 struct LoopLabels {
@@ -125,7 +124,8 @@ impl TackyGenerator {
         } else {
             let label = format!(".Lconst_{}", self.const_label_counter);
             self.const_label_counter += 1;
-            self.double_constants.insert(bits, (label.clone(), alignment));
+            self.double_constants
+                .insert(bits, (label.clone(), alignment));
             label
         }
     }
@@ -139,8 +139,9 @@ impl TackyGenerator {
             Expr::ConstantULong(v) => Ok(TackyStaticInit::IntInit(*v as i64)),
             Expr::ConstantDouble(v) => Ok(TackyStaticInit::DoubleInit(*v)),
             Expr::CompoundInit(inits) => {
-                let init_vals: Vec<TackyStaticInit> = inits.iter()
-                    .map(|e| TackyGenerator::resolve_static_init(e))
+                let init_vals: Vec<TackyStaticInit> = inits
+                    .iter()
+                    .map(TackyGenerator::resolve_static_init)
                     .collect::<std::result::Result<_, _>>()?;
                 Ok(TackyStaticInit::ArrayInit(init_vals))
             }
@@ -180,25 +181,23 @@ fn expr_type(
         Expr::PostfixIncrement(inner) | Expr::PostfixDecrement(inner) => {
             expr_type(inner, var_map, func_table)
         }
-        Expr::Unary(op, inner) => {
-            match op {
-                UnaryOp::Not => Type::Int,
-                _ => expr_type(inner, var_map, func_table),
-            }
-        }
-        Expr::Binary(op, left, right) => {
-            match op {
-                BinaryOp::LogicalAnd | BinaryOp::LogicalOr
-                | BinaryOp::LessThan | BinaryOp::LessEqual
-                | BinaryOp::GreaterThan | BinaryOp::GreaterEqual
-                | BinaryOp::Equal | BinaryOp::NotEqual => Type::Int,
-                BinaryOp::Comma => expr_type(right, var_map, func_table),
-                _ => expr_type(left, var_map, func_table),
-            }
-        }
-        Expr::Conditional { then_expr, .. } => {
-            expr_type(then_expr, var_map, func_table)
-        }
+        Expr::Unary(op, inner) => match op {
+            UnaryOp::Not => Type::Int,
+            _ => expr_type(inner, var_map, func_table),
+        },
+        Expr::Binary(op, left, right) => match op {
+            BinaryOp::LogicalAnd
+            | BinaryOp::LogicalOr
+            | BinaryOp::LessThan
+            | BinaryOp::LessEqual
+            | BinaryOp::GreaterThan
+            | BinaryOp::GreaterEqual
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual => Type::Int,
+            BinaryOp::Comma => expr_type(right, var_map, func_table),
+            _ => expr_type(left, var_map, func_table),
+        },
+        Expr::Conditional { then_expr, .. } => expr_type(then_expr, var_map, func_table),
         Expr::FunctionCall(name, _) => {
             if let Some(info) = func_table.get(name) {
                 info.return_type.clone()
@@ -245,26 +244,31 @@ pub fn generate_tacky(program: &Program) -> Result<TackyProgram> {
         match decl {
             TopLevelDecl::Function(func_decl) => {
                 let has_body = func_decl.body.is_some();
-                let param_types: Vec<Type> = func_decl.params.iter().map(|(t, _)| t.clone()).collect();
+                let param_types: Vec<Type> =
+                    func_decl.params.iter().map(|(t, _)| t.clone()).collect();
                 if let Some(existing) = func_table.get(&func_decl.name) {
                     if existing.param_count != func_decl.params.len() {
                         return Err(CompileError::CodegenError(format!(
-                            "conflicting parameter count for function '{}'", func_decl.name
+                            "conflicting parameter count for function '{}'",
+                            func_decl.name
                         )));
                     }
                     if has_body && existing.defined {
                         return Err(CompileError::CodegenError(format!(
-                            "function '{}' defined multiple times", func_decl.name
+                            "function '{}' defined multiple times",
+                            func_decl.name
                         )));
                     }
                 }
-                let entry = func_table.entry(func_decl.name.clone()).or_insert(FunctionInfo {
-                    param_count: func_decl.params.len(),
-                    defined: false,
-                    return_type: func_decl.return_type.clone(),
-                    param_types: param_types.clone(),
-                    is_variadic: func_decl.is_variadic,
-                });
+                let entry = func_table
+                    .entry(func_decl.name.clone())
+                    .or_insert(FunctionInfo {
+                        param_count: func_decl.params.len(),
+                        defined: false,
+                        return_type: func_decl.return_type.clone(),
+                        param_types: param_types.clone(),
+                        is_variadic: func_decl.is_variadic,
+                    });
                 if has_body {
                     entry.defined = true;
                 }
@@ -279,24 +283,24 @@ pub fn generate_tacky(program: &Program) -> Result<TackyProgram> {
 
                 if sc == Some(StorageClass::Extern) && var_decl.init.is_some() {
                     return Err(CompileError::CodegenError(format!(
-                        "extern variable '{}' cannot have initializer", var_decl.name
+                        "extern variable '{}' cannot have initializer",
+                        var_decl.name
                     )));
                 }
 
                 let init_val = if let Some(init_expr) = &var_decl.init {
                     TackyGenerator::resolve_static_init(init_expr).map_err(|msg| {
                         CompileError::CodegenError(format!(
-                            "file-scope variable '{}' {}", var_decl.name, msg
+                            "file-scope variable '{}' {}",
+                            var_decl.name, msg
                         ))
                     })?
                 } else if var_decl.var_type.is_array() || var_decl.var_type.is_struct() {
                     TackyStaticInit::ZeroInit(var_decl.var_type.size())
+                } else if var_decl.var_type == Type::Double {
+                    TackyStaticInit::DoubleInit(0.0)
                 } else {
-                    if var_decl.var_type == Type::Double {
-                        TackyStaticInit::DoubleInit(0.0)
-                    } else {
-                        TackyStaticInit::IntInit(0)
-                    }
+                    TackyStaticInit::IntInit(0)
                 };
 
                 global_var_map.insert(
@@ -330,25 +334,27 @@ pub fn generate_tacky(program: &Program) -> Result<TackyProgram> {
     // Pass 2: 関数定義のコード生成
     let mut functions = Vec::new();
     for decl in &program.declarations {
-        if let TopLevelDecl::Function(func_decl) = decl {
-            if func_decl.body.is_some() {
-                let global = func_decl.storage_class != Some(StorageClass::Static);
-                functions.push(tgen.generate_function(
-                    func_decl, &func_table, &global_var_map, global,
-                )?);
-            }
+        if let TopLevelDecl::Function(func_decl) = decl
+            && func_decl.body.is_some()
+        {
+            let global = func_decl.storage_class != Some(StorageClass::Static);
+            functions.push(tgen.generate_function(
+                func_decl,
+                &func_table,
+                &global_var_map,
+                global,
+            )?);
         }
     }
 
     // 定数プールを TackyStaticConstant に変換
-    let mut static_constants: Vec<TackyStaticConstant> = tgen.double_constants
+    let mut static_constants: Vec<TackyStaticConstant> = tgen
+        .double_constants
         .into_iter()
-        .map(|(bits, (name, alignment))| {
-            TackyStaticConstant {
-                name,
-                alignment,
-                init: TackyStaticInit::DoubleInit(f64::from_bits(bits)),
-            }
+        .map(|(bits, (name, alignment))| TackyStaticConstant {
+            name,
+            alignment,
+            init: TackyStaticInit::DoubleInit(f64::from_bits(bits)),
         })
         .collect();
     for (label, content) in tgen.string_constants {
@@ -386,8 +392,10 @@ impl TackyGenerator {
 
         // パラメータを変数マップに登録
         for (param_type, param_name) in &func.params {
-            self.var_map.insert(param_name.clone(), VarKind::Local(param_type.clone()));
-            self.var_types.insert(param_name.clone(), param_type.clone());
+            self.var_map
+                .insert(param_name.clone(), VarKind::Local(param_type.clone()));
+            self.var_types
+                .insert(param_name.clone(), param_type.clone());
         }
 
         let body = func.body.as_ref().unwrap();
@@ -398,19 +406,21 @@ impl TackyGenerator {
         }
 
         for item in body {
-            self.generate_block_item(
-                item, &mut instrs, Some(&mut scope_decls), None, func_table,
-            )?;
+            self.generate_block_item(item, &mut instrs, Some(&mut scope_decls), None, func_table)?;
         }
 
         // 暗黙の return
         if func.return_type.is_void() {
             instrs.push(TackyInstruction::ReturnVoid);
         } else if func.return_type == Type::Double {
-            instrs.push(TackyInstruction::Return(TackyVal::Constant(TackyConst::Double(0.0))));
+            instrs.push(TackyInstruction::Return(TackyVal::Constant(
+                TackyConst::Double(0.0),
+            )));
         } else {
             let ret_val = match &func.return_type {
-                Type::Long | Type::ULong | Type::Pointer(_) => TackyVal::Constant(TackyConst::Long(0)),
+                Type::Long | Type::ULong | Type::Pointer(_) => {
+                    TackyVal::Constant(TackyConst::Long(0))
+                }
                 _ => TackyVal::Constant(TackyConst::Int(0)),
             };
             instrs.push(TackyInstruction::Return(ret_val));
@@ -436,8 +446,12 @@ impl TackyGenerator {
         func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<()> {
         match item {
-            BlockItem::Statement(stmt) => self.generate_statement(stmt, instrs, loop_labels, func_table),
-            BlockItem::Declaration(decl) => self.generate_declaration(decl, instrs, scope_decls, func_table),
+            BlockItem::Statement(stmt) => {
+                self.generate_statement(stmt, instrs, loop_labels, func_table)
+            }
+            BlockItem::Declaration(decl) => {
+                self.generate_declaration(decl, instrs, scope_decls, func_table)
+            }
             BlockItem::Typedef { .. } => Ok(()), // No codegen for typedef
         }
     }
@@ -459,28 +473,28 @@ impl TackyGenerator {
         if sc == Some(StorageClass::Extern) {
             if decl.init.is_some() {
                 return Err(CompileError::CodegenError(format!(
-                    "extern variable '{}' cannot have initializer", decl.name
+                    "extern variable '{}' cannot have initializer",
+                    decl.name
                 )));
             }
-            self.var_map.insert(decl.name.clone(), VarKind::Static(decl.name.clone(), decl.var_type.clone()));
+            self.var_map.insert(
+                decl.name.clone(),
+                VarKind::Static(decl.name.clone(), decl.var_type.clone()),
+            );
             return Ok(());
         }
 
         if sc == Some(StorageClass::Static) {
             let init_val = if let Some(init_expr) = &decl.init {
                 TackyGenerator::resolve_static_init(init_expr).map_err(|msg| {
-                    CompileError::CodegenError(format!(
-                        "static variable '{}' {}", decl.name, msg
-                    ))
+                    CompileError::CodegenError(format!("static variable '{}' {}", decl.name, msg))
                 })?
             } else if decl.var_type.is_array() || is_struct {
                 TackyStaticInit::ZeroInit(decl.var_type.size())
+            } else if decl.var_type == Type::Double {
+                TackyStaticInit::DoubleInit(0.0)
             } else {
-                if decl.var_type == Type::Double {
-                    TackyStaticInit::DoubleInit(0.0)
-                } else {
-                    TackyStaticInit::IntInit(0)
-                }
+                TackyStaticInit::IntInit(0)
             };
 
             let unique_label = format!("{}.{}", decl.name, self.static_label_counter);
@@ -493,27 +507,35 @@ impl TackyGenerator {
                 init: init_val,
             });
 
-            self.var_map.insert(decl.name.clone(), VarKind::Static(unique_label, decl.var_type.clone()));
+            self.var_map.insert(
+                decl.name.clone(),
+                VarKind::Static(unique_label, decl.var_type.clone()),
+            );
             return Ok(());
         }
 
         // 通常のローカル変数
-        if let Some(decls) = scope_decls {
-            if !decls.insert(decl.name.clone()) {
-                return Err(CompileError::CodegenError(format!(
-                    "variable '{}' already declared in this scope", decl.name
-                )));
-            }
+        if let Some(decls) = scope_decls
+            && !decls.insert(decl.name.clone())
+        {
+            return Err(CompileError::CodegenError(format!(
+                "variable '{}' already declared in this scope",
+                decl.name
+            )));
         }
 
-        self.var_map.insert(decl.name.clone(), VarKind::Local(decl.var_type.clone()));
-        self.var_types.insert(decl.name.clone(), decl.var_type.clone());
+        self.var_map
+            .insert(decl.name.clone(), VarKind::Local(decl.var_type.clone()));
+        self.var_types
+            .insert(decl.name.clone(), decl.var_type.clone());
 
         if let Some(init) = &decl.init {
             if is_struct {
                 if let Expr::CompoundInit(init_exprs) = init {
                     if let Type::Struct { ref members, .. } = decl.var_type {
-                        self.generate_compound_init(init_exprs, members, &decl.name, instrs, func_table)?;
+                        self.generate_compound_init(
+                            init_exprs, members, &decl.name, instrs, func_table,
+                        )?;
                     }
                 } else {
                     // 構造体コピー初期化: struct b = a;
@@ -527,7 +549,13 @@ impl TackyGenerator {
                 }
             } else if decl.var_type.is_array() {
                 if let Expr::CompoundInit(init_exprs) = init {
-                    self.generate_array_init(init_exprs, &decl.var_type, &decl.name, instrs, func_table)?;
+                    self.generate_array_init(
+                        init_exprs,
+                        &decl.var_type,
+                        &decl.name,
+                        instrs,
+                        func_table,
+                    )?;
                 }
             } else {
                 let (val, _) = self.generate_expr(init, instrs, func_table)?;
@@ -550,22 +578,24 @@ impl TackyGenerator {
         func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<()> {
         match stmt {
-            Statement::Return(opt_expr) => {
-                match opt_expr {
-                    Some(expr) => {
-                        let (val, _) = self.generate_expr(expr, instrs, func_table)?;
-                        instrs.push(TackyInstruction::Return(val));
-                    }
-                    None => {
-                        instrs.push(TackyInstruction::ReturnVoid);
-                    }
+            Statement::Return(opt_expr) => match opt_expr {
+                Some(expr) => {
+                    let (val, _) = self.generate_expr(expr, instrs, func_table)?;
+                    instrs.push(TackyInstruction::Return(val));
                 }
-            }
+                None => {
+                    instrs.push(TackyInstruction::ReturnVoid);
+                }
+            },
             Statement::Expression(expr) => {
                 self.generate_expr(expr, instrs, func_table)?;
             }
             Statement::Null => {}
-            Statement::If { condition, then_branch, else_branch } => {
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 let (cond_val, cond_type) = self.generate_expr(condition, instrs, func_table)?;
 
                 if let Some(else_stmt) = else_branch {
@@ -597,7 +627,13 @@ impl TackyGenerator {
                 let saved_var_map = self.var_map.clone();
                 let mut scope_decls: HashSet<String> = HashSet::new();
                 for item in items {
-                    self.generate_block_item(item, instrs, Some(&mut scope_decls), loop_labels, func_table)?;
+                    self.generate_block_item(
+                        item,
+                        instrs,
+                        Some(&mut scope_decls),
+                        loop_labels,
+                        func_table,
+                    )?;
                 }
                 self.var_map = saved_var_map;
             }
@@ -640,7 +676,12 @@ impl TackyGenerator {
                 });
                 instrs.push(TackyInstruction::Label(end_label));
             }
-            Statement::For { init, condition, post, body } => {
+            Statement::For {
+                init,
+                condition,
+                post,
+                body,
+            } => {
                 let start_label = self.new_label("for_start");
                 let continue_label = self.new_label("for_continue");
                 let end_label = self.new_label("for_end");
@@ -687,9 +728,8 @@ impl TackyGenerator {
                 self.var_map = saved_var_map;
             }
             Statement::Break => {
-                let labels = loop_labels.ok_or_else(|| {
-                    CompileError::CodegenError("break outside loop".to_string())
-                })?;
+                let labels = loop_labels
+                    .ok_or_else(|| CompileError::CodegenError("break outside loop".to_string()))?;
                 instrs.push(TackyInstruction::Jump(labels.break_label.clone()));
             }
             Statement::Continue => {
@@ -727,7 +767,8 @@ impl TackyGenerator {
                 }
 
                 // default or switch_end
-                let fallthrough_target = default_label.clone().unwrap_or_else(|| switch_end.clone());
+                let fallthrough_target =
+                    default_label.clone().unwrap_or_else(|| switch_end.clone());
                 instrs.push(TackyInstruction::Jump(fallthrough_target));
 
                 // switch 用 LoopLabels: break → switch_end, continue → 外側ループの continue
@@ -738,15 +779,26 @@ impl TackyGenerator {
                 };
 
                 // Pass 2: case 本体をソース順でラベル付きで生成（fall-through）
-                self.generate_switch_body(body, instrs, &cases, &default_label, &switch_labels, func_table)?;
+                self.generate_switch_body(
+                    body,
+                    instrs,
+                    &cases,
+                    &default_label,
+                    &switch_labels,
+                    func_table,
+                )?;
 
                 instrs.push(TackyInstruction::Label(switch_end));
             }
             Statement::Case { .. } => {
-                return Err(CompileError::CodegenError("case outside switch".to_string()));
+                return Err(CompileError::CodegenError(
+                    "case outside switch".to_string(),
+                ));
             }
             Statement::Default(_) => {
-                return Err(CompileError::CodegenError("default outside switch".to_string()));
+                return Err(CompileError::CodegenError(
+                    "default outside switch".to_string(),
+                ));
             }
         }
         Ok(())
@@ -754,6 +806,7 @@ impl TackyGenerator {
 
     /// switch body の AST を走査し、case/default ラベルを収集する（Pass 1）。
     /// ネストした switch には再帰しない。
+    #[allow(clippy::type_complexity)]
     fn collect_switch_labels(
         &mut self,
         stmt: &Statement,
@@ -775,7 +828,8 @@ impl TackyGenerator {
                 // 重複チェック
                 if cases.iter().any(|(v, _)| *v == *value) {
                     return Err(CompileError::CodegenError(format!(
-                        "duplicate case value: {}", value
+                        "duplicate case value: {}",
+                        value
                     )));
                 }
                 let label = self.new_label("case");
@@ -785,7 +839,7 @@ impl TackyGenerator {
             Statement::Default(body) => {
                 if default_label.is_some() {
                     return Err(CompileError::CodegenError(
-                        "multiple default labels in switch".to_string()
+                        "multiple default labels in switch".to_string(),
                     ));
                 }
                 *default_label = Some(self.new_label("default"));
@@ -798,7 +852,11 @@ impl TackyGenerator {
                     }
                 }
             }
-            Statement::If { then_branch, else_branch, .. } => {
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.collect_labels_recursive(then_branch, cases, default_label)?;
                 if let Some(else_stmt) = else_branch {
                     self.collect_labels_recursive(else_stmt, cases, default_label)?;
@@ -845,20 +903,41 @@ impl TackyGenerator {
                 if let Some((_, label)) = cases.iter().find(|(v, _)| *v == *value) {
                     instrs.push(TackyInstruction::Label(label.clone()));
                 }
-                self.generate_switch_body(body, instrs, cases, default_label, switch_labels, func_table)?;
+                self.generate_switch_body(
+                    body,
+                    instrs,
+                    cases,
+                    default_label,
+                    switch_labels,
+                    func_table,
+                )?;
             }
             Statement::Default(body) => {
                 if let Some(label) = default_label {
                     instrs.push(TackyInstruction::Label(label.clone()));
                 }
-                self.generate_switch_body(body, instrs, cases, default_label, switch_labels, func_table)?;
+                self.generate_switch_body(
+                    body,
+                    instrs,
+                    cases,
+                    default_label,
+                    switch_labels,
+                    func_table,
+                )?;
             }
             Statement::Compound(items) => {
                 let saved_var_map = self.var_map.clone();
                 for item in items {
                     match item {
                         BlockItem::Statement(s) => {
-                            self.generate_switch_body(s, instrs, cases, default_label, switch_labels, func_table)?;
+                            self.generate_switch_body(
+                                s,
+                                instrs,
+                                cases,
+                                default_label,
+                                switch_labels,
+                                func_table,
+                            )?;
                         }
                         BlockItem::Declaration(decl) => {
                             self.generate_declaration(decl, instrs, None, func_table)?;
@@ -878,7 +957,12 @@ impl TackyGenerator {
 
     /// double/pointer 条件値を int（0/非0）の値に変換（JumpIfZero/JumpIfNotZero 用）
     /// 整数型はそのまま使える。double は != 0.0 の比較結果を返す。
-    fn convert_to_condition(&mut self, val: TackyVal, ty: &Type, instrs: &mut Vec<TackyInstruction>) -> TackyVal {
+    fn convert_to_condition(
+        &mut self,
+        val: TackyVal,
+        ty: &Type,
+        instrs: &mut Vec<TackyInstruction>,
+    ) -> TackyVal {
         if ty.is_double() {
             let result = self.new_temp(Type::Int);
             instrs.push(TackyInstruction::Binary {
@@ -901,15 +985,17 @@ impl TackyGenerator {
         func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
         match expr {
-            Expr::Constant(value) => {
-                Ok((TackyVal::Constant(TackyConst::Int(*value as i32)), Type::Int))
-            }
+            Expr::Constant(value) => Ok((
+                TackyVal::Constant(TackyConst::Int(*value as i32)),
+                Type::Int,
+            )),
             Expr::ConstantLong(value) => {
                 Ok((TackyVal::Constant(TackyConst::Long(*value)), Type::Long))
             }
-            Expr::ConstantUInt(value) => {
-                Ok((TackyVal::Constant(TackyConst::UInt(*value as u32)), Type::UInt))
-            }
+            Expr::ConstantUInt(value) => Ok((
+                TackyVal::Constant(TackyConst::UInt(*value as u32)),
+                Type::UInt,
+            )),
             Expr::ConstantULong(value) => {
                 Ok((TackyVal::Constant(TackyConst::ULong(*value)), Type::ULong))
             }
@@ -931,7 +1017,11 @@ impl TackyGenerator {
                 Ok((dst, Type::Pointer(Box::new(Type::Char))))
             }
 
-            Expr::Cast { target_type, source_type, expr: inner } => {
+            Expr::Cast {
+                target_type,
+                source_type,
+                expr: inner,
+            } => {
                 let (src_val, _) = self.generate_expr(inner, instrs, func_table)?;
 
                 // (void)expr — evaluate and discard
@@ -1095,9 +1185,7 @@ impl TackyGenerator {
                         };
                         Ok((dst, result_type))
                     }
-                    _ => {
-                        Ok((TackyVal::Var(resolved), ty))
-                    }
+                    _ => Ok((TackyVal::Var(resolved), ty)),
                 }
             }
 
@@ -1145,50 +1233,52 @@ impl TackyGenerator {
                 }
             }
 
-            Expr::Unary(op, inner) => {
-                match op {
-                    UnaryOp::PreIncrement | UnaryOp::PreDecrement => {
-                        self.generate_pre_inc_dec(op, inner, instrs, func_table)
-                    }
-                    _ => {
-                        let (src_val, src_type) = self.generate_expr(inner, instrs, func_table)?;
-                        match op {
-                            UnaryOp::Negate => {
-                                let result_type = src_type.clone();
-                                let dst = self.new_temp(result_type.clone());
-                                instrs.push(TackyInstruction::Unary {
-                                    op: TackyUnaryOp::Negate,
-                                    src: src_val,
-                                    dst: dst.clone(),
-                                });
-                                Ok((dst, result_type))
-                            }
-                            UnaryOp::Complement => {
-                                let result_type = src_type.clone();
-                                let dst = self.new_temp(result_type.clone());
-                                instrs.push(TackyInstruction::Unary {
-                                    op: TackyUnaryOp::Complement,
-                                    src: src_val,
-                                    dst: dst.clone(),
-                                });
-                                Ok((dst, result_type))
-                            }
-                            UnaryOp::Not => {
-                                let dst = self.new_temp(Type::Int);
-                                instrs.push(TackyInstruction::Unary {
-                                    op: TackyUnaryOp::Not,
-                                    src: src_val,
-                                    dst: dst.clone(),
-                                });
-                                Ok((dst, Type::Int))
-                            }
-                            _ => unreachable!(),
+            Expr::Unary(op, inner) => match op {
+                UnaryOp::PreIncrement | UnaryOp::PreDecrement => {
+                    self.generate_pre_inc_dec(op, inner, instrs, func_table)
+                }
+                _ => {
+                    let (src_val, src_type) = self.generate_expr(inner, instrs, func_table)?;
+                    match op {
+                        UnaryOp::Negate => {
+                            let result_type = src_type.clone();
+                            let dst = self.new_temp(result_type.clone());
+                            instrs.push(TackyInstruction::Unary {
+                                op: TackyUnaryOp::Negate,
+                                src: src_val,
+                                dst: dst.clone(),
+                            });
+                            Ok((dst, result_type))
                         }
+                        UnaryOp::Complement => {
+                            let result_type = src_type.clone();
+                            let dst = self.new_temp(result_type.clone());
+                            instrs.push(TackyInstruction::Unary {
+                                op: TackyUnaryOp::Complement,
+                                src: src_val,
+                                dst: dst.clone(),
+                            });
+                            Ok((dst, result_type))
+                        }
+                        UnaryOp::Not => {
+                            let dst = self.new_temp(Type::Int);
+                            instrs.push(TackyInstruction::Unary {
+                                op: TackyUnaryOp::Not,
+                                src: src_val,
+                                dst: dst.clone(),
+                            });
+                            Ok((dst, Type::Int))
+                        }
+                        _ => unreachable!(),
                     }
                 }
-            }
+            },
 
-            Expr::Conditional { condition, then_expr, else_expr } => {
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
                 let else_label = self.new_label("tern_else");
                 let end_label = self.new_label("tern_end");
                 let result_type = expr_type(expr, &self.var_map, func_table);
@@ -1273,9 +1363,12 @@ impl TackyGenerator {
                 let inner_type = expr_type(inner, &self.var_map, func_table);
                 if let Type::Struct { ref members, .. } = inner_type {
                     let (member_off, member_type) = struct_member_offset(members, member_name)
-                        .ok_or_else(|| CompileError::CodegenError(format!(
-                            "no member '{}' in struct", member_name
-                        )))?;
+                        .ok_or_else(|| {
+                            CompileError::CodegenError(format!(
+                                "no member '{}' in struct",
+                                member_name
+                            ))
+                        })?;
 
                     // Get inner's address
                     let (inner_addr, _) = self.generate_lvalue_addr(inner, instrs, func_table)?;
@@ -1283,8 +1376,10 @@ impl TackyGenerator {
                     if member_type.is_struct() {
                         // Nested struct: return address + offset
                         if member_off != 0 {
-                            let offset_val = TackyVal::Constant(TackyConst::Long(member_off as i64));
-                            let result = self.new_temp(Type::Pointer(Box::new(member_type.clone())));
+                            let offset_val =
+                                TackyVal::Constant(TackyConst::Long(member_off as i64));
+                            let result =
+                                self.new_temp(Type::Pointer(Box::new(member_type.clone())));
                             instrs.push(TackyInstruction::Binary {
                                 op: TackyBinaryOp::Add,
                                 left: inner_addr,
@@ -1307,13 +1402,18 @@ impl TackyGenerator {
                                 src: inner_addr.clone(),
                                 dst: tmp.clone(),
                             });
-                            if let TackyVal::Var(n) = &tmp { n.clone() } else { unreachable!() }
+                            if let TackyVal::Var(n) = &tmp {
+                                n.clone()
+                            } else {
+                                unreachable!()
+                            }
                         }
                     };
 
                     // Use pointer arithmetic + Load for member access
                     if member_off != 0 {
-                        let offset_ptr = self.new_temp(Type::Pointer(Box::new(member_type.clone())));
+                        let offset_ptr =
+                            self.new_temp(Type::Pointer(Box::new(member_type.clone())));
                         instrs.push(TackyInstruction::Binary {
                             op: TackyBinaryOp::Add,
                             left: inner_addr,
@@ -1336,7 +1436,7 @@ impl TackyGenerator {
                     }
                 } else {
                     Err(CompileError::CodegenError(
-                        "member access on non-struct type".to_string()
+                        "member access on non-struct type".to_string(),
                     ))
                 }
             }
@@ -1353,9 +1453,11 @@ impl TackyGenerator {
                 let mut named_xmm_count: i32 = 0;
                 for param_type in &self.current_func_params {
                     if param_type.is_double() {
-                        if named_xmm_count < 8 { named_xmm_count += 1; }
-                    } else {
-                        if named_gp_count < 6 { named_gp_count += 1; }
+                        if named_xmm_count < 8 {
+                            named_xmm_count += 1;
+                        }
+                    } else if named_gp_count < 6 {
+                        named_gp_count += 1;
                     }
                 }
                 let gp_offset_init = named_gp_count * 8;
@@ -1416,9 +1518,12 @@ impl TackyGenerator {
                 let inner_type = expr_type(inner, &self.var_map, func_table);
                 if let Type::Struct { ref members, .. } = inner_type {
                     let (member_off, member_type) = struct_member_offset(members, member_name)
-                        .ok_or_else(|| CompileError::CodegenError(format!(
-                            "no member '{}' in struct", member_name
-                        )))?;
+                        .ok_or_else(|| {
+                            CompileError::CodegenError(format!(
+                                "no member '{}' in struct",
+                                member_name
+                            ))
+                        })?;
 
                     let (inner_addr, _) = self.generate_lvalue_addr(inner, instrs, func_table)?;
 
@@ -1436,12 +1541,12 @@ impl TackyGenerator {
                     }
                 } else {
                     Err(CompileError::CodegenError(
-                        "member access on non-struct type".to_string()
+                        "member access on non-struct type".to_string(),
                     ))
                 }
             }
             _ => Err(CompileError::CodegenError(
-                "cannot take address of non-lvalue expression".to_string()
+                "cannot take address of non-lvalue expression".to_string(),
             )),
         }
     }
@@ -1502,7 +1607,7 @@ impl TackyGenerator {
             Ok((result, ty))
         } else {
             Err(CompileError::CodegenError(
-                "lvalue required for prefix increment/decrement".to_string()
+                "lvalue required for prefix increment/decrement".to_string(),
             ))
         }
     }
@@ -1536,7 +1641,11 @@ impl TackyGenerator {
             let new_val = self.new_temp(ty.clone());
             if ty.is_double() {
                 let inc_val = TackyVal::Constant(TackyConst::Double(1.0));
-                let tacky_op = if is_increment { TackyBinaryOp::AddDouble } else { TackyBinaryOp::SubDouble };
+                let tacky_op = if is_increment {
+                    TackyBinaryOp::AddDouble
+                } else {
+                    TackyBinaryOp::SubDouble
+                };
                 instrs.push(TackyInstruction::Binary {
                     op: tacky_op,
                     left: old_val.clone(),
@@ -1545,7 +1654,11 @@ impl TackyGenerator {
                 });
             } else {
                 let inc_const = self.make_increment_const(&ty, increment);
-                let tacky_op = if is_increment { TackyBinaryOp::Add } else { TackyBinaryOp::Subtract };
+                let tacky_op = if is_increment {
+                    TackyBinaryOp::Add
+                } else {
+                    TackyBinaryOp::Subtract
+                };
                 instrs.push(TackyInstruction::Binary {
                     op: tacky_op,
                     left: old_val.clone(),
@@ -1564,14 +1677,16 @@ impl TackyGenerator {
             Ok((old_val, ty))
         } else {
             Err(CompileError::CodegenError(
-                "unsupported lvalue in postfix increment/decrement".to_string()
+                "unsupported lvalue in postfix increment/decrement".to_string(),
             ))
         }
     }
 
     fn make_increment_const(&self, ty: &Type, increment: i64) -> TackyVal {
         match ty {
-            Type::Long | Type::ULong | Type::Pointer(_) => TackyVal::Constant(TackyConst::Long(increment)),
+            Type::Long | Type::ULong | Type::Pointer(_) => {
+                TackyVal::Constant(TackyConst::Long(increment))
+            }
             _ => TackyVal::Constant(TackyConst::Int(increment as i32)),
         }
     }
@@ -1589,18 +1704,23 @@ impl TackyGenerator {
                 if args.len() < info.param_count {
                     return Err(CompileError::CodegenError(format!(
                         "function '{}' requires at least {} arguments, got {}",
-                        name, info.param_count, args.len()
+                        name,
+                        info.param_count,
+                        args.len()
                     )));
                 }
             } else if info.param_count != args.len() {
                 return Err(CompileError::CodegenError(format!(
                     "function '{}' expects {} arguments, got {}",
-                    name, info.param_count, args.len()
+                    name,
+                    info.param_count,
+                    args.len()
                 )));
             }
         }
 
-        let return_type = func_table.get(name)
+        let return_type = func_table
+            .get(name)
             .map(|info| info.return_type.clone())
             .unwrap_or(Type::Int);
 
@@ -1611,7 +1731,8 @@ impl TackyGenerator {
             arg_vals.push(val);
         }
 
-        let is_variadic = func_table.get(name)
+        let is_variadic = func_table
+            .get(name)
             .map(|info| info.is_variadic)
             .unwrap_or(false);
 
@@ -1636,7 +1757,11 @@ impl TackyGenerator {
         instrs: &mut Vec<TackyInstruction>,
         func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
-        let result_type = expr_type(&Expr::Binary(*op, Box::new(left.clone()), Box::new(right.clone())), &self.var_map, func_table);
+        let result_type = expr_type(
+            &Expr::Binary(*op, Box::new(left.clone()), Box::new(right.clone())),
+            &self.var_map,
+            func_table,
+        );
         let operand_type = expr_type(left, &self.var_map, func_table);
 
         match op {
@@ -1882,9 +2007,12 @@ impl TackyGenerator {
                 Ok((dst, result_type))
             }
 
-            BinaryOp::LessThan | BinaryOp::LessEqual
-            | BinaryOp::GreaterThan | BinaryOp::GreaterEqual
-            | BinaryOp::Equal | BinaryOp::NotEqual => {
+            BinaryOp::LessThan
+            | BinaryOp::LessEqual
+            | BinaryOp::GreaterThan
+            | BinaryOp::GreaterEqual
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual => {
                 let (left_val, _) = self.generate_expr(left, instrs, func_table)?;
                 let (right_val, _) = self.generate_expr(right, instrs, func_table)?;
                 let dst = self.new_temp(Type::Int);
@@ -1984,9 +2112,12 @@ impl TackyGenerator {
                     BinaryOp::Subtract => TackyBinaryOp::SubDouble,
                     BinaryOp::Multiply => TackyBinaryOp::MulDouble,
                     BinaryOp::Divide => TackyBinaryOp::DivDouble,
-                    _ => return Err(CompileError::CodegenError(format!(
-                        "unsupported compound assignment operator: {:?}", op
-                    ))),
+                    _ => {
+                        return Err(CompileError::CodegenError(format!(
+                            "unsupported compound assignment operator: {:?}",
+                            op
+                        )));
+                    }
                 }
             } else {
                 match op {
@@ -1995,9 +2126,12 @@ impl TackyGenerator {
                     BinaryOp::Multiply => TackyBinaryOp::Multiply,
                     BinaryOp::Divide => TackyBinaryOp::Divide,
                     BinaryOp::Remainder => TackyBinaryOp::Remainder,
-                    _ => return Err(CompileError::CodegenError(format!(
-                        "unsupported compound assignment operator: {:?}", op
-                    ))),
+                    _ => {
+                        return Err(CompileError::CodegenError(format!(
+                            "unsupported compound assignment operator: {:?}",
+                            op
+                        )));
+                    }
                 }
             };
 
@@ -2014,7 +2148,9 @@ impl TackyGenerator {
 
             Ok((dst, var_type))
         } else {
-            Err(CompileError::CodegenError("unsupported lvalue in compound assignment".to_string()))
+            Err(CompileError::CodegenError(
+                "unsupported lvalue in compound assignment".to_string(),
+            ))
         }
     }
 
@@ -2032,7 +2168,7 @@ impl TackyGenerator {
 
         for (init_expr, member) in init_exprs.iter().zip(members.iter()) {
             let align = member.member_type.alignment();
-            if member_offset % align != 0 {
+            if !member_offset.is_multiple_of(align) {
                 member_offset += align - (member_offset % align);
             }
 

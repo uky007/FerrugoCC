@@ -20,14 +20,14 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::error::{CompileError, Result};
-use crate::lex;
-use crate::parse;
-use crate::typecheck;
-use crate::tacky;
 use crate::codegen;
 use crate::emit;
+use crate::error::{CompileError, Result};
+use crate::lex;
 use crate::obfuscation::ObfuscationConfig;
+use crate::parse;
+use crate::tacky;
+use crate::typecheck;
 
 /// コンパイルをどのステージまで実行するかを指定する列挙型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

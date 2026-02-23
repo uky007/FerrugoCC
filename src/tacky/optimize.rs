@@ -10,9 +10,9 @@
 //! 5. Common Subexpression Elimination（共通部分式除去）
 //! 6. Liveness Dead Code Elimination（生存解析ベース死コード除去）
 
-use std::collections::{HashMap, HashSet};
 use super::tacky_ast::*;
 use crate::parse::ast::Type;
+use std::collections::{HashMap, HashSet};
 
 // ────────────────────────────────────────────
 // CFG（制御フローグラフ）
@@ -20,7 +20,7 @@ use crate::parse::ast::Type;
 
 #[allow(dead_code)]
 struct Cfg {
-    blocks: Vec<(usize, usize)>,           // (start, end) exclusive
+    blocks: Vec<(usize, usize)>, // (start, end) exclusive
     successors: Vec<Vec<usize>>,
     predecessors: Vec<Vec<usize>>,
     label_to_block: HashMap<String, usize>,
@@ -48,8 +48,10 @@ fn build_cfg(instrs: &[TackyInstruction]) -> Cfg {
                 }
                 label_to_idx.insert(label.clone(), i);
             }
-            TackyInstruction::Jump(_) | TackyInstruction::Return(_)
-            | TackyInstruction::ReturnVoid | TackyInstruction::JumpIndirect { .. } => {
+            TackyInstruction::Jump(_)
+            | TackyInstruction::Return(_)
+            | TackyInstruction::ReturnVoid
+            | TackyInstruction::JumpIndirect { .. } => {
                 if i + 1 < instrs.len() {
                     block_starts.push(i + 1);
                 }
@@ -70,7 +72,11 @@ fn build_cfg(instrs: &[TackyInstruction]) -> Cfg {
     let mut blocks: Vec<(usize, usize)> = Vec::new();
     for i in 0..block_starts.len() {
         let start = block_starts[i];
-        let end = if i + 1 < block_starts.len() { block_starts[i + 1] } else { instrs.len() };
+        let end = if i + 1 < block_starts.len() {
+            block_starts[i + 1]
+        } else {
+            instrs.len()
+        };
         blocks.push((start, end));
     }
 
@@ -94,7 +100,9 @@ fn build_cfg(instrs: &[TackyInstruction]) -> Cfg {
     let mut successors: Vec<Vec<usize>> = vec![vec![]; num_blocks];
     for bi in 0..num_blocks {
         let (_, end) = blocks[bi];
-        if end == 0 { continue; }
+        if end == 0 {
+            continue;
+        }
         let last = &instrs[end - 1];
 
         match last {
@@ -112,7 +120,9 @@ fn build_cfg(instrs: &[TackyInstruction]) -> Cfg {
                     successors[bi].push(target_block);
                 }
             }
-            TackyInstruction::JumpIndirect { possible_targets, .. } => {
+            TackyInstruction::JumpIndirect {
+                possible_targets, ..
+            } => {
                 for label in possible_targets {
                     if let Some(&target_block) = label_to_block.get(label) {
                         successors[bi].push(target_block);
@@ -138,7 +148,12 @@ fn build_cfg(instrs: &[TackyInstruction]) -> Cfg {
         }
     }
 
-    Cfg { blocks, successors, predecessors, label_to_block }
+    Cfg {
+        blocks,
+        successors,
+        predecessors,
+        label_to_block,
+    }
 }
 
 // ────────────────────────────────────────────
@@ -160,7 +175,8 @@ pub fn optimize(program: TackyProgram) -> TackyProgram {
             func.body = unreachable_code_elimination(std::mem::take(&mut func.body));
             func.body = copy_propagation(std::mem::take(&mut func.body));
             func.body = common_subexpression_elimination(std::mem::take(&mut func.body));
-            func.body = liveness_dead_code_elimination(std::mem::take(&mut func.body), &func.var_types);
+            func.body =
+                liveness_dead_code_elimination(std::mem::take(&mut func.body), &func.var_types);
             if func.body != old_body {
                 changed = true;
             }
@@ -182,17 +198,23 @@ fn algebraic_simplifications(
     instrs: Vec<TackyInstruction>,
     var_types: &HashMap<String, Type>,
 ) -> Vec<TackyInstruction> {
-    instrs.into_iter().map(|instr| {
-        match &instr {
-            TackyInstruction::Binary { op, left, right, dst } => {
+    instrs
+        .into_iter()
+        .map(|instr| match &instr {
+            TackyInstruction::Binary {
+                op,
+                left,
+                right,
+                dst,
+            } => {
                 if let Some(simplified) = simplify_binary(*op, left, right, dst, var_types) {
                     return simplified;
                 }
                 instr
             }
             _ => instr,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 fn simplify_binary(
@@ -211,13 +233,19 @@ fn simplify_binary(
     match op {
         // Integer Add: x+0→x, 0+x→x
         TackyBinaryOp::Add => {
-            if right_zero { return Some(make_copy(left, dst)); }
-            if left_zero { return Some(make_copy(right, dst)); }
+            if right_zero {
+                return Some(make_copy(left, dst));
+            }
+            if left_zero {
+                return Some(make_copy(right, dst));
+            }
             None
         }
         // Integer Subtract: x-0→x, x-x→0
         TackyBinaryOp::Subtract => {
-            if right_zero { return Some(make_copy(left, dst)); }
+            if right_zero {
+                return Some(make_copy(left, dst));
+            }
             if same_var {
                 return Some(make_copy_zero(left, dst, var_types));
             }
@@ -225,31 +253,49 @@ fn simplify_binary(
         }
         // Integer Multiply: x*1→x, 1*x→x, x*0→0, 0*x→0
         TackyBinaryOp::Multiply => {
-            if right_one { return Some(make_copy(left, dst)); }
-            if left_one { return Some(make_copy(right, dst)); }
-            if right_zero { return Some(make_copy_zero(left, dst, var_types)); }
-            if left_zero { return Some(make_copy_zero(right, dst, var_types)); }
+            if right_one {
+                return Some(make_copy(left, dst));
+            }
+            if left_one {
+                return Some(make_copy(right, dst));
+            }
+            if right_zero {
+                return Some(make_copy_zero(left, dst, var_types));
+            }
+            if left_zero {
+                return Some(make_copy_zero(right, dst, var_types));
+            }
             None
         }
         // Integer Divide: x/1→x
         TackyBinaryOp::Divide => {
-            if right_one { return Some(make_copy(left, dst)); }
+            if right_one {
+                return Some(make_copy(left, dst));
+            }
             None
         }
         // Integer Remainder: x%1→0
         TackyBinaryOp::Remainder => {
-            if right_one { return Some(make_copy_zero(left, dst, var_types)); }
+            if right_one {
+                return Some(make_copy_zero(left, dst, var_types));
+            }
             None
         }
         // Double Multiply: x*1.0→x, 1.0*x→x
         TackyBinaryOp::MulDouble => {
-            if is_one_double(right) { return Some(make_copy(left, dst)); }
-            if is_one_double(left) { return Some(make_copy(right, dst)); }
+            if is_one_double(right) {
+                return Some(make_copy(left, dst));
+            }
+            if is_one_double(left) {
+                return Some(make_copy(right, dst));
+            }
             None
         }
         // Double Divide: x/1.0→x
         TackyBinaryOp::DivDouble => {
-            if is_one_double(right) { return Some(make_copy(left, dst)); }
+            if is_one_double(right) {
+                return Some(make_copy(left, dst));
+            }
             None
         }
         // Self-comparisons (integer only, not double)
@@ -301,15 +347,15 @@ fn is_zero_val(val: &TackyVal) -> bool {
 }
 
 fn is_one(val: &TackyVal) -> bool {
-    match val {
-        TackyVal::Constant(TackyConst::Int(1)) => true,
-        TackyVal::Constant(TackyConst::Long(1)) => true,
-        TackyVal::Constant(TackyConst::UInt(1)) => true,
-        TackyVal::Constant(TackyConst::ULong(1)) => true,
-        TackyVal::Constant(TackyConst::Char(1)) => true,
-        TackyVal::Constant(TackyConst::UChar(1)) => true,
-        _ => false,
-    }
+    matches!(
+        val,
+        TackyVal::Constant(TackyConst::Int(1))
+            | TackyVal::Constant(TackyConst::Long(1))
+            | TackyVal::Constant(TackyConst::UInt(1))
+            | TackyVal::Constant(TackyConst::ULong(1))
+            | TackyVal::Constant(TackyConst::Char(1))
+            | TackyVal::Constant(TackyConst::UChar(1))
+    )
 }
 
 fn is_one_double(val: &TackyVal) -> bool {
@@ -331,7 +377,10 @@ fn is_double_var_val(val: &TackyVal, var_types: &HashMap<String, Type>) -> bool 
 }
 
 fn make_copy(src: &TackyVal, dst: &TackyVal) -> TackyInstruction {
-    TackyInstruction::Copy { src: src.clone(), dst: dst.clone() }
+    TackyInstruction::Copy {
+        src: src.clone(),
+        dst: dst.clone(),
+    }
 }
 
 fn make_zero_typed(val: &TackyVal, var_types: &HashMap<String, Type>) -> TackyConst {
@@ -345,22 +394,24 @@ fn make_zero_typed(val: &TackyVal, var_types: &HashMap<String, Type>) -> TackyCo
             TackyConst::Char(_) => TackyConst::Char(0),
             TackyConst::UChar(_) => TackyConst::UChar(0),
         },
-        TackyVal::Var(name) => {
-            match var_types.get(name) {
-                Some(Type::Int) => TackyConst::Int(0),
-                Some(Type::Long) => TackyConst::Long(0),
-                Some(Type::UInt) => TackyConst::UInt(0),
-                Some(Type::ULong) => TackyConst::ULong(0),
-                Some(Type::Double) => TackyConst::Double(0.0),
-                Some(Type::Char) => TackyConst::Char(0),
-                Some(Type::UChar) => TackyConst::UChar(0),
-                _ => TackyConst::Int(0),
-            }
-        }
+        TackyVal::Var(name) => match var_types.get(name) {
+            Some(Type::Int) => TackyConst::Int(0),
+            Some(Type::Long) => TackyConst::Long(0),
+            Some(Type::UInt) => TackyConst::UInt(0),
+            Some(Type::ULong) => TackyConst::ULong(0),
+            Some(Type::Double) => TackyConst::Double(0.0),
+            Some(Type::Char) => TackyConst::Char(0),
+            Some(Type::UChar) => TackyConst::UChar(0),
+            _ => TackyConst::Int(0),
+        },
     }
 }
 
-fn make_copy_zero(operand: &TackyVal, dst: &TackyVal, var_types: &HashMap<String, Type>) -> TackyInstruction {
+fn make_copy_zero(
+    operand: &TackyVal,
+    dst: &TackyVal,
+    var_types: &HashMap<String, Type>,
+) -> TackyInstruction {
     TackyInstruction::Copy {
         src: TackyVal::Constant(make_zero_typed(operand, var_types)),
         dst: dst.clone(),
@@ -373,53 +424,61 @@ fn make_copy_zero(operand: &TackyVal, dst: &TackyVal, var_types: &HashMap<String
 
 /// Constant Folding — 定数式をコンパイル時に計算する
 fn constant_folding(instrs: Vec<TackyInstruction>) -> Vec<TackyInstruction> {
-    instrs.into_iter().filter_map(|instr| {
-        match &instr {
-            TackyInstruction::Binary { op, left, right, dst } => {
-                if let (TackyVal::Constant(lc), TackyVal::Constant(rc)) = (left, right) {
-                    if let Some(result) = fold_binary(*op, lc, rc) {
+    instrs
+        .into_iter()
+        .filter_map(|instr| {
+            match &instr {
+                TackyInstruction::Binary {
+                    op,
+                    left,
+                    right,
+                    dst,
+                } => {
+                    if let (TackyVal::Constant(lc), TackyVal::Constant(rc)) = (left, right)
+                        && let Some(result) = fold_binary(*op, lc, rc)
+                    {
                         return Some(TackyInstruction::Copy {
                             src: TackyVal::Constant(result),
                             dst: dst.clone(),
                         });
                     }
+                    Some(instr)
                 }
-                Some(instr)
-            }
-            TackyInstruction::Unary { op, src, dst } => {
-                if let TackyVal::Constant(c) = src {
-                    if let Some(result) = fold_unary(*op, c) {
+                TackyInstruction::Unary { op, src, dst } => {
+                    if let TackyVal::Constant(c) = src
+                        && let Some(result) = fold_unary(*op, c)
+                    {
                         return Some(TackyInstruction::Copy {
                             src: TackyVal::Constant(result),
                             dst: dst.clone(),
                         });
                     }
+                    Some(instr)
                 }
-                Some(instr)
-            }
-            TackyInstruction::JumpIfZero { condition, target } => {
-                if let TackyVal::Constant(c) = condition {
-                    if is_zero_const(c) {
-                        return Some(TackyInstruction::Jump(target.clone()));
-                    } else {
-                        return None; // Remove dead branch
+                TackyInstruction::JumpIfZero { condition, target } => {
+                    if let TackyVal::Constant(c) = condition {
+                        if is_zero_const(c) {
+                            return Some(TackyInstruction::Jump(target.clone()));
+                        } else {
+                            return None; // Remove dead branch
+                        }
                     }
+                    Some(instr)
                 }
-                Some(instr)
-            }
-            TackyInstruction::JumpIfNotZero { condition, target } => {
-                if let TackyVal::Constant(c) = condition {
-                    if !is_zero_const(c) {
-                        return Some(TackyInstruction::Jump(target.clone()));
-                    } else {
-                        return None; // Remove dead branch
+                TackyInstruction::JumpIfNotZero { condition, target } => {
+                    if let TackyVal::Constant(c) = condition {
+                        if !is_zero_const(c) {
+                            return Some(TackyInstruction::Jump(target.clone()));
+                        } else {
+                            return None; // Remove dead branch
+                        }
                     }
+                    Some(instr)
                 }
-                Some(instr)
+                _ => Some(instr),
             }
-            _ => Some(instr),
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 fn is_zero_const(c: &TackyConst) -> bool {
@@ -437,10 +496,18 @@ fn is_zero_const(c: &TackyConst) -> bool {
 
 fn fold_binary(op: TackyBinaryOp, left: &TackyConst, right: &TackyConst) -> Option<TackyConst> {
     match (left, right) {
-        (TackyConst::Int(l), TackyConst::Int(r)) => fold_int_binary(op, *l as i64, *r as i64).map(|v| TackyConst::Int(v as i32)),
-        (TackyConst::Long(l), TackyConst::Long(r)) => fold_int_binary(op, *l, *r).map(TackyConst::Long),
-        (TackyConst::UInt(l), TackyConst::UInt(r)) => fold_uint_binary(op, *l as u64, *r as u64).map(|v| TackyConst::UInt(v as u32)),
-        (TackyConst::ULong(l), TackyConst::ULong(r)) => fold_uint_binary(op, *l, *r).map(TackyConst::ULong),
+        (TackyConst::Int(l), TackyConst::Int(r)) => {
+            fold_int_binary(op, *l as i64, *r as i64).map(|v| TackyConst::Int(v as i32))
+        }
+        (TackyConst::Long(l), TackyConst::Long(r)) => {
+            fold_int_binary(op, *l, *r).map(TackyConst::Long)
+        }
+        (TackyConst::UInt(l), TackyConst::UInt(r)) => {
+            fold_uint_binary(op, *l as u64, *r as u64).map(|v| TackyConst::UInt(v as u32))
+        }
+        (TackyConst::ULong(l), TackyConst::ULong(r)) => {
+            fold_uint_binary(op, *l, *r).map(TackyConst::ULong)
+        }
         (TackyConst::Double(l), TackyConst::Double(r)) => fold_double_binary(op, *l, *r),
         _ => None,
     }
@@ -451,8 +518,20 @@ fn fold_int_binary(op: TackyBinaryOp, l: i64, r: i64) -> Option<i64> {
         TackyBinaryOp::Add => Some(l.wrapping_add(r)),
         TackyBinaryOp::Subtract => Some(l.wrapping_sub(r)),
         TackyBinaryOp::Multiply => Some(l.wrapping_mul(r)),
-        TackyBinaryOp::Divide => if r != 0 { Some(l.wrapping_div(r)) } else { None },
-        TackyBinaryOp::Remainder => if r != 0 { Some(l.wrapping_rem(r)) } else { None },
+        TackyBinaryOp::Divide => {
+            if r != 0 {
+                Some(l.wrapping_div(r))
+            } else {
+                None
+            }
+        }
+        TackyBinaryOp::Remainder => {
+            if r != 0 {
+                Some(l.wrapping_rem(r))
+            } else {
+                None
+            }
+        }
         TackyBinaryOp::Equal => Some(if l == r { 1 } else { 0 }),
         TackyBinaryOp::NotEqual => Some(if l != r { 1 } else { 0 }),
         TackyBinaryOp::LessThan => Some(if l < r { 1 } else { 0 }),
@@ -468,8 +547,20 @@ fn fold_uint_binary(op: TackyBinaryOp, l: u64, r: u64) -> Option<u64> {
         TackyBinaryOp::Add => Some(l.wrapping_add(r)),
         TackyBinaryOp::Subtract => Some(l.wrapping_sub(r)),
         TackyBinaryOp::Multiply => Some(l.wrapping_mul(r)),
-        TackyBinaryOp::Divide => if r != 0 { Some(l.wrapping_div(r)) } else { None },
-        TackyBinaryOp::Remainder => if r != 0 { Some(l.wrapping_rem(r)) } else { None },
+        TackyBinaryOp::Divide => {
+            if r != 0 {
+                Some(l.wrapping_div(r))
+            } else {
+                None
+            }
+        }
+        TackyBinaryOp::Remainder => {
+            if r != 0 {
+                Some(l.wrapping_rem(r))
+            } else {
+                None
+            }
+        }
         TackyBinaryOp::Equal => Some(if l == r { 1 } else { 0 }),
         TackyBinaryOp::NotEqual => Some(if l != r { 1 } else { 0 }),
         TackyBinaryOp::LessThan => Some(if l < r { 1 } else { 0 }),
@@ -485,7 +576,13 @@ fn fold_double_binary(op: TackyBinaryOp, l: f64, r: f64) -> Option<TackyConst> {
         TackyBinaryOp::AddDouble => Some(TackyConst::Double(l + r)),
         TackyBinaryOp::SubDouble => Some(TackyConst::Double(l - r)),
         TackyBinaryOp::MulDouble => Some(TackyConst::Double(l * r)),
-        TackyBinaryOp::DivDouble => if r != 0.0 { Some(TackyConst::Double(l / r)) } else { None },
+        TackyBinaryOp::DivDouble => {
+            if r != 0.0 {
+                Some(TackyConst::Double(l / r))
+            } else {
+                None
+            }
+        }
         TackyBinaryOp::Equal => Some(TackyConst::Int(if l == r { 1 } else { 0 })),
         TackyBinaryOp::NotEqual => Some(TackyConst::Int(if l != r { 1 } else { 0 })),
         TackyBinaryOp::LessThan => Some(TackyConst::Int(if l < r { 1 } else { 0 })),
@@ -505,11 +602,21 @@ fn fold_unary(op: TackyUnaryOp, c: &TackyConst) -> Option<TackyConst> {
         (TackyUnaryOp::Complement, TackyConst::Long(v)) => Some(TackyConst::Long(!v)),
         (TackyUnaryOp::Complement, TackyConst::UInt(v)) => Some(TackyConst::UInt(!v)),
         (TackyUnaryOp::Complement, TackyConst::ULong(v)) => Some(TackyConst::ULong(!v)),
-        (TackyUnaryOp::Not, TackyConst::Int(v)) => Some(TackyConst::Int(if *v == 0 { 1 } else { 0 })),
-        (TackyUnaryOp::Not, TackyConst::Long(v)) => Some(TackyConst::Int(if *v == 0 { 1 } else { 0 })),
-        (TackyUnaryOp::Not, TackyConst::UInt(v)) => Some(TackyConst::Int(if *v == 0 { 1 } else { 0 })),
-        (TackyUnaryOp::Not, TackyConst::ULong(v)) => Some(TackyConst::Int(if *v == 0 { 1 } else { 0 })),
-        (TackyUnaryOp::Not, TackyConst::Double(v)) => Some(TackyConst::Int(if *v == 0.0 { 1 } else { 0 })),
+        (TackyUnaryOp::Not, TackyConst::Int(v)) => {
+            Some(TackyConst::Int(if *v == 0 { 1 } else { 0 }))
+        }
+        (TackyUnaryOp::Not, TackyConst::Long(v)) => {
+            Some(TackyConst::Int(if *v == 0 { 1 } else { 0 }))
+        }
+        (TackyUnaryOp::Not, TackyConst::UInt(v)) => {
+            Some(TackyConst::Int(if *v == 0 { 1 } else { 0 }))
+        }
+        (TackyUnaryOp::Not, TackyConst::ULong(v)) => {
+            Some(TackyConst::Int(if *v == 0 { 1 } else { 0 }))
+        }
+        (TackyUnaryOp::Not, TackyConst::Double(v)) => {
+            Some(TackyConst::Int(if *v == 0.0 { 1 } else { 0 }))
+        }
         _ => None,
     }
 }
@@ -545,8 +652,8 @@ fn unreachable_code_elimination(instrs: Vec<TackyInstruction>) -> Vec<TackyInstr
     let mut result = Vec::new();
     for (bi, &(start, end)) in cfg.blocks.iter().enumerate() {
         if reachable.contains(&bi) {
-            for i in start..end {
-                result.push(instrs[i].clone());
+            for instr in &instrs[start..end] {
+                result.push(instr.clone());
             }
         }
     }
@@ -564,110 +671,266 @@ fn copy_propagation(instrs: Vec<TackyInstruction>) -> Vec<TackyInstruction> {
     let address_taken = collect_address_taken(&instrs);
     let mut copies: HashMap<String, TackyVal> = HashMap::new();
 
-    instrs.into_iter().map(|instr| {
-        let instr = replace_uses(instr, &copies);
+    instrs
+        .into_iter()
+        .map(|instr| {
+            let instr = replace_uses(instr, &copies);
 
-        // Update copy map
-        match &instr {
-            TackyInstruction::Copy { src, dst: TackyVal::Var(dst_name) } => {
-                // Invalidate any copies that reference dst_name
-                copies.retain(|_, v| {
-                    if let TackyVal::Var(vn) = v { vn != dst_name } else { true }
-                });
-                // Add new copy
-                copies.insert(dst_name.clone(), src.clone());
-            }
-            _ => {
-                // Invalidate copies whose dst is written by this instruction
-                if let Some(dst_name) = get_written_var(&instr) {
-                    copies.retain(|k, v| {
-                        k != &dst_name && match v { TackyVal::Var(vn) => vn != &dst_name, _ => true }
+            // Update copy map
+            match &instr {
+                TackyInstruction::Copy {
+                    src,
+                    dst: TackyVal::Var(dst_name),
+                } => {
+                    // Invalidate any copies that reference dst_name
+                    copies.retain(|_, v| {
+                        if let TackyVal::Var(vn) = v {
+                            vn != dst_name
+                        } else {
+                            true
+                        }
                     });
+                    // Add new copy
+                    copies.insert(dst_name.clone(), src.clone());
                 }
-                // Labels and function calls invalidate all copies (conservative)
-                // Store invalidates copies for address-taken variables
-                match &instr {
-                    TackyInstruction::Label(_) => { copies.clear(); }
-                    TackyInstruction::FunCall { .. } => { copies.clear(); }
-                    TackyInstruction::Store { .. } => {
+                _ => {
+                    // Invalidate copies whose dst is written by this instruction
+                    if let Some(dst_name) = get_written_var(&instr) {
                         copies.retain(|k, v| {
-                            !address_taken.contains(k) && match v {
-                                TackyVal::Var(vn) => !address_taken.contains(vn),
-                                _ => true,
-                            }
+                            k != &dst_name
+                                && match v {
+                                    TackyVal::Var(vn) => vn != &dst_name,
+                                    _ => true,
+                                }
                         });
                     }
-                    _ => {}
+                    // Labels and function calls invalidate all copies (conservative)
+                    // Store invalidates copies for address-taken variables
+                    match &instr {
+                        TackyInstruction::Label(_) => {
+                            copies.clear();
+                        }
+                        TackyInstruction::FunCall { .. } => {
+                            copies.clear();
+                        }
+                        TackyInstruction::Store { .. } => {
+                            copies.retain(|k, v| {
+                                !address_taken.contains(k)
+                                    && match v {
+                                        TackyVal::Var(vn) => !address_taken.contains(vn),
+                                        _ => true,
+                                    }
+                            });
+                        }
+                        _ => {}
+                    }
                 }
             }
-        }
 
-        instr
-    }).collect()
+            instr
+        })
+        .collect()
 }
 
 fn replace_uses(instr: TackyInstruction, copies: &HashMap<String, TackyVal>) -> TackyInstruction {
     fn sub(val: &TackyVal, copies: &HashMap<String, TackyVal>) -> TackyVal {
-        if let TackyVal::Var(name) = val {
-            if let Some(replacement) = copies.get(name) {
-                return replacement.clone();
-            }
+        if let TackyVal::Var(name) = val
+            && let Some(replacement) = copies.get(name)
+        {
+            return replacement.clone();
         }
         val.clone()
     }
 
     match instr {
         TackyInstruction::Return(val) => TackyInstruction::Return(sub(&val, copies)),
-        TackyInstruction::Unary { op, src, dst } => TackyInstruction::Unary { op, src: sub(&src, copies), dst },
-        TackyInstruction::Binary { op, left, right, dst } => TackyInstruction::Binary { op, left: sub(&left, copies), right: sub(&right, copies), dst },
-        TackyInstruction::Copy { src, dst } => TackyInstruction::Copy { src: sub(&src, copies), dst },
-        TackyInstruction::JumpIfZero { condition, target } => TackyInstruction::JumpIfZero { condition: sub(&condition, copies), target },
-        TackyInstruction::JumpIfNotZero { condition, target } => TackyInstruction::JumpIfNotZero { condition: sub(&condition, copies), target },
-        TackyInstruction::Store { src, dst_ptr } => TackyInstruction::Store { src: sub(&src, copies), dst_ptr: sub(&dst_ptr, copies) },
-        TackyInstruction::Load { src_ptr, dst } => TackyInstruction::Load { src_ptr: sub(&src_ptr, copies), dst },
-        TackyInstruction::SignExtend { src, dst } => TackyInstruction::SignExtend { src: sub(&src, copies), dst },
-        TackyInstruction::ZeroExtend { src, dst } => TackyInstruction::ZeroExtend { src: sub(&src, copies), dst },
-        TackyInstruction::Truncate { src, dst } => TackyInstruction::Truncate { src: sub(&src, copies), dst },
-        TackyInstruction::IntToDouble { src, dst } => TackyInstruction::IntToDouble { src: sub(&src, copies), dst },
-        TackyInstruction::DoubleToInt { src, dst } => TackyInstruction::DoubleToInt { src: sub(&src, copies), dst },
-        TackyInstruction::UIntToDouble { src, dst } => TackyInstruction::UIntToDouble { src: sub(&src, copies), dst },
-        TackyInstruction::DoubleToUInt { src, dst } => TackyInstruction::DoubleToUInt { src: sub(&src, copies), dst },
+        TackyInstruction::Unary { op, src, dst } => TackyInstruction::Unary {
+            op,
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::Binary {
+            op,
+            left,
+            right,
+            dst,
+        } => TackyInstruction::Binary {
+            op,
+            left: sub(&left, copies),
+            right: sub(&right, copies),
+            dst,
+        },
+        TackyInstruction::Copy { src, dst } => TackyInstruction::Copy {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::JumpIfZero { condition, target } => TackyInstruction::JumpIfZero {
+            condition: sub(&condition, copies),
+            target,
+        },
+        TackyInstruction::JumpIfNotZero { condition, target } => TackyInstruction::JumpIfNotZero {
+            condition: sub(&condition, copies),
+            target,
+        },
+        TackyInstruction::Store { src, dst_ptr } => TackyInstruction::Store {
+            src: sub(&src, copies),
+            dst_ptr: sub(&dst_ptr, copies),
+        },
+        TackyInstruction::Load { src_ptr, dst } => TackyInstruction::Load {
+            src_ptr: sub(&src_ptr, copies),
+            dst,
+        },
+        TackyInstruction::SignExtend { src, dst } => TackyInstruction::SignExtend {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::ZeroExtend { src, dst } => TackyInstruction::ZeroExtend {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::Truncate { src, dst } => TackyInstruction::Truncate {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::IntToDouble { src, dst } => TackyInstruction::IntToDouble {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::DoubleToInt { src, dst } => TackyInstruction::DoubleToInt {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::UIntToDouble { src, dst } => TackyInstruction::UIntToDouble {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::DoubleToUInt { src, dst } => TackyInstruction::DoubleToUInt {
+            src: sub(&src, copies),
+            dst,
+        },
         TackyInstruction::GetAddress { src, dst } => TackyInstruction::GetAddress { src, dst }, // Don't substitute address source
-        TackyInstruction::AddPtr { ptr, index, scale, dst } => TackyInstruction::AddPtr { ptr: sub(&ptr, copies), index: sub(&index, copies), scale, dst },
-        TackyInstruction::CopyToOffset { src, dst, offset } => TackyInstruction::CopyToOffset { src: sub(&src, copies), dst, offset },
-        TackyInstruction::CopyFromOffset { src, offset, dst } => TackyInstruction::CopyFromOffset { src, offset, dst },
-        TackyInstruction::CopyStruct { src, dst, size } => TackyInstruction::CopyStruct { src: sub(&src, copies), dst, size },
-        TackyInstruction::FunCall { name, args, dst, dst_type, is_variadic } => {
+        TackyInstruction::AddPtr {
+            ptr,
+            index,
+            scale,
+            dst,
+        } => TackyInstruction::AddPtr {
+            ptr: sub(&ptr, copies),
+            index: sub(&index, copies),
+            scale,
+            dst,
+        },
+        TackyInstruction::CopyToOffset { src, dst, offset } => TackyInstruction::CopyToOffset {
+            src: sub(&src, copies),
+            dst,
+            offset,
+        },
+        TackyInstruction::CopyFromOffset { src, offset, dst } => {
+            TackyInstruction::CopyFromOffset { src, offset, dst }
+        }
+        TackyInstruction::CopyStruct { src, dst, size } => TackyInstruction::CopyStruct {
+            src: sub(&src, copies),
+            dst,
+            size,
+        },
+        TackyInstruction::FunCall {
+            name,
+            args,
+            dst,
+            dst_type,
+            is_variadic,
+        } => {
             let args = args.iter().map(|a| sub(a, copies)).collect();
-            TackyInstruction::FunCall { name, args, dst, dst_type, is_variadic }
+            TackyInstruction::FunCall {
+                name,
+                args,
+                dst,
+                dst_type,
+                is_variadic,
+            }
         }
-        TackyInstruction::JumpIndirect { target, possible_targets } => {
-            TackyInstruction::JumpIndirect { target: sub(&target, copies), possible_targets }
-        }
+        TackyInstruction::JumpIndirect {
+            target,
+            possible_targets,
+        } => TackyInstruction::JumpIndirect {
+            target: sub(&target, copies),
+            possible_targets,
+        },
         other => other,
     }
 }
 
 fn get_written_var(instr: &TackyInstruction) -> Option<String> {
     match instr {
-        TackyInstruction::Unary { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::Binary { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::Copy { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::SignExtend { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::ZeroExtend { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::Truncate { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::IntToDouble { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::DoubleToInt { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::UIntToDouble { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::DoubleToUInt { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::GetAddress { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::Load { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::AddPtr { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::CopyFromOffset { dst: TackyVal::Var(n), .. }
-        | TackyInstruction::FunCall { dst: TackyVal::Var(n), .. } => Some(n.clone()),
+        TackyInstruction::Unary {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::Binary {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::Copy {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::SignExtend {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::ZeroExtend {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::Truncate {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::IntToDouble {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::DoubleToInt {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::UIntToDouble {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::DoubleToUInt {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::GetAddress {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::Load {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::AddPtr {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::CopyFromOffset {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::FunCall {
+            dst: TackyVal::Var(n),
+            ..
+        } => Some(n.clone()),
         TackyInstruction::CopyToOffset { dst, .. } => Some(dst.clone()),
-        TackyInstruction::Store { dst_ptr: TackyVal::Var(n), .. } => Some(n.clone()),
-        TackyInstruction::CopyStruct { dst: TackyVal::Var(n), .. } => Some(n.clone()),
+        TackyInstruction::Store {
+            dst_ptr: TackyVal::Var(n),
+            ..
+        } => Some(n.clone()),
+        TackyInstruction::CopyStruct {
+            dst: TackyVal::Var(n),
+            ..
+        } => Some(n.clone()),
         _ => None,
     }
 }
@@ -719,10 +982,14 @@ fn tacky_val_to_cse(val: &TackyVal) -> CseVal {
 }
 
 fn is_commutative(op: TackyBinaryOp) -> bool {
-    matches!(op,
-        TackyBinaryOp::Add | TackyBinaryOp::Multiply
-        | TackyBinaryOp::Equal | TackyBinaryOp::NotEqual
-        | TackyBinaryOp::AddDouble | TackyBinaryOp::MulDouble
+    matches!(
+        op,
+        TackyBinaryOp::Add
+            | TackyBinaryOp::Multiply
+            | TackyBinaryOp::Equal
+            | TackyBinaryOp::NotEqual
+            | TackyBinaryOp::AddDouble
+            | TackyBinaryOp::MulDouble
     )
 }
 
@@ -733,7 +1000,12 @@ fn common_subexpression_elimination(instrs: Vec<TackyInstruction>) -> Vec<TackyI
     for instr in instrs {
         // Try to build a CSE key for this instruction
         let cse_info = match &instr {
-            TackyInstruction::Binary { op, left, right, dst } => {
+            TackyInstruction::Binary {
+                op,
+                left,
+                right,
+                dst,
+            } => {
                 let (l, r) = if is_commutative(*op) {
                     let lv = tacky_val_to_cse(left);
                     let rv = tacky_val_to_cse(right);
@@ -826,10 +1098,14 @@ fn common_subexpression_elimination(instrs: Vec<TackyInstruction>) -> Vec<TackyI
 fn invalidate_cse_var(available: &mut HashMap<CseExpr, String>, var_name: &str) {
     available.retain(|key, val| {
         // Remove if the cached result variable matches
-        if val == var_name { return false; }
+        if val == var_name {
+            return false;
+        }
         // Remove if any operand in the expression references var_name
         match key {
-            CseExpr::Binary(_, l, r) => !cse_val_is_var(l, var_name) && !cse_val_is_var(r, var_name),
+            CseExpr::Binary(_, l, r) => {
+                !cse_val_is_var(l, var_name) && !cse_val_is_var(r, var_name)
+            }
             CseExpr::Unary(_, v)
             | CseExpr::SignExtend(v)
             | CseExpr::ZeroExtend(v)
@@ -873,8 +1149,7 @@ fn liveness_dead_code_elimination(
 
     for (bi, &(start, end)) in cfg.blocks.iter().enumerate() {
         // Process instructions in forward order for block-level use/def
-        for i in start..end {
-            let instr = &instrs[i];
+        for instr in &instrs[start..end] {
             // Collect uses that are NOT already defined in this block
             let mut instr_uses = HashSet::new();
             collect_uses(instr, &mut instr_uses);
@@ -953,7 +1228,9 @@ fn liveness_dead_code_elimination(
         }
     }
 
-    instrs.into_iter().enumerate()
+    instrs
+        .into_iter()
+        .enumerate()
         .filter(|(i, _)| keep[*i])
         .map(|(_, instr)| instr)
         .collect()
@@ -963,7 +1240,10 @@ fn collect_address_taken(instrs: &[TackyInstruction]) -> HashSet<String> {
     let mut taken = HashSet::new();
     for instr in instrs {
         match instr {
-            TackyInstruction::GetAddress { src: TackyVal::Var(name), .. } => {
+            TackyInstruction::GetAddress {
+                src: TackyVal::Var(name),
+                ..
+            } => {
                 taken.insert(name.clone());
             }
             TackyInstruction::CopyToOffset { dst, .. } => {
@@ -979,18 +1259,19 @@ fn collect_address_taken(instrs: &[TackyInstruction]) -> HashSet<String> {
 }
 
 fn has_side_effect(instr: &TackyInstruction) -> bool {
-    matches!(instr,
+    matches!(
+        instr,
         TackyInstruction::Return(_)
-        | TackyInstruction::ReturnVoid
-        | TackyInstruction::Jump(_)
-        | TackyInstruction::JumpIfZero { .. }
-        | TackyInstruction::JumpIfNotZero { .. }
-        | TackyInstruction::JumpIndirect { .. }
-        | TackyInstruction::Label(_)
-        | TackyInstruction::FunCall { .. }
-        | TackyInstruction::Store { .. }
-        | TackyInstruction::CopyToOffset { .. }
-        | TackyInstruction::CopyStruct { .. }
+            | TackyInstruction::ReturnVoid
+            | TackyInstruction::Jump(_)
+            | TackyInstruction::JumpIfZero { .. }
+            | TackyInstruction::JumpIfNotZero { .. }
+            | TackyInstruction::JumpIndirect { .. }
+            | TackyInstruction::Label(_)
+            | TackyInstruction::FunCall { .. }
+            | TackyInstruction::Store { .. }
+            | TackyInstruction::CopyToOffset { .. }
+            | TackyInstruction::CopyStruct { .. }
     )
 }
 
@@ -1004,21 +1285,46 @@ fn collect_uses(instr: &TackyInstruction, used: &mut HashSet<String>) {
     match instr {
         TackyInstruction::Return(val) => add_val(val, used),
         TackyInstruction::Unary { src, .. } => add_val(src, used),
-        TackyInstruction::Binary { left, right, .. } => { add_val(left, used); add_val(right, used); }
+        TackyInstruction::Binary { left, right, .. } => {
+            add_val(left, used);
+            add_val(right, used);
+        }
         TackyInstruction::Copy { src, .. } => add_val(src, used),
-        TackyInstruction::JumpIfZero { condition, .. } | TackyInstruction::JumpIfNotZero { condition, .. } => add_val(condition, used),
-        TackyInstruction::FunCall { args, .. } => { for a in args { add_val(a, used); } }
-        TackyInstruction::SignExtend { src, .. } | TackyInstruction::ZeroExtend { src, .. }
-        | TackyInstruction::Truncate { src, .. } | TackyInstruction::IntToDouble { src, .. }
-        | TackyInstruction::DoubleToInt { src, .. } | TackyInstruction::UIntToDouble { src, .. }
+        TackyInstruction::JumpIfZero { condition, .. }
+        | TackyInstruction::JumpIfNotZero { condition, .. } => add_val(condition, used),
+        TackyInstruction::FunCall { args, .. } => {
+            for a in args {
+                add_val(a, used);
+            }
+        }
+        TackyInstruction::SignExtend { src, .. }
+        | TackyInstruction::ZeroExtend { src, .. }
+        | TackyInstruction::Truncate { src, .. }
+        | TackyInstruction::IntToDouble { src, .. }
+        | TackyInstruction::DoubleToInt { src, .. }
+        | TackyInstruction::UIntToDouble { src, .. }
         | TackyInstruction::DoubleToUInt { src, .. } => add_val(src, used),
         TackyInstruction::GetAddress { src, .. } => add_val(src, used),
         TackyInstruction::Load { src_ptr, .. } => add_val(src_ptr, used),
-        TackyInstruction::Store { src, dst_ptr } => { add_val(src, used); add_val(dst_ptr, used); }
-        TackyInstruction::AddPtr { ptr, index, .. } => { add_val(ptr, used); add_val(index, used); }
-        TackyInstruction::CopyToOffset { src, dst, .. } => { add_val(src, used); used.insert(dst.clone()); }
-        TackyInstruction::CopyFromOffset { src, .. } => { used.insert(src.clone()); }
-        TackyInstruction::CopyStruct { src, dst, .. } => { add_val(src, used); add_val(dst, used); }
+        TackyInstruction::Store { src, dst_ptr } => {
+            add_val(src, used);
+            add_val(dst_ptr, used);
+        }
+        TackyInstruction::AddPtr { ptr, index, .. } => {
+            add_val(ptr, used);
+            add_val(index, used);
+        }
+        TackyInstruction::CopyToOffset { src, dst, .. } => {
+            add_val(src, used);
+            used.insert(dst.clone());
+        }
+        TackyInstruction::CopyFromOffset { src, .. } => {
+            used.insert(src.clone());
+        }
+        TackyInstruction::CopyStruct { src, dst, .. } => {
+            add_val(src, used);
+            add_val(dst, used);
+        }
         TackyInstruction::JumpIndirect { target, .. } => add_val(target, used),
         _ => {}
     }

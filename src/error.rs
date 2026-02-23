@@ -16,6 +16,7 @@ use thiserror::Error;
 /// `thiserror::Error` を derive することで、各バリアントの `#[error("...")]`
 /// アトリビュートから `Display` トレイトが自動実装される。
 #[derive(Debug, Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum CompileError {
     /// 字句解析（Lexer）で不正な文字やトークンを検出した場合
     #[error("Lexer error: {0}")]

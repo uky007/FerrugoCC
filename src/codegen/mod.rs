@@ -15,7 +15,7 @@ pub mod asm_ast;
 pub mod generator;
 pub mod regalloc;
 
-pub use asm_ast::{AsmProgram, AsmFunction};
+pub use asm_ast::{AsmFunction, AsmProgram};
 
 use crate::error::Result;
 use crate::obfuscation::ObfuscationConfig;
@@ -30,17 +30,17 @@ use asm_ast::{AsmBinaryOp, AsmType, AsmUnaryOp, Instruction, Operand, Reg};
 /// - 命令置換（同等命令列への置換）
 /// - 反逆アセンブリ（ゴミバイト挿入）
 /// - 関数呼び出しの間接化
-pub fn generate(program: &TackyProgram, obf_config: Option<&ObfuscationConfig>) -> Result<AsmProgram> {
+pub fn generate(
+    program: &TackyProgram,
+    obf_config: Option<&ObfuscationConfig>,
+) -> Result<AsmProgram> {
     // 1. Pseudo 付きの Asm を生成
     let (results, static_vars, static_constants) = generator::generate(program)?;
 
     // 2. 各関数にレジスタ割り当て + fixup
     let mut functions = Vec::new();
     for result in results {
-        let alloc = regalloc::allocate_registers(
-            result.func.instructions,
-            &result.var_types,
-        );
+        let alloc = regalloc::allocate_registers(result.func.instructions, &result.var_types);
         let fixed_instructions = regalloc::fixup_instructions(
             alloc.instructions,
             alloc.spill_bytes,
@@ -56,7 +56,11 @@ pub fn generate(program: &TackyProgram, obf_config: Option<&ObfuscationConfig>) 
     // 3. ASM レベル難読化（fixup 後に適用）
     if let Some(config) = obf_config {
         if config.stack_frame_obf {
-            obfuscate_stack_frame(&mut functions, config.stack_frame_padding, config.stack_frame_fake_freq);
+            obfuscate_stack_frame(
+                &mut functions,
+                config.stack_frame_padding,
+                config.stack_frame_fake_freq,
+            );
         }
         if config.reg_shuffle {
             register_shuffle(&mut functions, config.reg_shuffle_freq);
@@ -87,7 +91,11 @@ pub fn generate(program: &TackyProgram, obf_config: Option<&ObfuscationConfig>) 
 /// 1. AllocateStack/DeallocateStack を拡張して dead スタックスロットを追加
 /// 2. dead スロットへの偽の store/load 操作を N 命令ごとに挿入
 fn obfuscate_stack_frame(functions: &mut [AsmFunction], num_fake_slots: usize, freq: usize) {
-    let num_fake_slots = if num_fake_slots == 0 { 4 } else { num_fake_slots };
+    let num_fake_slots = if num_fake_slots == 0 {
+        4
+    } else {
+        num_fake_slots
+    };
     let freq = if freq == 0 { 8 } else { freq };
     let padding_size = (num_fake_slots * 8 + 15) & !15;
 
@@ -280,9 +288,7 @@ fn indirect_calls(functions: &mut [AsmFunction]) {
                         dst: Operand::Register(Reg::R10),
                     });
                     // call *%r10
-                    new_instrs.push(Instruction::CallIndirect(
-                        Operand::Register(Reg::R10),
-                    ));
+                    new_instrs.push(Instruction::CallIndirect(Operand::Register(Reg::R10)));
                 }
                 _ => new_instrs.push(instr.clone()),
             }
@@ -326,7 +332,7 @@ fn register_shuffle(functions: &mut [AsmFunction], freq: usize) {
                     // Dead copy: movq %rX, %r10
                     new_instrs.push(Instruction::Mov {
                         asm_type: AsmType::Quadword,
-                        src: src,
+                        src,
                         dst: Operand::Register(Reg::R10),
                     });
                 }
@@ -334,7 +340,7 @@ fn register_shuffle(functions: &mut [AsmFunction], freq: usize) {
                     // Copy chain: movq %rX, %r10; movq %r10, %r11
                     new_instrs.push(Instruction::Mov {
                         asm_type: AsmType::Quadword,
-                        src: src,
+                        src,
                         dst: Operand::Register(Reg::R10),
                     });
                     new_instrs.push(Instruction::Mov {
@@ -398,9 +404,15 @@ fn instruction_substitution(functions: &mut [AsmFunction], freq: usize) {
             let pat = pattern_idx % 4;
             let substituted = match (pat, instr) {
                 // パターン0: Add Imm → Sub -Imm
-                (0, Instruction::Binary { asm_type, op: AsmBinaryOp::Add, src: Operand::Imm(n), dst })
-                    if *asm_type != AsmType::Double =>
-                {
+                (
+                    0,
+                    Instruction::Binary {
+                        asm_type,
+                        op: AsmBinaryOp::Add,
+                        src: Operand::Imm(n),
+                        dst,
+                    },
+                ) if *asm_type != AsmType::Double => {
                     let neg_n = -(*n);
                     if neg_n >= i32::MIN as i64 && neg_n <= i32::MAX as i64 {
                         new_instrs.push(Instruction::Binary {
@@ -415,9 +427,15 @@ fn instruction_substitution(functions: &mut [AsmFunction], freq: usize) {
                     }
                 }
                 // パターン1: Sub Imm → Add -Imm
-                (1, Instruction::Binary { asm_type, op: AsmBinaryOp::Sub, src: Operand::Imm(n), dst })
-                    if *asm_type != AsmType::Double =>
-                {
+                (
+                    1,
+                    Instruction::Binary {
+                        asm_type,
+                        op: AsmBinaryOp::Sub,
+                        src: Operand::Imm(n),
+                        dst,
+                    },
+                ) if *asm_type != AsmType::Double => {
                     let neg_n = -(*n);
                     if neg_n >= i32::MIN as i64 && neg_n <= i32::MAX as i64 {
                         new_instrs.push(Instruction::Binary {
@@ -432,9 +450,14 @@ fn instruction_substitution(functions: &mut [AsmFunction], freq: usize) {
                     }
                 }
                 // パターン2: Neg → Not + Add 1
-                (2, Instruction::Unary { asm_type, op: AsmUnaryOp::Neg, operand })
-                    if *asm_type != AsmType::Double =>
-                {
+                (
+                    2,
+                    Instruction::Unary {
+                        asm_type,
+                        op: AsmUnaryOp::Neg,
+                        operand,
+                    },
+                ) if *asm_type != AsmType::Double => {
                     new_instrs.push(Instruction::Unary {
                         asm_type: *asm_type,
                         op: AsmUnaryOp::Not,
@@ -449,9 +472,14 @@ fn instruction_substitution(functions: &mut [AsmFunction], freq: usize) {
                     true
                 }
                 // パターン3: Mov Imm → Mov (N+K) + Sub K
-                (3, Instruction::Mov { asm_type, src: Operand::Imm(n), dst })
-                    if *asm_type != AsmType::Double && *n != 0 =>
-                {
+                (
+                    3,
+                    Instruction::Mov {
+                        asm_type,
+                        src: Operand::Imm(n),
+                        dst,
+                    },
+                ) if *asm_type != AsmType::Double && *n != 0 => {
                     let k = ((pattern_idx * 7 + 3) % 127 + 1) as i64;
                     let n_plus_k = *n + k;
                     if n_plus_k >= i32::MIN as i64 && n_plus_k <= i32::MAX as i64 {
@@ -513,7 +541,10 @@ fn is_safe_subst_point(current: &Instruction, next: Option<&Instruction>) -> boo
             return false;
         }
         // 条件4: 次の命令が JmpCC/SetCC ならフラグを読むため置換しない
-        if matches!(next_instr, Instruction::JmpCC(..) | Instruction::SetCC { .. }) {
+        if matches!(
+            next_instr,
+            Instruction::JmpCC(..) | Instruction::SetCC { .. }
+        ) {
             return false;
         }
     }
@@ -562,9 +593,18 @@ fn is_safe_shuffle_point(current: &Instruction, next: Option<&Instruction>) -> b
 /// 抽出できない場合は AX をフォールバックとして返す。
 fn extract_source_reg(instr: &Instruction) -> Reg {
     let reg = match instr {
-        Instruction::Mov { dst: Operand::Register(r), .. } => Some(*r),
-        Instruction::Binary { dst: Operand::Register(r), .. } => Some(*r),
-        Instruction::Lea { dst: Operand::Register(r), .. } => Some(*r),
+        Instruction::Mov {
+            dst: Operand::Register(r),
+            ..
+        } => Some(*r),
+        Instruction::Binary {
+            dst: Operand::Register(r),
+            ..
+        } => Some(*r),
+        Instruction::Lea {
+            dst: Operand::Register(r),
+            ..
+        } => Some(*r),
         _ => None,
     };
     match reg {
@@ -582,10 +622,22 @@ fn is_valid_shuffle_source(r: Reg) -> bool {
             | Reg::R11
             | Reg::SP
             | Reg::BP
-            | Reg::XMM0 | Reg::XMM1 | Reg::XMM2 | Reg::XMM3
-            | Reg::XMM4 | Reg::XMM5 | Reg::XMM6 | Reg::XMM7
-            | Reg::XMM8 | Reg::XMM9 | Reg::XMM10 | Reg::XMM11
-            | Reg::XMM12 | Reg::XMM13 | Reg::XMM14 | Reg::XMM15
+            | Reg::XMM0
+            | Reg::XMM1
+            | Reg::XMM2
+            | Reg::XMM3
+            | Reg::XMM4
+            | Reg::XMM5
+            | Reg::XMM6
+            | Reg::XMM7
+            | Reg::XMM8
+            | Reg::XMM9
+            | Reg::XMM10
+            | Reg::XMM11
+            | Reg::XMM12
+            | Reg::XMM13
+            | Reg::XMM14
+            | Reg::XMM15
     )
 }
 

@@ -8,23 +8,28 @@
 //! `Register` または `Stack` に置換される。
 //! アドレス取得対象・構造体・配列変数のみ `Stack(offset)` に事前割り当てする。
 
-use std::collections::{HashMap, HashSet};
+use super::asm_ast::{
+    AsmBinaryOp, AsmFunction, AsmStaticConstant, AsmStaticVar, AsmType, AsmUnaryOp, CondCode,
+    Instruction, Operand, Reg, StaticInit,
+};
 use crate::error::{CompileError, Result};
 use crate::parse::ast::Type;
 use crate::tacky::tacky_ast::*;
-use super::asm_ast::{
-    AsmFunction, AsmStaticVar, AsmStaticConstant, StaticInit,
-    Instruction, Operand, Reg,
-    AsmUnaryOp, AsmBinaryOp, CondCode, AsmType,
-};
+use std::collections::{HashMap, HashSet};
 
 /// 引数レジスタの順序（System V AMD64 ABI）
 const ARG_REGISTERS: [Reg; 6] = [Reg::DI, Reg::SI, Reg::DX, Reg::CX, Reg::R8, Reg::R9];
 
 /// XMM 引数レジスタの順序（System V AMD64 ABI）
 const XMM_ARG_REGISTERS: [Reg; 8] = [
-    Reg::XMM0, Reg::XMM1, Reg::XMM2, Reg::XMM3,
-    Reg::XMM4, Reg::XMM5, Reg::XMM6, Reg::XMM7,
+    Reg::XMM0,
+    Reg::XMM1,
+    Reg::XMM2,
+    Reg::XMM3,
+    Reg::XMM4,
+    Reg::XMM5,
+    Reg::XMM6,
+    Reg::XMM7,
 ];
 
 /// Type → AsmType 変換。
@@ -53,7 +58,11 @@ fn asm_type_size(t: AsmType) -> i32 {
 
 /// safe_asm_type: 構造体型にはプレースホルダーを使う
 fn safe_asm_type(t: &Type) -> AsmType {
-    if t.is_struct() { AsmType::Quadword } else { type_to_asm(t) }
+    if t.is_struct() {
+        AsmType::Quadword
+    } else {
+        type_to_asm(t)
+    }
 }
 
 /// コード生成の結果（各関数の命令列 + var_types）
@@ -65,7 +74,13 @@ pub struct CodegenFunctionResult {
 /// TACKY プログラムをアセンブリ AST に変換する。
 ///
 /// Chapter 20: 各関数の var_types も返す（レジスタ割り当てで使用）。
-pub fn generate(program: &TackyProgram) -> Result<(Vec<CodegenFunctionResult>, Vec<AsmStaticVar>, Vec<AsmStaticConstant>)> {
+pub fn generate(
+    program: &TackyProgram,
+) -> Result<(
+    Vec<CodegenFunctionResult>,
+    Vec<AsmStaticVar>,
+    Vec<AsmStaticConstant>,
+)> {
     let mut results = Vec::new();
 
     // 静的変数のセット（Pseudo にしない変数）
@@ -88,37 +103,46 @@ pub fn generate(program: &TackyProgram) -> Result<(Vec<CodegenFunctionResult>, V
     }
 
     for func in &program.functions {
-        results.push(generate_function(func, &static_vars_set, &mut double_constants)?);
+        results.push(generate_function(
+            func,
+            &static_vars_set,
+            &mut double_constants,
+        )?);
     }
 
     // 静的変数を AsmStaticVar に変換
-    let static_vars: Vec<AsmStaticVar> = program.static_vars.iter().map(|sv| {
-        let asm_type = if sv.var_type.is_struct() {
-            AsmType::Quadword
-        } else if sv.var_type.is_array() {
-            // 配列の asm_type は要素型を使用（初期値ディレクティブの選択に必要）
-            type_to_asm(sv.var_type.target_type().unwrap())
-        } else {
-            type_to_asm(&sv.var_type)
-        };
-        AsmStaticVar {
-            name: sv.name.clone(),
-            global: sv.global,
-            init: convert_static_init(&sv.init),
-            asm_type,
-        }
-    }).collect();
+    let static_vars: Vec<AsmStaticVar> = program
+        .static_vars
+        .iter()
+        .map(|sv| {
+            let asm_type = if sv.var_type.is_struct() {
+                AsmType::Quadword
+            } else if sv.var_type.is_array() {
+                // 配列の asm_type は要素型を使用（初期値ディレクティブの選択に必要）
+                type_to_asm(sv.var_type.target_type().unwrap())
+            } else {
+                type_to_asm(&sv.var_type)
+            };
+            AsmStaticVar {
+                name: sv.name.clone(),
+                global: sv.global,
+                init: convert_static_init(&sv.init),
+                asm_type,
+            }
+        })
+        .collect();
 
     // 静的定数を AsmStaticConstant に変換
-    let mut static_constants: Vec<AsmStaticConstant> = program.static_constants.iter()
+    let mut static_constants: Vec<AsmStaticConstant> = program
+        .static_constants
+        .iter()
         .filter(|sc| !matches!(sc.init, TackyStaticInit::DoubleInit(_)))
-        .map(|sc| {
-            AsmStaticConstant {
-                name: sc.name.clone(),
-                alignment: sc.alignment,
-                init: convert_static_init(&sc.init),
-            }
-        }).collect();
+        .map(|sc| AsmStaticConstant {
+            name: sc.name.clone(),
+            alignment: sc.alignment,
+            init: convert_static_init(&sc.init),
+        })
+        .collect();
 
     for (bits, (name, alignment)) in &double_constants {
         static_constants.push(AsmStaticConstant {
@@ -173,19 +197,20 @@ fn classify_parameters(params: &[(Type, String)]) -> ParamClassification {
                 locations.push((param_type.clone(), ParamLocation::Stack(offset as i32)));
                 stack_idx += 1;
             }
+        } else if int_idx < 6 {
+            locations.push((param_type.clone(), ParamLocation::IntReg(int_idx)));
+            int_idx += 1;
         } else {
-            if int_idx < 6 {
-                locations.push((param_type.clone(), ParamLocation::IntReg(int_idx)));
-                int_idx += 1;
-            } else {
-                let offset = 16 + stack_idx * 8;
-                locations.push((param_type.clone(), ParamLocation::Stack(offset as i32)));
-                stack_idx += 1;
-            }
+            let offset = 16 + stack_idx * 8;
+            locations.push((param_type.clone(), ParamLocation::Stack(offset as i32)));
+            stack_idx += 1;
         }
     }
 
-    ParamClassification { locations, stack_count: stack_idx }
+    ParamClassification {
+        locations,
+        stack_count: stack_idx,
+    }
 }
 
 /// Pseudo にしてはいけない変数を収集する（アドレス取得対象・構造体・配列）
@@ -194,7 +219,10 @@ fn collect_forced_stack_vars(func: &TackyFunction) -> HashSet<String> {
 
     for instr in &func.body {
         match instr {
-            TackyInstruction::GetAddress { src: TackyVal::Var(name), .. } => {
+            TackyInstruction::GetAddress {
+                src: TackyVal::Var(name),
+                ..
+            } => {
                 forced.insert(name.clone());
             }
             TackyInstruction::CopyToOffset { dst, .. } => {
@@ -238,7 +266,10 @@ fn generate_function(
             next_offset -= 16 + (next_offset % 16);
         }
         stack_vars.insert("__va_reg_save".to_string(), next_offset);
-        var_types.insert("__va_reg_save".to_string(), Type::Array(Box::new(Type::UChar), 176));
+        var_types.insert(
+            "__va_reg_save".to_string(),
+            Type::Array(Box::new(Type::UChar), 176),
+        );
     }
 
     // 1. 強制スタック変数を割り当て（パラメータ含む）
@@ -288,10 +319,14 @@ fn generate_function(
     }
 
     // 2. パラメータの処理（Pseudo or Stack）
-    let param_types_names: Vec<(Type, String)> = func.params.iter().map(|name| {
-        let ty = func.var_types.get(name).cloned().unwrap_or(Type::Int);
-        (ty, name.clone())
-    }).collect();
+    let param_types_names: Vec<(Type, String)> = func
+        .params
+        .iter()
+        .map(|name| {
+            let ty = func.var_types.get(name).cloned().unwrap_or(Type::Int);
+            (ty, name.clone())
+        })
+        .collect();
     let classification = classify_parameters(&param_types_names);
 
     for (i, param_name) in func.params.iter().enumerate() {
@@ -377,7 +412,15 @@ fn generate_function(
     // 3. TACKY 命令を変換
     let mut va_label_counter: usize = 0;
     for instr in &func.body {
-        generate_instruction(instr, static_vars, &stack_vars, &mut instructions, double_constants, &func.var_types, &mut va_label_counter)?;
+        generate_instruction(
+            instr,
+            static_vars,
+            &stack_vars,
+            &mut instructions,
+            double_constants,
+            &func.var_types,
+            &mut va_label_counter,
+        )?;
     }
 
     Ok(CodegenFunctionResult {
@@ -412,22 +455,18 @@ fn val_to_operand(
     stack_vars: &HashMap<String, i32>,
 ) -> Result<Operand> {
     match val {
-        TackyVal::Constant(c) => {
-            match c {
-                TackyConst::Int(v) => Ok(Operand::Imm(*v as i64)),
-                TackyConst::Long(v) => Ok(Operand::Imm(*v)),
-                TackyConst::UInt(v) => Ok(Operand::Imm(*v as i64)),
-                TackyConst::ULong(v) => Ok(Operand::Imm(*v as i64)),
-                TackyConst::Char(v) => Ok(Operand::Imm(*v as i64)),
-                TackyConst::UChar(v) => Ok(Operand::Imm(*v as i64)),
-                TackyConst::Double(_) => {
-                    Err(CompileError::CodegenError("double constant should be loaded from memory".to_string()))
-                }
-            }
-        }
-        TackyVal::Var(name) => {
-            Ok(resolve_var_operand(name, static_vars, stack_vars))
-        }
+        TackyVal::Constant(c) => match c {
+            TackyConst::Int(v) => Ok(Operand::Imm(*v as i64)),
+            TackyConst::Long(v) => Ok(Operand::Imm(*v)),
+            TackyConst::UInt(v) => Ok(Operand::Imm(*v as i64)),
+            TackyConst::ULong(v) => Ok(Operand::Imm(*v as i64)),
+            TackyConst::Char(v) => Ok(Operand::Imm(*v as i64)),
+            TackyConst::UChar(v) => Ok(Operand::Imm(*v as i64)),
+            TackyConst::Double(_) => Err(CompileError::CodegenError(
+                "double constant should be loaded from memory".to_string(),
+            )),
+        },
+        TackyVal::Var(name) => Ok(resolve_var_operand(name, static_vars, stack_vars)),
     }
 }
 
@@ -443,9 +482,7 @@ fn val_type(val: &TackyVal, var_types: &HashMap<String, Type>) -> Type {
             TackyConst::Char(_) => Type::Char,
             TackyConst::UChar(_) => Type::UChar,
         },
-        TackyVal::Var(name) => {
-            var_types.get(name).cloned().unwrap_or(Type::Int)
-        }
+        TackyVal::Var(name) => var_types.get(name).cloned().unwrap_or(Type::Int),
     }
 }
 
@@ -471,9 +508,7 @@ fn load_double_val(
             };
             Operand::Data(label)
         }
-        TackyVal::Var(name) => {
-            resolve_var_operand(name, static_vars, stack_vars)
-        }
+        TackyVal::Var(name) => resolve_var_operand(name, static_vars, stack_vars),
         _ => unreachable!("expected double val"),
     }
 }
@@ -494,7 +529,14 @@ fn generate_instruction(
         TackyInstruction::Return(val) => {
             let ty = val_type(val, var_types);
             if ty.is_double() {
-                let src = load_double_val(val, static_vars, stack_vars, instrs, double_constants, &mut const_counter);
+                let src = load_double_val(
+                    val,
+                    static_vars,
+                    stack_vars,
+                    instrs,
+                    double_constants,
+                    &mut const_counter,
+                );
                 instrs.push(Instruction::Mov {
                     asm_type: AsmType::Double,
                     src,
@@ -519,7 +561,14 @@ fn generate_instruction(
         TackyInstruction::Copy { src, dst } => {
             let dst_type = val_type(dst, var_types);
             if dst_type.is_double() {
-                let src_op = load_double_val(src, static_vars, stack_vars, instrs, double_constants, &mut const_counter);
+                let src_op = load_double_val(
+                    src,
+                    static_vars,
+                    stack_vars,
+                    instrs,
+                    double_constants,
+                    &mut const_counter,
+                );
                 let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
                 // Chapter 20: direct mov (fixup will handle if both are memory)
                 instrs.push(Instruction::Mov {
@@ -546,7 +595,14 @@ fn generate_instruction(
             match op {
                 TackyUnaryOp::Negate => {
                     if dst_type.is_double() {
-                        let src_op = load_double_val(src, static_vars, stack_vars, instrs, double_constants, &mut const_counter);
+                        let src_op = load_double_val(
+                            src,
+                            static_vars,
+                            stack_vars,
+                            instrs,
+                            double_constants,
+                            &mut const_counter,
+                        );
                         let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
                         instrs.push(Instruction::Mov {
                             asm_type: AsmType::Double,
@@ -554,7 +610,12 @@ fn generate_instruction(
                             dst: Operand::Register(Reg::XMM0),
                         });
                         let neg_zero_bits = 0x8000000000000000u64;
-                        let neg_label = get_or_add_double_constant(neg_zero_bits, 16, double_constants, &mut const_counter);
+                        let neg_label = get_or_add_double_constant(
+                            neg_zero_bits,
+                            16,
+                            double_constants,
+                            &mut const_counter,
+                        );
                         instrs.push(Instruction::Binary {
                             asm_type: AsmType::Double,
                             op: AsmBinaryOp::Xor,
@@ -602,7 +663,14 @@ fn generate_instruction(
                 TackyUnaryOp::Not => {
                     let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
                     if src_type.is_double() {
-                        let src_op = load_double_val(src, static_vars, stack_vars, instrs, double_constants, &mut const_counter);
+                        let src_op = load_double_val(
+                            src,
+                            static_vars,
+                            stack_vars,
+                            instrs,
+                            double_constants,
+                            &mut const_counter,
+                        );
                         instrs.push(Instruction::Mov {
                             asm_type: AsmType::Double,
                             src: src_op,
@@ -642,8 +710,24 @@ fn generate_instruction(
             }
         }
 
-        TackyInstruction::Binary { op, left, right, dst } => {
-            generate_binary_instruction(*op, left, right, dst, static_vars, stack_vars, instrs, double_constants, &mut const_counter, var_types)?;
+        TackyInstruction::Binary {
+            op,
+            left,
+            right,
+            dst,
+        } => {
+            generate_binary_instruction(
+                *op,
+                left,
+                right,
+                dst,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+                var_types,
+            )?;
         }
 
         TackyInstruction::Jump(label) => {
@@ -679,8 +763,26 @@ fn generate_instruction(
             instrs.push(Instruction::Label(label.clone()));
         }
 
-        TackyInstruction::FunCall { name, args, dst, dst_type, is_variadic } => {
-            generate_function_call(name, args, dst, dst_type, *is_variadic, static_vars, stack_vars, instrs, double_constants, &mut const_counter, var_types)?;
+        TackyInstruction::FunCall {
+            name,
+            args,
+            dst,
+            dst_type,
+            is_variadic,
+        } => {
+            generate_function_call(
+                name,
+                args,
+                dst,
+                dst_type,
+                *is_variadic,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+                var_types,
+            )?;
         }
 
         TackyInstruction::SignExtend { src, dst } => {
@@ -750,7 +852,14 @@ fn generate_instruction(
 
         TackyInstruction::DoubleToInt { src, dst } => {
             let dst_type = val_type(dst, var_types);
-            let src_op = load_double_val(src, static_vars, stack_vars, instrs, double_constants, &mut const_counter);
+            let src_op = load_double_val(
+                src,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+            );
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
 
             instrs.push(Instruction::Cvttsd2si {
@@ -768,7 +877,9 @@ fn generate_instruction(
             let large_label = format!(".Lul2d_large{}", const_counter);
             let end_label = format!(".Lul2d_end{}", const_counter);
             #[allow(unused_assignments)]
-            { const_counter += 1; }
+            {
+                const_counter += 1;
+            }
 
             instrs.push(Instruction::Mov {
                 asm_type: AsmType::Quadword,
@@ -829,7 +940,14 @@ fn generate_instruction(
 
         TackyInstruction::DoubleToUInt { src, dst } => {
             // double → unsigned long: conditional algorithm
-            let src_op = load_double_val(src, static_vars, stack_vars, instrs, double_constants, &mut const_counter);
+            let src_op = load_double_val(
+                src,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+            );
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
 
             let out_of_range_label = format!(".Ld2ul_oor{}", const_counter);
@@ -837,7 +955,10 @@ fn generate_instruction(
             const_counter += 1;
 
             let bound_label = get_or_add_double_constant(
-                9223372036854775808.0f64.to_bits(), 8, double_constants, &mut const_counter
+                9223372036854775808.0f64.to_bits(),
+                8,
+                double_constants,
+                &mut const_counter,
             );
 
             instrs.push(Instruction::Mov {
@@ -941,7 +1062,14 @@ fn generate_instruction(
             });
 
             if src_type.is_double() {
-                let src_op = load_double_val(src, static_vars, stack_vars, instrs, double_constants, &mut const_counter);
+                let src_op = load_double_val(
+                    src,
+                    static_vars,
+                    stack_vars,
+                    instrs,
+                    double_constants,
+                    &mut const_counter,
+                );
                 instrs.push(Instruction::Mov {
                     asm_type: AsmType::Double,
                     src: src_op,
@@ -968,7 +1096,12 @@ fn generate_instruction(
             }
         }
 
-        TackyInstruction::AddPtr { ptr, index, scale, dst } => {
+        TackyInstruction::AddPtr {
+            ptr,
+            index,
+            scale,
+            dst,
+        } => {
             let ptr_op = val_to_operand(ptr, static_vars, stack_vars)?;
             let idx_op = val_to_operand(index, static_vars, stack_vars)?;
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
@@ -1009,7 +1142,14 @@ fn generate_instruction(
             });
 
             if src_type.is_double() {
-                let src_op = load_double_val(src, static_vars, stack_vars, instrs, double_constants, &mut const_counter);
+                let src_op = load_double_val(
+                    src,
+                    static_vars,
+                    stack_vars,
+                    instrs,
+                    double_constants,
+                    &mut const_counter,
+                );
                 instrs.push(Instruction::Mov {
                     asm_type: AsmType::Double,
                     src: src_op,
@@ -1062,9 +1202,15 @@ fn generate_instruction(
             }
         }
 
-        TackyInstruction::JumpIndirect { target, possible_targets } => {
+        TackyInstruction::JumpIndirect {
+            target,
+            possible_targets,
+        } => {
             let target_op = val_to_operand(target, static_vars, stack_vars)?;
-            instrs.push(Instruction::JmpIndirect(target_op, possible_targets.clone()));
+            instrs.push(Instruction::JmpIndirect(
+                target_op,
+                possible_targets.clone(),
+            ));
         }
 
         TackyInstruction::CopyStruct { src, dst, size } => {
@@ -1141,8 +1287,15 @@ fn generate_instruction(
             }
         }
 
-        TackyInstruction::VaStart { ap, gp_offset_init, fp_offset_init } => {
-            let ap_name = match ap { TackyVal::Var(n) => n.as_str(), _ => unreachable!() };
+        TackyInstruction::VaStart {
+            ap,
+            gp_offset_init,
+            fp_offset_init,
+        } => {
+            let ap_name = match ap {
+                TackyVal::Var(n) => n.as_str(),
+                _ => unreachable!(),
+            };
             let ap_offset = *stack_vars.get(ap_name).expect("va_list must be on stack");
 
             // gp_offset (offset 0, 4 bytes)
@@ -1172,7 +1325,9 @@ fn generate_instruction(
             });
 
             // reg_save_area (offset 16, 8 bytes) = &__va_reg_save
-            let reg_save_offset = *stack_vars.get("__va_reg_save").expect("__va_reg_save must be on stack");
+            let reg_save_offset = *stack_vars
+                .get("__va_reg_save")
+                .expect("__va_reg_save must be on stack");
             instrs.push(Instruction::Lea {
                 src: Operand::Stack(reg_save_offset),
                 dst: Operand::Register(Reg::R10),
@@ -1185,15 +1340,18 @@ fn generate_instruction(
         }
 
         TackyInstruction::VaArg { ap, dst, arg_type } => {
-            let ap_name = match ap { TackyVal::Var(n) => n.as_str(), _ => unreachable!() };
+            let ap_name = match ap {
+                TackyVal::Var(n) => n.as_str(),
+                _ => unreachable!(),
+            };
             let ap_offset = *stack_vars.get(ap_name).expect("va_list must be on stack");
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
 
             let is_fp = arg_type.is_double();
             let (offset_field, limit, step): (i32, i64, i64) = if is_fp {
-                (4, 176, 16)  // fp_offset field
+                (4, 176, 16) // fp_offset field
             } else {
-                (0, 48, 8)    // gp_offset field
+                (0, 48, 8) // gp_offset field
             };
 
             let reg_label = format!(".Lva_reg_{}", *va_label_counter);
@@ -1338,6 +1496,7 @@ fn get_or_add_double_constant(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_binary_instruction(
     op: TackyBinaryOp,
     left: &TackyVal,
@@ -1355,10 +1514,26 @@ fn generate_binary_instruction(
     let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
 
     match op {
-        TackyBinaryOp::AddDouble | TackyBinaryOp::SubDouble
-        | TackyBinaryOp::MulDouble | TackyBinaryOp::DivDouble => {
-            let left_op = load_double_val(left, static_vars, stack_vars, instrs, double_constants, const_counter);
-            let right_op = load_double_val(right, static_vars, stack_vars, instrs, double_constants, const_counter);
+        TackyBinaryOp::AddDouble
+        | TackyBinaryOp::SubDouble
+        | TackyBinaryOp::MulDouble
+        | TackyBinaryOp::DivDouble => {
+            let left_op = load_double_val(
+                left,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                const_counter,
+            );
+            let right_op = load_double_val(
+                right,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                const_counter,
+            );
             let asm_op = match op {
                 TackyBinaryOp::AddDouble => AsmBinaryOp::Add,
                 TackyBinaryOp::SubDouble => AsmBinaryOp::Sub,
@@ -1380,15 +1555,32 @@ fn generate_binary_instruction(
             });
         }
 
-        TackyBinaryOp::Equal | TackyBinaryOp::NotEqual
-        | TackyBinaryOp::LessThan | TackyBinaryOp::LessOrEqual
-        | TackyBinaryOp::GreaterThan | TackyBinaryOp::GreaterOrEqual => {
+        TackyBinaryOp::Equal
+        | TackyBinaryOp::NotEqual
+        | TackyBinaryOp::LessThan
+        | TackyBinaryOp::LessOrEqual
+        | TackyBinaryOp::GreaterThan
+        | TackyBinaryOp::GreaterOrEqual => {
             let is_double = left_type.is_double();
             let is_unsigned = left_type.is_unsigned() || left_type.is_pointer();
 
             if is_double {
-                let left_op = load_double_val(left, static_vars, stack_vars, instrs, double_constants, const_counter);
-                let right_op = load_double_val(right, static_vars, stack_vars, instrs, double_constants, const_counter);
+                let left_op = load_double_val(
+                    left,
+                    static_vars,
+                    stack_vars,
+                    instrs,
+                    double_constants,
+                    const_counter,
+                );
+                let right_op = load_double_val(
+                    right,
+                    static_vars,
+                    stack_vars,
+                    instrs,
+                    double_constants,
+                    const_counter,
+                );
                 // comisd needs register operands for both, keep using XMM regs
                 instrs.push(Instruction::Mov {
                     asm_type: AsmType::Double,
@@ -1463,7 +1655,11 @@ fn generate_binary_instruction(
                 _ => unreachable!(),
             };
             // Chapter 20: Mov left→dst; Binary right,dst
-            instrs.push(Instruction::Mov { asm_type, src: left_op, dst: dst_op.clone() });
+            instrs.push(Instruction::Mov {
+                asm_type,
+                src: left_op,
+                dst: dst_op.clone(),
+            });
             instrs.push(Instruction::Binary {
                 asm_type,
                 op: asm_op,
@@ -1478,7 +1674,11 @@ fn generate_binary_instruction(
             let right_op = val_to_operand(right, static_vars, stack_vars)?;
 
             // Division must use hardcoded AX/DX
-            instrs.push(Instruction::Mov { asm_type, src: left_op, dst: Operand::Register(Reg::AX) });
+            instrs.push(Instruction::Mov {
+                asm_type,
+                src: left_op,
+                dst: Operand::Register(Reg::AX),
+            });
 
             if dst_type.is_unsigned() {
                 instrs.push(Instruction::Mov {
@@ -1486,10 +1686,16 @@ fn generate_binary_instruction(
                     src: Operand::Imm(0),
                     dst: Operand::Register(Reg::DX),
                 });
-                instrs.push(Instruction::Div { asm_type, operand: right_op });
+                instrs.push(Instruction::Div {
+                    asm_type,
+                    operand: right_op,
+                });
             } else {
                 instrs.push(Instruction::SignExtend(asm_type));
-                instrs.push(Instruction::Idiv { asm_type, operand: right_op });
+                instrs.push(Instruction::Idiv {
+                    asm_type,
+                    operand: right_op,
+                });
             }
 
             let result_reg = if matches!(op, TackyBinaryOp::Remainder) {
@@ -1497,13 +1703,18 @@ fn generate_binary_instruction(
             } else {
                 Reg::AX
             };
-            instrs.push(Instruction::Mov { asm_type, src: Operand::Register(result_reg), dst: dst_op });
+            instrs.push(Instruction::Mov {
+                asm_type,
+                src: Operand::Register(result_reg),
+                dst: dst_op,
+            });
         }
     }
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_function_call(
     name: &str,
     args: &[TackyVal],
@@ -1518,13 +1729,14 @@ fn generate_function_call(
     var_types: &HashMap<String, Type>,
 ) -> Result<()> {
     let arg_types: Vec<Type> = args.iter().map(|a| val_type(a, var_types)).collect();
-    let typed_params: Vec<(Type, String)> = arg_types.iter()
+    let typed_params: Vec<(Type, String)> = arg_types
+        .iter()
         .map(|t| (t.clone(), String::new()))
         .collect();
     let call_class = classify_parameters(&typed_params);
 
     let stack_count = call_class.stack_count;
-    let padding = if stack_count % 2 != 0 { 8 } else { 0 };
+    let padding = if !stack_count.is_multiple_of(2) { 8 } else { 0 };
 
     if padding > 0 {
         instrs.push(Instruction::AllocateStack(padding));
@@ -1544,7 +1756,14 @@ fn generate_function_call(
     // Push stack args in reverse order
     for &i in stack_arg_indices.iter().rev() {
         if arg_types[i].is_double() {
-            let src = load_double_val(&args[i], static_vars, stack_vars, instrs, double_constants, const_counter);
+            let src = load_double_val(
+                &args[i],
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                const_counter,
+            );
             instrs.push(Instruction::Mov {
                 asm_type: AsmType::Double,
                 src,
@@ -1580,7 +1799,14 @@ fn generate_function_call(
     // XMM register args
     if xmm_reg_args.len() == 1 {
         let (arg_idx, reg_idx) = xmm_reg_args[0];
-        let src = load_double_val(&args[arg_idx], static_vars, stack_vars, instrs, double_constants, const_counter);
+        let src = load_double_val(
+            &args[arg_idx],
+            static_vars,
+            stack_vars,
+            instrs,
+            double_constants,
+            const_counter,
+        );
         instrs.push(Instruction::Mov {
             asm_type: AsmType::Double,
             src,
@@ -1595,7 +1821,14 @@ fn generate_function_call(
         }
     } else if xmm_reg_args.len() > 1 {
         for &(arg_idx, _) in xmm_reg_args.iter().rev() {
-            let src = load_double_val(&args[arg_idx], static_vars, stack_vars, instrs, double_constants, const_counter);
+            let src = load_double_val(
+                &args[arg_idx],
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                const_counter,
+            );
             instrs.push(Instruction::Mov {
                 asm_type: AsmType::Double,
                 src,
@@ -1604,7 +1837,9 @@ fn generate_function_call(
             instrs.push(Instruction::Push(Operand::Register(Reg::XMM0)));
         }
         for &(_, reg_idx) in &xmm_reg_args {
-            instrs.push(Instruction::Pop(Operand::Register(XMM_ARG_REGISTERS[reg_idx])));
+            instrs.push(Instruction::Pop(Operand::Register(
+                XMM_ARG_REGISTERS[reg_idx],
+            )));
         }
     }
 

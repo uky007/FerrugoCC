@@ -46,11 +46,11 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             continue;
         }
 
-        if let Some(label) = trimmed.strip_suffix(':') {
-            if symbols.contains(label) {
-                result.push(format!("_{label}:"));
-                continue;
-            }
+        if let Some(label) = trimmed.strip_suffix(':')
+            && symbols.contains(label)
+        {
+            result.push(format!("_{label}:"));
+            continue;
         }
 
         if trimmed.starts_with("call ") {
@@ -61,20 +61,21 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             }
         }
 
-        if trimmed.starts_with("leaq ") {
-            if let Some(rip_pos) = trimmed.find("(%rip)") {
-                let after_leaq = &trimmed[5..rip_pos];
-                if symbols.contains(after_leaq) {
-                    let suffix = &trimmed[rip_pos..];
-                    result.push(format!("    leaq _{after_leaq}{suffix}"));
-                    continue;
-                }
+        if trimmed.starts_with("leaq ")
+            && let Some(rip_pos) = trimmed.find("(%rip)")
+        {
+            let after_leaq = &trimmed[5..rip_pos];
+            if symbols.contains(after_leaq) {
+                let suffix = &trimmed[rip_pos..];
+                result.push(format!("    leaq _{after_leaq}{suffix}"));
+                continue;
             }
         }
 
         if let Some(rip_pos) = trimmed.find("(%rip)") {
             let before_rip = &trimmed[..rip_pos];
-            let sym_start = before_rip.rfind(|c: char| c == ' ' || c == ',' || c == '\t')
+            let sym_start = before_rip
+                .rfind([' ', ',', '\t'])
                 .map(|i| i + 1)
                 .unwrap_or(0);
             let sym_name = &before_rip[sym_start..];
@@ -167,7 +168,9 @@ fn compile_and_run(source: &str) -> i32 {
 /// 基本: typedef int myint; myint x = 42; return x; → 42
 #[test]
 fn typedef_basic_int() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 typedef int myint;
 int main(void) {
@@ -181,7 +184,9 @@ int main(void) {
 /// ポインタ: typedef int *pint; int x = 10; pint p = &x; return *p; → 10
 #[test]
 fn typedef_pointer() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 typedef int *pint;
 int main(void) {
@@ -196,7 +201,9 @@ int main(void) {
 /// 構造体: typedef struct { int x; int y; } Point; → 7
 #[test]
 fn typedef_struct() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 typedef struct point { int x; int y; } Point;
 int main(void) {
@@ -212,7 +219,9 @@ int main(void) {
 /// 関数パラメータ: typedef long mylong; → 42
 #[test]
 fn typedef_function_param() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 typedef long mylong;
 mylong add(mylong a, mylong b) {
@@ -228,7 +237,9 @@ int main(void) {
 /// 配列: typedef int arr3[3]; → 6
 #[test]
 fn typedef_array() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 typedef int arr3[3];
 int main(void) {
@@ -242,7 +253,9 @@ int main(void) {
 /// ネスト: typedef int *pint; typedef pint *ppint; → 5
 #[test]
 fn typedef_nested() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 typedef int *pint;
 typedef pint *ppint;
@@ -259,7 +272,9 @@ int main(void) {
 /// unsigned: typedef unsigned long usize_t; → 1
 #[test]
 fn typedef_unsigned() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 typedef unsigned long usize_t;
 int main(void) {
@@ -273,7 +288,9 @@ int main(void) {
 /// グローバル typedef 変数: typedef int myint; myint g = 30; → 30
 #[test]
 fn typedef_global_var() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 typedef int myint;
 myint g = 30;
@@ -287,7 +304,9 @@ int main(void) {
 /// ブロック内 typedef: → 99
 #[test]
 fn typedef_block_scope() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     typedef int myint;

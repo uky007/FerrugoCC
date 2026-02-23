@@ -67,6 +67,7 @@ pub enum AsmType {
 
 /// 静的変数/定数の初期値（Chapter 13, 15, 16）。
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 pub enum StaticInit {
     /// 整数初期値
     IntInit(i64),
@@ -126,19 +127,39 @@ pub struct AsmStaticVar {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     /// `movl`/`movq` — 値の転送
-    Mov { asm_type: AsmType, src: Operand, dst: Operand },
+    Mov {
+        asm_type: AsmType,
+        src: Operand,
+        dst: Operand,
+    },
 
     /// 単項演算命令（neg/not）
-    Unary { asm_type: AsmType, op: AsmUnaryOp, operand: Operand },
+    Unary {
+        asm_type: AsmType,
+        op: AsmUnaryOp,
+        operand: Operand,
+    },
 
     /// `cmpl`/`cmpq` — 比較命令
-    Cmp { asm_type: AsmType, src: Operand, dst: Operand },
+    Cmp {
+        asm_type: AsmType,
+        src: Operand,
+        dst: Operand,
+    },
 
     /// `setCC dst` — 条件付きバイト設定
-    SetCC { condition: CondCode, operand: Operand },
+    SetCC {
+        condition: CondCode,
+        operand: Operand,
+    },
 
     /// 二項演算命令（add/sub/imul）
-    Binary { asm_type: AsmType, op: AsmBinaryOp, src: Operand, dst: Operand },
+    Binary {
+        asm_type: AsmType,
+        op: AsmBinaryOp,
+        src: Operand,
+        dst: Operand,
+    },
 
     /// `idivl`/`idivq` — 符号付き除算
     Idiv { asm_type: AsmType, operand: Operand },
@@ -153,14 +174,22 @@ pub enum Instruction {
     Movsx { src: Operand, dst: Operand },
 
     /// `movsbl`/`movsbq src, dst` — byte → int/long 符号拡張（Chapter 16）
-    MovsxByte { asm_type: AsmType, src: Operand, dst: Operand },
+    MovsxByte {
+        asm_type: AsmType,
+        src: Operand,
+        dst: Operand,
+    },
 
     /// `movl src, dst` — 32→64 ゼロ拡張（Chapter 12）
     /// x86-64 で32ビット mov は上位32ビットを自動ゼロクリアする。
     MovZeroExtend { src: Operand, dst: Operand },
 
     /// `movzbl`/`movzbq src, dst` — byte → int/long ゼロ拡張（Chapter 16）
-    MovZeroExtendByte { asm_type: AsmType, src: Operand, dst: Operand },
+    MovZeroExtendByte {
+        asm_type: AsmType,
+        src: Operand,
+        dst: Operand,
+    },
 
     /// `movl src, dst` — long → int 切り詰め（Chapter 11）
     /// 32ビット mov で上位32ビットを暗黙的にゼロクリア。
@@ -194,10 +223,18 @@ pub enum Instruction {
     Ret,
 
     /// `cvtsi2sd` — 整数→double 変換（Chapter 13）
-    Cvtsi2sd { asm_type: AsmType, src: Operand, dst: Operand },
+    Cvtsi2sd {
+        asm_type: AsmType,
+        src: Operand,
+        dst: Operand,
+    },
 
     /// `cvttsd2si` — double→整数 変換（切り捨て）（Chapter 13）
-    Cvttsd2si { asm_type: AsmType, src: Operand, dst: Operand },
+    Cvttsd2si {
+        asm_type: AsmType,
+        src: Operand,
+        dst: Operand,
+    },
 
     /// `leaq src, dst` — 実効アドレスのロード（Chapter 14）
     Lea { src: Operand, dst: Operand },
@@ -240,7 +277,12 @@ pub enum AsmBinaryOp {
 /// 条件コード
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CondCode {
-    E, NE, L, LE, G, GE,
+    E,
+    NE,
+    L,
+    LE,
+    G,
+    GE,
     /// `a` — 符号なし大なり（Chapter 12）
     A,
     /// `ae` — 符号なし大なりイコール（Chapter 12）
@@ -276,20 +318,55 @@ pub enum Operand {
 /// BX, R10-R15, SP, BP, XMM8-13 追加（レジスタ割り当て用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Reg {
-    AX, BX, CX, DX, DI, SI,
-    R8, R9, R10, R11,
-    R12, R13, R14, R15,
-    SP, BP,
+    AX,
+    BX,
+    CX,
+    DX,
+    DI,
+    SI,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    R13,
+    R14,
+    R15,
+    SP,
+    BP,
     /// XMM レジスタ（Chapter 13: SSE 浮動小数点演算）
-    XMM0, XMM1, XMM2, XMM3, XMM4, XMM5, XMM6, XMM7,
-    XMM8, XMM9, XMM10, XMM11, XMM12, XMM13,
-    XMM14, XMM15,
+    XMM0,
+    XMM1,
+    XMM2,
+    XMM3,
+    XMM4,
+    XMM5,
+    XMM6,
+    XMM7,
+    XMM8,
+    XMM9,
+    XMM10,
+    XMM11,
+    XMM12,
+    XMM13,
+    XMM14,
+    XMM15,
 }
 
 /// 整数レジスタ割り当て候補（12個）。R10/R11 は fixup 用 scratch として予約。
 pub const GP_ALLOCATABLE: [Reg; 12] = [
-    Reg::AX, Reg::BX, Reg::CX, Reg::DX, Reg::SI, Reg::DI,
-    Reg::R8, Reg::R9, Reg::R12, Reg::R13, Reg::R14, Reg::R15,
+    Reg::AX,
+    Reg::BX,
+    Reg::CX,
+    Reg::DX,
+    Reg::SI,
+    Reg::DI,
+    Reg::R8,
+    Reg::R9,
+    Reg::R12,
+    Reg::R13,
+    Reg::R14,
+    Reg::R15,
 ];
 
 /// Callee-saved 整数レジスタ（関数呼び出しをまたいで保存が必要）
@@ -297,22 +374,52 @@ pub const GP_CALLEE_SAVED: [Reg; 5] = [Reg::BX, Reg::R12, Reg::R13, Reg::R14, Re
 
 /// Caller-saved 整数レジスタ（Call 命令で破壊される）
 pub const GP_CALLER_SAVED: [Reg; 9] = [
-    Reg::AX, Reg::CX, Reg::DX, Reg::SI, Reg::DI,
-    Reg::R8, Reg::R9, Reg::R10, Reg::R11,
+    Reg::AX,
+    Reg::CX,
+    Reg::DX,
+    Reg::SI,
+    Reg::DI,
+    Reg::R8,
+    Reg::R9,
+    Reg::R10,
+    Reg::R11,
 ];
 
 /// XMM 割り当て候補（15個）。XMM15 は fixup 用 scratch として予約。
 pub const XMM_ALLOCATABLE: [Reg; 15] = [
-    Reg::XMM0, Reg::XMM1, Reg::XMM2, Reg::XMM3,
-    Reg::XMM4, Reg::XMM5, Reg::XMM6, Reg::XMM7,
-    Reg::XMM8, Reg::XMM9, Reg::XMM10, Reg::XMM11,
-    Reg::XMM12, Reg::XMM13, Reg::XMM14,
+    Reg::XMM0,
+    Reg::XMM1,
+    Reg::XMM2,
+    Reg::XMM3,
+    Reg::XMM4,
+    Reg::XMM5,
+    Reg::XMM6,
+    Reg::XMM7,
+    Reg::XMM8,
+    Reg::XMM9,
+    Reg::XMM10,
+    Reg::XMM11,
+    Reg::XMM12,
+    Reg::XMM13,
+    Reg::XMM14,
 ];
 
 /// 全 XMM レジスタ（Call 命令で破壊される caller-saved）
 pub const XMM_ALL: [Reg; 16] = [
-    Reg::XMM0, Reg::XMM1, Reg::XMM2, Reg::XMM3,
-    Reg::XMM4, Reg::XMM5, Reg::XMM6, Reg::XMM7,
-    Reg::XMM8, Reg::XMM9, Reg::XMM10, Reg::XMM11,
-    Reg::XMM12, Reg::XMM13, Reg::XMM14, Reg::XMM15,
+    Reg::XMM0,
+    Reg::XMM1,
+    Reg::XMM2,
+    Reg::XMM3,
+    Reg::XMM4,
+    Reg::XMM5,
+    Reg::XMM6,
+    Reg::XMM7,
+    Reg::XMM8,
+    Reg::XMM9,
+    Reg::XMM10,
+    Reg::XMM11,
+    Reg::XMM12,
+    Reg::XMM13,
+    Reg::XMM14,
+    Reg::XMM15,
 ];

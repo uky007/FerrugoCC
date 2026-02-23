@@ -46,11 +46,11 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             continue;
         }
 
-        if let Some(label) = trimmed.strip_suffix(':') {
-            if symbols.contains(label) {
-                result.push(format!("_{label}:"));
-                continue;
-            }
+        if let Some(label) = trimmed.strip_suffix(':')
+            && symbols.contains(label)
+        {
+            result.push(format!("_{label}:"));
+            continue;
         }
 
         // call 命令: ローカルラベル以外は全て _ プレフィックス
@@ -63,14 +63,14 @@ fn fixup_asm_for_macos(asm: &str) -> String {
         }
 
         // leaq 命令
-        if trimmed.starts_with("leaq ") {
-            if let Some(rip_pos) = trimmed.find("(%rip)") {
-                let after_leaq = &trimmed[5..rip_pos];
-                if symbols.contains(after_leaq) {
-                    let suffix = &trimmed[rip_pos..];
-                    result.push(format!("    leaq _{after_leaq}{suffix}"));
-                    continue;
-                }
+        if trimmed.starts_with("leaq ")
+            && let Some(rip_pos) = trimmed.find("(%rip)")
+        {
+            let after_leaq = &trimmed[5..rip_pos];
+            if symbols.contains(after_leaq) {
+                let suffix = &trimmed[rip_pos..];
+                result.push(format!("    leaq _{after_leaq}{suffix}"));
+                continue;
             }
         }
 
@@ -152,7 +152,9 @@ fn compile_and_run(source: &str) -> i32 {
 
 #[test]
 fn va_def_basic_int_sum() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int my_sum(int count, ...) {
     va_list ap;
@@ -176,7 +178,9 @@ int main(void) {
 
 #[test]
 fn va_def_long_args() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 long my_sum_long(int count, ...) {
     va_list ap;
@@ -201,7 +205,9 @@ int main(void) {
 
 #[test]
 fn va_def_double_args() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int check_double_sum(int count, ...) {
     va_list ap;
@@ -227,7 +233,9 @@ int main(void) {
 
 #[test]
 fn va_def_mixed_int_long() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 long mixed_sum(int count, ...) {
     va_list ap;
@@ -252,7 +260,9 @@ int main(void) {
 
 #[test]
 fn va_def_many_args_stack_overflow() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int sum_many(int count, ...) {
     va_list ap;
@@ -276,7 +286,9 @@ int main(void) {
 
 #[test]
 fn va_def_pointer_args() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int sum_ptrs(int count, ...) {
     va_list ap;
@@ -304,7 +316,9 @@ int main(void) {
 
 #[test]
 fn va_def_single_arg() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int get_first(int count, ...) {
     va_list ap;
