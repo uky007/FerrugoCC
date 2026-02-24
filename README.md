@@ -70,45 +70,113 @@ cargo test
 
 ## Benchmark Suite
 
-A benchmark suite for quantitative evaluation of obfuscation effectiveness.
-Compiles 10 C programs at Level 0 (normal) through Level 4 (maximum obfuscation),
-verifying correct execution results and comparing binary sizes.
+A benchmark suite of 20 C programs for quantitative evaluation of obfuscation effectiveness.
+
+### Quick Run (5 levels)
 
 ```bash
 bash benchmark/generate.sh
 ```
 
-Generates 50 binaries (10 programs x 5 levels) + 50 assembly files,
+Generates 100 binaries (20 programs x 5 levels) + 100 assembly files,
 with automatic correctness verification via exit codes and size aggregation.
+
+### Full Evaluation (11 conditions + metrics + plots)
+
+```bash
+bash scripts/eval/run_all.sh
+```
+
+Runs all 20 benchmarks under 11 conditions (L0-L4 + 6 ablation), collecting
+correctness, binary size, execution time, and reverse-engineering metrics.
+Generates CSV files and visualization plots in `results/YYYYMMDD/`.
+See [Evaluation Infrastructure](#evaluation-infrastructure) for details.
 
 ### Benchmark Programs
 
-| # | File | Description | Expected exit code |
-|---|------|-------------|:--:|
+| # | File | Category | Expected exit code |
+|---|------|----------|:--:|
 | 01 | `constant_return.c` | Constant return | 42 |
 | 02 | `arithmetic.c` | Arithmetic + type conversions | 30 |
 | 03 | `conditional.c` | if/else chains | 77 |
 | 04 | `loop_sum.c` | for loop summation | 55 |
-| 05 | `nested_loops.c` | Nested loops (bubble sort style) | 101 |
+| 05 | `nested_loops.c` | Nested loops (bubble sort) | 101 |
 | 06 | `function_calls.c` | Multiple functions + recursion | 120 |
 | 07 | `pointers.c` | Pointer arithmetic + arrays | 90 |
 | 08 | `strings.c` | String literal operations | 44 |
 | 09 | `structs.c` | Structs + pointers | 46 |
 | 10 | `mixed_complex.c` | Combined features | 37 |
-
-### Binary Sizes by Obfuscation Level
-
-```
-Level 0 (normal):       44,416 bytes  (1.0x)
-Level 1 (light):        46,024 bytes  (1.04x)
-Level 2 (standard):    118,240 bytes  (2.66x)
-Level 3 (full):        141,000 bytes  (3.17x)
-Level 4 (maximum):     797,936 bytes  (17.96x)
-```
+| 11 | `deep_recursion.c` | Fibonacci + mutual recursion | 89 |
+| 12 | `branch_heavy.c` | Multi-stage if-else chains | 63 |
+| 13 | `switch_table.c` | switch/case + enum | 55 |
+| 14 | `matrix_ops.c` | 3x3 matrix multiply + trace | 30 |
+| 15 | `linked_list.c` | Array-based linked list traversal | 15 |
+| 16 | `string_search.c` | Hand-written strstr + counting | 3 |
+| 17 | `bitwise_ops.c` | Hash, modular exponentiation, digit sum | 42 |
+| 18 | `multi_array.c` | Flattened 2D array transpose + sum | 45 |
+| 19 | `indirect_calls.c` | Switch-based function dispatch | 60 |
+| 20 | `struct_chain.c` | Nested structs + pointer access | 77 |
 
 Output: `benchmark/output/level_N/<name>` (binaries), `benchmark/output/level_N/<name>.s` (assembly)
 
 Intended for quantitative evaluation with deobfuscators (D-810, SATURN, etc.).
+
+## Evaluation Infrastructure
+
+`scripts/eval/` contains a complete evaluation pipeline for research papers.
+Designed for **x86_64 Linux**; requires Bash 4+, `gcc`, GNU `time`, `nm`, `strings`, Python 3 + matplotlib.
+See [docs/evaluation-method.md](docs/evaluation-method.md) for full methodology.
+
+### Scripts
+
+| Script | Purpose | Output |
+|--------|---------|--------|
+| `run_all.sh` | Main entry: build, compile all conditions, run sub-scripts, plot | `results/YYYYMMDD/` |
+| `collect_correctness.sh` | Run binaries, compare exit codes to expected | `correctness.csv` |
+| `measure_size.sh` | Collect binary sizes | `size.csv` |
+| `measure_perf.sh` | Wall-clock timing (N runs, default 10) | `performance.csv` |
+| `collect_reverse_metrics.sh` | nm symbols, strings, .globl/label/call counts | `reverse_metrics.csv` |
+| `plot.py` | Generate 4 figures from CSV data (matplotlib) | `fig_*.png` |
+
+### Evaluation Conditions (11)
+
+| Condition | Flags |
+|-----------|-------|
+| L0 | (no `--fobfuscate`) |
+| L1 | `--fobfuscate --obf-level=1` |
+| L2 | `--fobfuscate --obf-level=2` |
+| L3 | `--fobfuscate --obf-level=3` |
+| L4 | `--fobfuscate --obf-level=4` |
+| L3-no-cff | `--fobfuscate --obf-level=3 --obf-no-cff` |
+| L3-no-str | `--fobfuscate --obf-level=3 --obf-no-strings` |
+| L3-no-arith | `--fobfuscate --obf-level=3 --obf-no-arith-subst` |
+| L3-no-inl | `--fobfuscate --obf-level=3 --obf-no-func-inline` |
+| L3-no-outl | `--fobfuscate --obf-level=3 --obf-no-func-outline` |
+| L4-no-vm | `--fobfuscate --obf-level=4 --obf-no-vm-virtualize` |
+
+### Output Directory Structure
+
+```
+results/YYYYMMDD/
+  meta.json              # Environment info (OS, kernel, rustc, gcc, commit)
+  correctness.csv        # program,condition,expected,actual,pass
+  size.csv               # program,condition,size_bytes
+  performance.csv        # program,condition,run,time_sec
+  reverse_metrics.csv    # program,condition,nm_symbols,strings_count,...
+  binaries/{cond}/{prog} # Compiled binaries
+  assembly/{cond}/{prog}.s
+  fig_size_overhead.png
+  fig_perf_overhead.png
+  fig_reverse_metrics.png
+  fig_ablation.png
+```
+
+### Generated Figures
+
+1. **`fig_size_overhead.png`** — Binary size ratio vs L0 (L0-L4, grouped bar)
+2. **`fig_perf_overhead.png`** — Execution time ratio vs L0 (L0-L4, bar + error bars)
+3. **`fig_reverse_metrics.png`** — Symbols, strings, labels normalized to L0
+4. **`fig_ablation.png`** — Ablation: L3 vs L3-no-X (size + reverse metrics)
 
 ## Implementation Progress
 
@@ -901,7 +969,8 @@ ASM レベル（5パス）:
 
 ### ベンチマーク・評価
 
-- [x] **難読化ベンチマークスイート**: 10本のCプログラム × 5難読化レベル = 50バイナリの自動生成・検証
+- [x] **難読化ベンチマークスイート**: 20本のCプログラム × 5難読化レベル = 100バイナリの自動生成・検証
+- [x] **評価インフラ**: 11条件（L0-L4 + 6アブレーション）× 20ベンチの自動評価パイプライン（正しさ・サイズ・実行時間・逆解析指標・可視化）
 - [ ] **デオブフスケーター定量評価**: D-810, SATURN 等での復元成功率測定
 
 ### コード品質

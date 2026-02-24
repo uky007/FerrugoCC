@@ -4,3 +4,10 @@ test.c
 benchmark/output/
 demo_output/
 notes/
+results/
+.DS_Store
+
+# 作業用ハンドオフ文書（成果物ではない）
+docs/handoff-to-kuro.md
+docs/evaluation-workorder-for-kuro.md
+docs/regalloc-liveness-bug.md

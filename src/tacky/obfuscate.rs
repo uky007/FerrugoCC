@@ -2121,6 +2121,20 @@ fn build_outlined_function(
     let output_new = ctx.fresh_tmp();
     var_types.insert(output_new.clone(), output_type.clone());
 
+    // 出力変数が入力変数でもある場合の処理:
+    // rename で input_to_param が優先されると output_new が未定義になるため、
+    // output_name を input_to_param から除外し、関数本体先頭で
+    // Copy { param → output_new } を挿入して初期値を渡す。
+    let output_init_copy: Option<TackyInstruction> =
+        if let Some(param_for_output) = input_to_param.remove(output_name) {
+            Some(TackyInstruction::Copy {
+                src: TackyVal::Var(param_for_output),
+                dst: TackyVal::Var(output_new.clone()),
+            })
+        } else {
+            None
+        };
+
     // 命令のリネーム
     let rename = |val: &TackyVal| -> TackyVal {
         match val {
@@ -2140,6 +2154,10 @@ fn build_outlined_function(
     };
 
     let mut body: Vec<TackyInstruction> = Vec::new();
+    // 出力変数が入力でもある場合、パラメータから output_new への初期化コピーを挿入
+    if let Some(init_copy) = output_init_copy {
+        body.push(init_copy);
+    }
     for instr in block {
         let new_instr = match instr {
             TackyInstruction::Copy { src, dst } => TackyInstruction::Copy {

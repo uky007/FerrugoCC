@@ -8,3 +8,13 @@ pointers:90
 strings:44
 structs:46
 mixed_complex:37
+deep_recursion:89
+branch_heavy:63
+switch_table:55
+matrix_ops:30
+linked_list:15
+string_search:3
+bitwise_ops:42
+multi_array:45
+indirect_calls:60
+struct_chain:77

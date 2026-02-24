@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # benchmark/generate.sh — 難読化ベンチマーク自動生成
 #
-# 10 個の C プログラムを Level 0(通常) + Level 1〜4 でコンパイルし、
+# 20 個の C プログラムを Level 0(通常) + Level 1〜4 でコンパイルし、
 # 正しい exit code を検証してバイナリサイズを集計する。
 #
 # 出力: benchmark/output/level_N/{basename}    (バイナリ)
