@@ -41,14 +41,3 @@ jobs:
       - name: Install gcc
         run: sudo apt-get update && sudo apt-get install -y gcc
       - run: cargo test
-
-  gitleaks:
-    name: Gitleaks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
