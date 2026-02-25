@@ -1556,3 +1556,361 @@ fn test_opsec_strip_disabled() {
         "OPSEC strip disabled: .globl directives for renamed symbols should exist when strip is disabled"
     );
 }
+
+// === OPSEC Policy (fail-closed) テスト ===
+
+/// テストヘルパー: コンパイラを実行し（-S モード）、Output を返す（失敗も許容）
+fn run_compiler_raw(source: &str, extra_args: &[&str]) -> std::process::Output {
+    let dir = TempDir::new().unwrap();
+    let src_path = dir.path().join("test.c");
+
+    std::fs::write(&src_path, source).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrugocc"));
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.arg("-S").arg(&src_path);
+
+    cmd.output().expect("failed to run compiler")
+}
+
+/// テストヘルパー: フルコンパイル（リンクまで）して Output を返す（失敗も許容）
+fn run_compiler_full(source: &str, extra_args: &[&str]) -> std::process::Output {
+    let dir = TempDir::new().unwrap();
+    let src_path = dir.path().join("test.c");
+
+    std::fs::write(&src_path, source).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrugocc"));
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    // -S を付けない → フルコンパイル（リンクまで実行）
+    cmd.arg(&src_path);
+
+    cmd.output().expect("failed to run compiler")
+}
+
+#[test]
+fn test_opsec_policy_warn_allows_compilation() {
+    // warn ポリシーでは違反があってもコンパイルが成功する
+    let source = r#"
+        int printf(char *fmt, ...);
+        int main(void) {
+            printf("connect to 192.168.1.1\n");
+            return 0;
+        }
+    "#;
+    let output = run_compiler_raw(
+        source,
+        &["--fobfuscate", "--obf-level=2", "--opsec-policy=warn"],
+    );
+    assert!(
+        output.status.success(),
+        "OPSEC warn policy should allow compilation even with violations"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("OPSEC WARNING"),
+        "OPSEC warn policy should emit warnings: {stderr}"
+    );
+}
+
+#[test]
+fn test_opsec_policy_deny_fails_on_ip() {
+    // deny ポリシーでは IP アドレスが含まれるとコンパイル失敗
+    let source = r#"
+        int printf(char *fmt, ...);
+        int main(void) {
+            printf("server at 10.0.0.1 ready\n");
+            return 0;
+        }
+    "#;
+    let output = run_compiler_raw(
+        source,
+        &["--fobfuscate", "--obf-level=2", "--opsec-policy=deny"],
+    );
+    assert!(
+        !output.status.success(),
+        "OPSEC deny policy should fail compilation on IP address"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("OPSEC ERROR"),
+        "OPSEC deny should emit ERROR tag: {stderr}"
+    );
+}
+
+#[test]
+fn test_opsec_policy_deny_fails_on_sensitive_keyword() {
+    // deny ポリシーでは "password" が含まれるとコンパイル失敗
+    let source = r#"
+        int printf(char *fmt, ...);
+        int main(void) {
+            printf("enter password:\n");
+            return 0;
+        }
+    "#;
+    let output = run_compiler_raw(
+        source,
+        &["--fobfuscate", "--obf-level=2", "--opsec-policy=deny"],
+    );
+    assert!(
+        !output.status.success(),
+        "OPSEC deny policy should fail compilation on sensitive keyword 'password'"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("password"),
+        "OPSEC deny should report the sensitive keyword: {stderr}"
+    );
+}
+
+#[test]
+fn test_opsec_policy_deny_passes_clean_code() {
+    // deny ポリシーでも違反がなければコンパイル成功
+    let source = r#"
+        int main(void) {
+            return 42;
+        }
+    "#;
+    let output = run_compiler_raw(
+        source,
+        &["--fobfuscate", "--obf-level=2", "--opsec-policy=deny"],
+    );
+    assert!(
+        output.status.success(),
+        "OPSEC deny policy should pass clean code:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_opsec_policy_deny_disabled_by_no_warn() {
+    // --obf-no-opsec-warn が deny より優先される（警告自体が無効）
+    let source = r#"
+        int printf(char *fmt, ...);
+        int main(void) {
+            printf("connect to 192.168.1.1\n");
+            return 0;
+        }
+    "#;
+    let output = run_compiler_raw(
+        source,
+        &[
+            "--fobfuscate",
+            "--obf-level=2",
+            "--opsec-policy=deny",
+            "--obf-no-opsec-warn",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "OPSEC --obf-no-opsec-warn should override deny policy:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_opsec_policy_deny_multiple_violations() {
+    // 複数カテゴリの違反が全て報告される
+    let source = r#"
+        int printf(char *fmt, ...);
+        int main(void) {
+            printf("server 10.0.0.1\n");
+            printf("file at /home/user/.ssh/id_rsa\n");
+            printf("visit https://example.com\n");
+            printf("debug mode enabled\n");
+            printf("enter password:\n");
+            return 0;
+        }
+    "#;
+    let output = run_compiler_raw(
+        source,
+        &["--fobfuscate", "--obf-level=2", "--opsec-policy=deny"],
+    );
+    assert!(
+        !output.status.success(),
+        "OPSEC deny should fail on multiple violations"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // 全5カテゴリが報告されることを確認
+    assert!(stderr.contains("IP address"), "should report IP: {stderr}");
+    assert!(
+        stderr.contains("file path"),
+        "should report file path: {stderr}"
+    );
+    assert!(stderr.contains("URL"), "should report URL: {stderr}");
+    assert!(
+        stderr.contains("debug keyword"),
+        "should report debug keyword: {stderr}"
+    );
+    assert!(
+        stderr.contains("sensitive keyword"),
+        "should report sensitive keyword: {stderr}"
+    );
+}
+
+#[test]
+fn test_opsec_default_policy_is_warn() {
+    // --opsec-policy を省略した場合はデフォルト warn（後方互換）
+    let source = r#"
+        int printf(char *fmt, ...);
+        int main(void) {
+            printf("connect to 192.168.1.1\n");
+            return 0;
+        }
+    "#;
+    // --opsec-policy を指定しない
+    let output = run_compiler_raw(source, &["--fobfuscate", "--obf-level=2"]);
+    assert!(
+        output.status.success(),
+        "Default policy should be warn (compilation succeeds):\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("OPSEC WARNING"),
+        "Default policy should emit WARNING tag: {stderr}"
+    );
+}
+
+#[test]
+fn test_opsec_policy_invalid_value_rejected() {
+    // 不正なポリシー値は clap がエラーとしてリジェクトする
+    let source = r#"
+        int main(void) { return 0; }
+    "#;
+    let output = run_compiler_raw(
+        source,
+        &["--fobfuscate", "--obf-level=2", "--opsec-policy=deni"],
+    );
+    assert!(
+        !output.status.success(),
+        "Invalid --opsec-policy value should be rejected by clap"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invalid value") || stderr.contains("possible values"),
+        "clap should report invalid value: {stderr}"
+    );
+}
+
+#[test]
+fn test_obf_no_opsec_overrides_opsec_audit() {
+    // --obf-no-opsec は --opsec-audit より優先する
+    // -S モードで検証（TACKY IR レベルの opsec_warn + opsec_policy が無効化されることを確認）
+    let source = r#"
+        int printf(char *fmt, ...);
+        int main(void) {
+            printf("connect to 192.168.1.1\n");
+            return 0;
+        }
+    "#;
+    let output = run_compiler_raw(
+        source,
+        &[
+            "--fobfuscate",
+            "--obf-level=3",
+            "--obf-no-opsec",
+            "--opsec-audit",
+            "--opsec-policy=deny",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "--obf-no-opsec should override --opsec-audit and --opsec-policy=deny:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // -S では audit は実行されないが、opsec_warn + deny でも失敗しないことを確認
+    assert!(
+        !stderr.contains("OPSEC ERROR"),
+        "--obf-no-opsec should suppress OPSEC errors: {stderr}"
+    );
+}
+
+#[test]
+fn test_obf_no_opsec_overrides_opsec_audit_full_link() {
+    // --obf-no-opsec がフルコンパイル時にバイナリ監査も無効化する
+    // macOS ではフルコンパイル（driver.rs の gcc 直呼び）が macOS fixup を経由しないためスキップ
+    if cfg!(target_os = "macos") || !can_run_x86_64() {
+        eprintln!("skipping: full-link test not supported on this platform");
+        return;
+    }
+    let source = r#"
+        int main(void) {
+            return 42;
+        }
+    "#;
+    let output = run_compiler_full(
+        source,
+        &[
+            "--fobfuscate",
+            "--obf-level=3",
+            "--obf-no-opsec",
+            "--opsec-audit",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "--obf-no-opsec should override --opsec-audit in full compile:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("binary audit"),
+        "--obf-no-opsec should suppress binary audit: {stderr}"
+    );
+}
+
+#[test]
+fn test_opsec_audit_runs_on_full_compile() {
+    // --opsec-audit がフルコンパイル（リンク後）で実際に実行される
+    // macOS ではフルコンパイル（driver.rs の gcc 直呼び）が macOS fixup を経由しないためスキップ
+    if cfg!(target_os = "macos") || !can_run_x86_64() {
+        eprintln!("skipping: full-link test not supported on this platform");
+        return;
+    }
+    let source = r#"
+        int main(void) {
+            return 42;
+        }
+    "#;
+    let output = run_compiler_full(
+        source,
+        &[
+            "--fobfuscate",
+            "--obf-level=3",
+            "--opsec-audit",
+            "--opsec-policy=warn",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "Clean code with --opsec-audit should pass:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("binary audit passed") || stderr.contains("OPSEC"),
+        "Audit should produce output: {stderr}"
+    );
+}
+
+#[test]
+fn test_opsec_warn_utf8_no_panic() {
+    // マルチバイト UTF-8 文字列を含むソースで OPSEC 警告が panic しないことを確認
+    // FerrugoCC のレキサーは \x エスケープ未対応のため、UTF-8 バイトを直接ソースに埋め込む
+    let source = "int printf(char *fmt, ...);\nint main(void) {\n    printf(\"password: \u{3053}\u{308c}\u{306f}\u{9577}\u{3044}\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{6587}\u{5b57}\u{5217}\u{3067}\u{3059}\u{3002}\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{6587}\u{5b57}\u{5217}\u{306a}\u{306e}\u{3067}\u{5207}\u{308a}\u{8a70}\u{3081}\u{3089}\u{308c}\u{308b}\u{306f}\u{305a}\\n\");\n    return 0;\n}\n";
+    let output = run_compiler_raw(
+        source,
+        &["--fobfuscate", "--obf-level=2", "--opsec-policy=warn"],
+    );
+    assert!(
+        output.status.success(),
+        "UTF-8 strings should not cause panic:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

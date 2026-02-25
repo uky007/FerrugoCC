@@ -39,7 +39,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::tacky_ast::*;
-use crate::obfuscation::ObfuscationConfig;
+use crate::error::CompileError;
+use crate::obfuscation::{ObfuscationConfig, OpsecPolicy};
 use crate::parse::ast::Type;
 
 /// 難読化コンテキスト — temp 変数とラベルのカウンタを管理
@@ -91,7 +92,10 @@ impl ObfCtx {
 /// 7. Pass 16a: OPSEC 文字列リーク警告（暗号化前に検査）
 /// 8. Pass 6: 文字列暗号化（復号コードが CFF 等で破壊されるのを防ぐ）
 /// 9. Pass 16b: OPSEC シンボル難読化（全パスの最後）
-pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProgram {
+pub fn obfuscate(
+    program: TackyProgram,
+    config: &ObfuscationConfig,
+) -> crate::error::Result<TackyProgram> {
     let mut program = program;
 
     let mut ctx = ObfCtx::new();
@@ -173,8 +177,12 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
     }
 
     // Pass 16a: OPSEC 文字列リーク警告（暗号化前に検査）
-    if config.opsec_warn {
-        opsec_warn_strings(&program);
+    if config.opsec_warn
+        && let Err(count) = opsec_warn_strings(&program, config.opsec_policy)
+    {
+        return Err(CompileError::OpsecViolation(format!(
+            "{count} string violation(s) detected"
+        )));
     }
 
     // Pass 6: 文字列暗号化（他のパスの後に適用 — 復号コードが CFF 等で壊されるのを防ぐ）
@@ -187,7 +195,7 @@ pub fn obfuscate(program: TackyProgram, config: &ObfuscationConfig) -> TackyProg
         opsec_sanitize(&mut program, &mut ctx, config.opsec_strip);
     }
 
-    program
+    Ok(program)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -3834,17 +3842,27 @@ fn split_into_blocks(instrs: &[TackyInstruction]) -> Vec<Vec<TackyInstruction>> 
 /// - URL
 /// - デバッグ系キーワード
 /// - 資格情報関連キーワード
-fn opsec_warn_strings(program: &TackyProgram) {
+fn opsec_warn_strings(
+    program: &TackyProgram,
+    policy: OpsecPolicy,
+) -> std::result::Result<(), usize> {
+    let tag = match policy {
+        OpsecPolicy::Warn => "OPSEC WARNING",
+        OpsecPolicy::Deny => "OPSEC ERROR",
+    };
+
+    let mut violations: Vec<String> = Vec::new();
+
     for sc in &program.static_constants {
         if let TackyStaticInit::StringInit(content, _) = &sc.init {
             let lower = content.to_lowercase();
 
             // IP アドレスパターン（簡易マッチ: N.N.N.N）
             if contains_ip_pattern(content) {
-                eprintln!(
-                    "[OPSEC WARNING] String literal may contain IP address: \"{}\"",
+                violations.push(format!(
+                    "[{tag}] String literal may contain IP address: \"{}\"",
                     truncate_str(content, 60)
-                );
+                ));
             }
 
             // ファイルパス
@@ -3854,28 +3872,28 @@ fn opsec_warn_strings(program: &TackyProgram) {
                 || content.contains("C:\\")
                 || content.contains("\\\\")
             {
-                eprintln!(
-                    "[OPSEC WARNING] String literal may contain file path: \"{}\"",
+                violations.push(format!(
+                    "[{tag}] String literal may contain file path: \"{}\"",
                     truncate_str(content, 60)
-                );
+                ));
             }
 
             // URL
             if lower.contains("http://") || lower.contains("https://") || lower.contains("ftp://") {
-                eprintln!(
-                    "[OPSEC WARNING] String literal may contain URL: \"{}\"",
+                violations.push(format!(
+                    "[{tag}] String literal may contain URL: \"{}\"",
                     truncate_str(content, 60)
-                );
+                ));
             }
 
             // デバッグ系キーワード
             for keyword in &["debug", "todo", "fixme"] {
                 if lower.contains(keyword) {
-                    eprintln!(
-                        "[OPSEC WARNING] String literal contains debug keyword \"{}\": \"{}\"",
+                    violations.push(format!(
+                        "[{tag}] String literal contains debug keyword \"{}\": \"{}\"",
                         keyword,
                         truncate_str(content, 60)
-                    );
+                    ));
                     break;
                 }
             }
@@ -3890,15 +3908,26 @@ fn opsec_warn_strings(program: &TackyProgram) {
                 "credential",
             ] {
                 if lower.contains(keyword) {
-                    eprintln!(
-                        "[OPSEC WARNING] String literal contains sensitive keyword \"{}\": \"{}\"",
+                    violations.push(format!(
+                        "[{tag}] String literal contains sensitive keyword \"{}\": \"{}\"",
                         keyword,
                         truncate_str(content, 60)
-                    );
+                    ));
                     break;
                 }
             }
         }
+    }
+
+    // 一括出力
+    for v in &violations {
+        eprintln!("{v}");
+    }
+
+    if policy == OpsecPolicy::Deny && !violations.is_empty() {
+        Err(violations.len())
+    } else {
+        Ok(())
     }
 }
 
@@ -3946,12 +3975,13 @@ fn contains_ip_pattern(s: &str) -> bool {
     false
 }
 
-/// 文字列を最大 max_len 文字に切り詰める
+/// 文字列を最大 max_len 文字（char 単位）に切り詰める
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let truncated: String = s.chars().take(max_len).collect();
+        format!("{truncated}...")
     }
 }
 

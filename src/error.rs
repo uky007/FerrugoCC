@@ -45,6 +45,10 @@ pub enum CompileError {
     /// 外部ツール（gcc など）の呼び出しが失敗した場合
     #[error("External tool failed: {0}")]
     ExternalToolError(String),
+
+    /// OPSEC ポリシー違反（--opsec-policy=deny 時にコンパイルを中断）
+    #[error("OPSEC policy violation: {0}")]
+    OpsecViolation(String),
 }
 
 /// コンパイラ内部で統一的に使う `Result` 型エイリアス。

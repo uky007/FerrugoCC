@@ -24,7 +24,7 @@ use crate::codegen;
 use crate::emit;
 use crate::error::{CompileError, Result};
 use crate::lex;
-use crate::obfuscation::ObfuscationConfig;
+use crate::obfuscation::{ObfuscationConfig, OpsecPolicy};
 use crate::parse;
 use crate::tacky;
 use crate::typecheck;
@@ -83,7 +83,7 @@ pub fn run(source_path: &Path, stage: Stage, obf_config: Option<ObfuscationConfi
 
     // ── Stage 3.5: TACKY 最適化 or 難読化 ──
     let tacky_program = if let Some(ref config) = obf_config {
-        tacky::obfuscate(tacky_program, config)
+        tacky::obfuscate(tacky_program, config)?
     } else {
         tacky::optimize(tacky_program)
     };
@@ -136,5 +136,213 @@ pub fn run(source_path: &Path, stage: Stage, obf_config: Option<ObfuscationConfi
         }
     }
 
+    // OPSEC バイナリ監査（リンク後バイナリの文字列・シンボルをスキャン）
+    if let Some(config) = &obf_config
+        && config.opsec_audit
+    {
+        opsec_audit_binary(&output_path, config.opsec_policy)?;
+    }
+
     Ok(())
+}
+
+/// リンク後バイナリの OPSEC 監査
+///
+/// `strings` コマンドでバイナリ内の文字列をスキャンし、
+/// IP アドレス・ファイルパス・URL・デバッグキーワード・資格情報キーワードを検出する。
+/// `nm` コマンドで main/_ 以外のユーザー定義シンボルをフラグする（informational）。
+fn opsec_audit_binary(binary_path: &Path, policy: OpsecPolicy) -> Result<()> {
+    let tag = match policy {
+        OpsecPolicy::Warn => "OPSEC AUDIT WARNING",
+        OpsecPolicy::Deny => "OPSEC AUDIT ERROR",
+    };
+
+    let mut violations: Vec<String> = Vec::new();
+    let mut strings_ran = false;
+
+    // strings コマンドでバイナリ内の文字列をスキャン
+    if let Ok(output) = Command::new("strings").arg(binary_path).output()
+        && output.status.success()
+    {
+        strings_ran = true;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let lower = line.to_lowercase();
+
+            // IP アドレスパターン
+            if contains_ip_pattern(line) {
+                violations.push(format!(
+                    "[{tag}] Binary string may contain IP address: \"{}\"",
+                    truncate_str(line, 60)
+                ));
+            }
+
+            // ファイルパス
+            if line.contains("/home/")
+                || line.contains("/tmp/")
+                || line.contains("/etc/")
+                || line.contains("C:\\")
+                || line.contains("\\\\")
+            {
+                violations.push(format!(
+                    "[{tag}] Binary string may contain file path: \"{}\"",
+                    truncate_str(line, 60)
+                ));
+            }
+
+            // URL
+            if lower.contains("http://") || lower.contains("https://") || lower.contains("ftp://") {
+                violations.push(format!(
+                    "[{tag}] Binary string may contain URL: \"{}\"",
+                    truncate_str(line, 60)
+                ));
+            }
+
+            // デバッグ系キーワード
+            for keyword in &["debug", "todo", "fixme"] {
+                if lower.contains(keyword) {
+                    violations.push(format!(
+                        "[{tag}] Binary string contains debug keyword \"{keyword}\": \"{}\"",
+                        truncate_str(line, 60)
+                    ));
+                    break;
+                }
+            }
+
+            // 資格情報関連キーワード
+            for keyword in &[
+                "password",
+                "passwd",
+                "secret",
+                "api_key",
+                "token",
+                "credential",
+            ] {
+                if lower.contains(keyword) {
+                    violations.push(format!(
+                        "[{tag}] Binary string contains sensitive keyword \"{keyword}\": \"{}\"",
+                        truncate_str(line, 60)
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+    // strings が実行できなかった場合: deny ポリシーでは fail-closed
+    if !strings_ran {
+        if policy == OpsecPolicy::Deny {
+            return Err(CompileError::OpsecViolation(
+                "binary audit: 'strings' command not available (required for deny policy)"
+                    .to_string(),
+            ));
+        }
+        eprintln!("[OPSEC] warning: 'strings' command not available, binary audit skipped");
+        return Ok(());
+    }
+
+    // nm コマンドでユーザー定義シンボルをフラグ（informational）
+    // ツールチェイン由来の既知シンボルは除外
+    const TOOLCHAIN_SYMBOLS: &[&str] = &[
+        "deregister_tm_clones",
+        "register_tm_clones",
+        "frame_dummy",
+        "__do_global_dtors_aux",
+        "__libc_csu_init",
+        "__libc_csu_fini",
+        "__libc_start_main",
+        "_dl_relocate_static_pie",
+        "_fini",
+        "_init",
+        "_start",
+    ];
+    if let Ok(output) = Command::new("nm").arg(binary_path).output()
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            // nm 出力形式: "addr T symbol_name"
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 && (parts[1] == "T" || parts[1] == "t") {
+                let sym = parts[2];
+                // main, _ プレフィックス, . プレフィックス, ツールチェイン由来シンボルをスキップ
+                if sym != "main"
+                    && !sym.starts_with('_')
+                    && !sym.starts_with('.')
+                    && !TOOLCHAIN_SYMBOLS.contains(&sym)
+                {
+                    eprintln!("[OPSEC AUDIT INFO] User-defined symbol in binary: {sym}");
+                }
+            }
+        }
+    }
+    // nm が存在しない場合は黙ってスキップ（informational のみなので非致命的）
+
+    // 違反を一括出力
+    for v in &violations {
+        eprintln!("{v}");
+    }
+
+    if policy == OpsecPolicy::Deny && !violations.is_empty() {
+        return Err(CompileError::OpsecViolation(format!(
+            "binary audit: {} violation(s) detected",
+            violations.len()
+        )));
+    }
+
+    if violations.is_empty() {
+        eprintln!("[OPSEC] binary audit passed");
+    }
+
+    Ok(())
+}
+
+/// 文字列中に IP アドレスパターン（N.N.N.N）が含まれるか簡易判定
+fn contains_ip_pattern(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i].is_ascii_digit() {
+            let mut dots = 0;
+            let mut j = i;
+            let mut valid = true;
+            for _ in 0..4 {
+                if j >= len || !bytes[j].is_ascii_digit() {
+                    valid = false;
+                    break;
+                }
+                let start = j;
+                while j < len && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j - start > 3 {
+                    valid = false;
+                    break;
+                }
+                dots += 1;
+                if dots < 4 {
+                    if j >= len || bytes[j] != b'.' {
+                        valid = false;
+                        break;
+                    }
+                    j += 1;
+                }
+            }
+            if valid && dots == 4 {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// 文字列を最大 max_len 文字（char 単位）に切り詰める
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len).collect();
+        format!("{truncated}...")
+    }
 }

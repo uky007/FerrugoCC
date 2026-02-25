@@ -34,6 +34,8 @@
 //! ferrugocc --fobfuscate --obf-reg-shuffle-freq=3 <source.c> # シャッフル頻度変更
 //! ferrugocc --fobfuscate --obf-inline-freq=2 <source.c>  # インライン頻度変更
 //! ferrugocc --fobfuscate --obf-outline-min-block=3 <source.c> # アウトライン最小ブロック変更
+//! ferrugocc --fobfuscate --opsec-policy=deny <source.c>      # OPSEC 違反時コンパイル失敗
+//! ferrugocc --fobfuscate --opsec-audit <source.c>             # リンク後バイナリ監査
 //! ```
 
 mod codegen;
@@ -52,7 +54,7 @@ use std::process;
 use clap::Parser;
 
 use driver::Stage;
-use obfuscation::ObfuscationConfig;
+use obfuscation::{ObfuscationConfig, OpsecPolicy};
 
 /// FerrugoCC のコマンドライン引数定義。
 ///
@@ -161,6 +163,14 @@ struct Cli {
     #[arg(long = "obf-no-strip")]
     obf_no_strip: bool,
 
+    /// OPSEC ポリシー（warn=警告のみ, deny=コンパイル失敗）
+    #[arg(long = "opsec-policy", value_enum, default_value = "warn")]
+    opsec_policy: OpsecPolicy,
+
+    /// リンク後バイナリの OPSEC 監査を有効化
+    #[arg(long = "opsec-audit")]
+    opsec_audit: bool,
+
     /// 算術置換頻度（N回に1回適用、1以上）
     #[arg(long = "obf-arith-freq", value_parser = clap::value_parser!(u64).range(1..))]
     obf_arith_freq: Option<u64>,
@@ -254,10 +264,16 @@ fn main() {
         if cli.obf_no_lib_obfuscate {
             config.lib_obfuscate = false;
         }
+        // OPSEC ポリシー・監査の配線（--obf-no-opsec より先に適用）
+        config.opsec_policy = cli.opsec_policy;
+        config.opsec_audit = cli.opsec_audit;
+        // --obf-no-opsec は全 OPSEC 機能を無効化（上記の配線を上書き）
         if cli.obf_no_opsec {
             config.opsec = false;
             config.opsec_warn = false;
             config.opsec_strip = false;
+            config.opsec_audit = false;
+            config.opsec_policy = OpsecPolicy::Warn;
         }
         if cli.obf_no_opsec_warn {
             config.opsec_warn = false;

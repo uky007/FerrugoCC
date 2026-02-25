@@ -3,7 +3,17 @@
 //! 各難読化パスの有効/無効およびパラメータを管理する。
 //! `--fobfuscate` と `--obf-level=N` で制御する。
 //! 全16パス（TACKY IR 11パス + ASM 5パス）。
-//! Pass 16（OPSEC）はシンボルリネーム + 文字列リーク警告 + シンボル Strip の3段階。
+//! Pass 16（OPSEC）はシンボルリネーム + 文字列リーク検出 + シンボル Strip + バイナリ監査。
+//! `--opsec-policy=warn|deny` で違反時の動作を制御（deny = fail-closed）。
+
+/// OPSEC ポリシー: 違反時の動作を制御する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OpsecPolicy {
+    /// 警告のみ（コンパイルは続行）
+    Warn,
+    /// コンパイルを失敗させる（fail-closed）
+    Deny,
+}
 
 /// 難読化パスの設定。パイプライン全体で共有される。
 #[derive(Debug, Clone)]
@@ -45,6 +55,10 @@ pub struct ObfuscationConfig {
     pub opsec_warn: bool,
     /// OPSEC シンボル strip（.globl 抑制 + バイナリ strip）
     pub opsec_strip: bool,
+    /// OPSEC ポリシー（Warn=警告のみ, Deny=コンパイル失敗）
+    pub opsec_policy: OpsecPolicy,
+    /// リンク後バイナリの OPSEC 監査
+    pub opsec_audit: bool,
 
     // ── 頻度パラメータ ──
     /// ジャンクコード挿入頻度（N命令ごとに挿入）
@@ -108,6 +122,8 @@ impl ObfuscationConfig {
                 opsec: false,
                 opsec_warn: false,
                 opsec_strip: false,
+                opsec_policy: OpsecPolicy::Warn,
+                opsec_audit: false,
                 junk_freq: 8,
                 pred_freq: 10,
                 arith_freq: 3,
@@ -140,6 +156,8 @@ impl ObfuscationConfig {
                 opsec: false,
                 opsec_warn: true,
                 opsec_strip: false,
+                opsec_policy: OpsecPolicy::Warn,
+                opsec_audit: false,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 5,
@@ -172,6 +190,8 @@ impl ObfuscationConfig {
                 opsec: true,
                 opsec_warn: true,
                 opsec_strip: true,
+                opsec_policy: OpsecPolicy::Warn,
+                opsec_audit: false,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 3,
@@ -205,6 +225,8 @@ impl ObfuscationConfig {
                 opsec: true,
                 opsec_warn: true,
                 opsec_strip: true,
+                opsec_policy: OpsecPolicy::Warn,
+                opsec_audit: false,
                 junk_freq: 2,
                 pred_freq: 2,
                 arith_freq: 2,

@@ -43,6 +43,11 @@ cargo run -- --fobfuscate --obf-no-opsec source.c        # Disable OPSEC sanitiz
 cargo run -- --fobfuscate --obf-no-opsec-warn source.c   # Disable OPSEC string leak warnings
 cargo run -- --fobfuscate --obf-no-strip source.c        # Disable symbol strip (.globl suppression + binary strip)
 
+# OPSEC policy control (only "warn" and "deny" are accepted; invalid values are rejected)
+cargo run -- --fobfuscate --opsec-policy=warn source.c   # Warn on violations (default)
+cargo run -- --fobfuscate --opsec-policy=deny source.c   # Fail compilation on violations
+cargo run -- --fobfuscate --opsec-audit source.c         # Audit final binary with strings/nm
+
 # Frequency parameters
 cargo run -- --fobfuscate --obf-junk-freq=2 source.c          # Insert junk every 2 instructions
 cargo run -- --fobfuscate --obf-pred-freq=3 source.c           # Apply opaque predicate every 3rd
@@ -220,12 +225,14 @@ Consists of 11 TACKY IR-level passes and 5 ASM-level passes (16 total).
   ```
 - **Pass 6 -- String Encryption**: Encrypts string literals with additive cipher (key=0x5A) and stores as `ByteArrayInit` in `.data`.
   Inserts unrolled decryption code (Load -> Subtract(key) -> Store) at the beginning of main()
-- **Pass 16 -- OPSEC Sanitization**: Three-part operational security hardening applied as the final TACKY pass:
-  1. **String Leak Warnings**: Scans string literals for IP addresses, URLs, file paths, and hostnames, emitting `[OPSEC WARNING]` to stderr
+- **Pass 16 -- OPSEC Sanitization**: Operational security hardening applied as the final TACKY pass:
+  1. **String Leak Detection**: Scans string literals for IP addresses, URLs, file paths, debug keywords, and credential keywords.
+     `--opsec-policy=warn` (default) emits `[OPSEC WARNING]` to stderr; `--opsec-policy=deny` emits `[OPSEC ERROR]` and fails compilation
   2. **Symbol Renaming**: Renames all internal functions to `_f{N}`, global variables to `_v{N}`, and static constants to `_c{N}`.
      Preserves `main`, external functions (e.g. `printf`), and `.L` labels
   3. **Symbol Strip**: Suppresses `.globl` directives for all symbols except `main` (internal linkage), and runs `strip` on the final binary to remove the symbol table entirely.
-     `--obf-no-strip` to disable, `--obf-no-opsec` to disable all OPSEC features
+     `--obf-no-strip` to disable, `--obf-no-opsec` to disable all OPSEC features (including `--opsec-policy` and `--opsec-audit`)
+  4. **Binary Audit** (`--opsec-audit`): Post-link audit using `strings` and `nm` to scan the final binary for leaked IP addresses, URLs, file paths, debug keywords, and credential keywords. Also flags user-defined symbols visible via `nm` (toolchain-derived symbols like `frame_dummy` are filtered out). Respects `--opsec-policy` for fail/warn behavior. When `--opsec-policy=deny`, the `strings` command must be available or compilation fails (fail-closed). Only `"warn"` and `"deny"` are accepted as policy values; invalid values are rejected at argument parsing
 
 ### ASM Level (5 passes, applied after register allocation + fixup)
 
@@ -482,16 +489,23 @@ Chapter 20 では**グラフ彩色によるレジスタ割り当て**を実装�
 - **Pass 6 — 文字列暗号化**: 文字列リテラルを加算暗号化（key=0x5A）して `.data` に `ByteArrayInit` として配置。
   main() の先頭にアンロール復号コード（Load → Subtract(key) → Store）を挿入
   - Pass 6 は Pass 1〜5 の後に適用する。復号コードが CFF 等で破壊されるのを防ぐため
-- **Pass 16 — OPSEC 衛生化（OPSEC Sanitization）**: 全パスの最後に適用する3段階の運用セキュリティ強化:
-  1. **文字列リーク警告**: 文字列リテラル中の IP アドレス、URL、ファイルパス、ホスト名を検出し `[OPSEC WARNING]` を stderr に出力。
-     `--obf-no-opsec-warn` で無効化可能
+- **Pass 16 — OPSEC 衛生化（OPSEC Sanitization）**: 全パスの最後に適用する運用セキュリティ強化:
+  1. **文字列リーク検出**: 文字列リテラル中の IP アドレス、URL、ファイルパス、デバッグキーワード、資格情報キーワードを検出。
+     `--opsec-policy=warn`（デフォルト）で `[OPSEC WARNING]` を stderr に出力、`--opsec-policy=deny` で `[OPSEC ERROR]` を出力しコンパイルを失敗させる（fail-closed）。
+     `--obf-no-opsec-warn` で検出自体を無効化可能（deny ポリシーより優先）
   2. **シンボルリネーム**: 内部関数を `_f{N}`、グローバル変数を `_v{N}`、静的定数を `_c{N}` にリネーム。
      `main`、外部関数（`printf` 等）、`.L` ラベルは保持。`nm` や `strings` での関数名特定を防止
   3. **シンボル Strip**: `main` 以外の全関数・変数の `.globl` ディレクティブを抑制（internal linkage 化）し、
      フルコンパイル時に `strip` コマンドを自動実行してバイナリからシンボルテーブルを完全除去。
      `--obf-no-strip` で無効化可能（`strip` コマンドが未インストールでも警告のみでコンパイルは成功）
+  4. **バイナリ監査**（`--opsec-audit`）: リンク後のバイナリに対して `strings` と `nm` を実行し、
+     IP アドレス・URL・ファイルパス・デバッグキーワード・資格情報キーワードの漏洩を検出。
+     `nm` でユーザー定義シンボルの残存もフラグする（informational、`frame_dummy` 等のツールチェイン由来シンボルは除外）。
+     `--opsec-policy` に従い warn/deny を切り替え。`--opsec-policy=deny` 時に `strings` コマンドが未インストールの場合はコンパイル失敗（fail-closed）。
+     `warn` 時は `strings`/`nm` 未インストールでも警告のみでスキップ。
+     `--opsec-policy` には `warn` と `deny` のみ指定可能（不正値は引数パース時にリジェクト）
   - Level 3/4 でデフォルト有効、Level 1/2 ではリネーム無効（警告のみ Level 2 で有効）
-  - `--obf-no-opsec` で OPSEC 衛生化全体を無効化
+  - `--obf-no-opsec` で OPSEC 衛生化全体を無効化（`--opsec-policy` / `--opsec-audit` 含む全 OPSEC 機能を上書き）
 
 #### ASM レベル（5パス、レジスタ割り当て+fixup 後に適用）
 
@@ -866,7 +880,7 @@ TACKY IR レベル（11パス）:
 - [x] **文字列暗号化**
 - [x] **VM仮想化（VM-Based Code Virtualization）**
 - [x] **ライブラリ関数難読化（Library Function Obfuscation）**
-- [x] **OPSEC 衛生化（シンボルリネーム + 文字列リーク警告 + シンボル Strip）**
+- [x] **OPSEC 衛生化（シンボルリネーム + 文字列リーク警告 + シンボル Strip + fail-closed ポリシー + バイナリ監査）**
 
 ASM レベル（5パス）:
 - [x] **反逆アセンブリ（Anti-Disassembly）**
@@ -883,6 +897,7 @@ ASM レベル（5パス）:
 - [x] **難易度レベル制御（`--obf-level=1..4`）**
 - [x] **個別パス制御**: `--obf-no-cff`, `--obf-no-strings`, `--obf-no-vm-virtualize`, `--obf-no-opsec`, `--obf-no-strip` 等で各パスを個別に無効化
 - [x] **頻度パラメータ**: `--obf-junk-freq=N`, `--obf-pred-freq=N` 等で頻度を調整
+- [x] **OPSEC ポリシー制御**: `--opsec-policy=warn|deny` で違反時の動作を制御、`--opsec-audit` でリンク後バイナリの監査
 
 ### ベンチマーク・評価
 
