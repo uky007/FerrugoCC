@@ -789,9 +789,7 @@ fn merge_nodes(graph: &mut InterferenceGraph, from: &GraphNode, into: &GraphNode
             s.insert(into.clone());
         }
         // into の隣接リストに n を追加
-        if let Some(s) = graph.adj.get_mut(into) {
-            s.insert(n.clone());
-        }
+        graph.adj.entry(into.clone()).or_default().insert(n.clone());
     }
 
     // into の隣接リストから from を削除（self-loop 防止）
@@ -1861,5 +1859,99 @@ fn for_each_operand<F: FnMut(&Operand)>(instr: &Instruction, mut f: F) {
         | Instruction::Call(_)
         | Instruction::Ret
         | Instruction::RawBytes(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// merge_nodes で Pseudo を HardReg にマージしたとき、
+    /// 干渉グラフの隣接が対称 (adj[a]∋b ⇔ adj[b]∋a) を維持するか検証する。
+    ///
+    /// 再現シナリオ:
+    ///   - Pseudo("x") と HardReg(DI) の間に Mov 辺（干渉辺なし）
+    ///   - Pseudo("tmp") と Pseudo("x") の間に干渉辺あり
+    ///   - x を DI にマージ → DI-tmp 間に干渉辺が対称に転写されること
+    #[test]
+    fn merge_nodes_keeps_adjacency_symmetric() {
+        let mut graph = InterferenceGraph::new();
+
+        let di = GraphNode::HardReg(Reg::DI);
+        let x = GraphNode::Pseudo("x".into());
+        let tmp = GraphNode::Pseudo("tmp".into());
+
+        // ノード追加（Pseudo は add_node で初期化、HardReg は辺追加時のみ）
+        graph.add_node(x.clone());
+        graph.add_node(tmp.clone());
+        // DI には add_node しない — 実際のビルドと同じ状況
+
+        // 干渉辺: tmp ↔ x
+        graph.add_edge(&tmp, &x);
+
+        // 前提確認
+        assert!(graph.adj.get(&tmp).unwrap().contains(&x));
+        assert!(graph.adj.get(&x).unwrap().contains(&tmp));
+        assert!(graph.adj.get(&di).is_none(), "DI should have no adj entry before merge");
+
+        // x → DI にマージ
+        merge_nodes(&mut graph, &x, &di);
+
+        // マージ後: DI ↔ tmp が対称であること
+        assert!(
+            graph.adj.get(&di).is_some_and(|s| s.contains(&tmp)),
+            "adj[DI] must contain tmp after merging x→DI"
+        );
+        assert!(
+            graph.adj.get(&tmp).is_some_and(|s| s.contains(&di)),
+            "adj[tmp] must contain DI after merging x→DI"
+        );
+
+        // x の旧エントリは削除されていること
+        assert!(
+            graph.adj.get(&x).is_none(),
+            "adj[x] should be removed after merge"
+        );
+        // tmp の旧辺 (tmp→x) は消えていること
+        assert!(
+            !graph.adj.get(&tmp).unwrap().contains(&x),
+            "adj[tmp] should no longer contain x after merge"
+        );
+    }
+
+    /// マージ先 (into) に既存の隣接がある場合も対称性を維持するか検証。
+    #[test]
+    fn merge_nodes_symmetric_with_existing_edges() {
+        let mut graph = InterferenceGraph::new();
+
+        let di = GraphNode::HardReg(Reg::DI);
+        let x = GraphNode::Pseudo("x".into());
+        let tmp = GraphNode::Pseudo("tmp".into());
+        let count = GraphNode::Pseudo("count".into());
+
+        graph.add_node(x.clone());
+        graph.add_node(tmp.clone());
+        graph.add_node(count.clone());
+
+        // 干渉辺: tmp ↔ x, count ↔ x
+        graph.add_edge(&tmp, &x);
+        graph.add_edge(&count, &x);
+
+        // DI に既存辺を作る (count ↔ DI)
+        graph.add_edge(&count, &di);
+
+        // x → DI にマージ
+        merge_nodes(&mut graph, &x, &di);
+
+        // DI ↔ tmp が対称
+        assert!(graph.adj.get(&di).unwrap().contains(&tmp));
+        assert!(graph.adj.get(&tmp).unwrap().contains(&di));
+
+        // DI ↔ count も維持
+        assert!(graph.adj.get(&di).unwrap().contains(&count));
+        assert!(graph.adj.get(&count).unwrap().contains(&di));
+
+        // self-loop なし
+        assert!(!graph.adj.get(&di).unwrap().contains(&di));
     }
 }
