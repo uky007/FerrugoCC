@@ -958,6 +958,34 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     Ok(common)
                 }
 
+                // ビット演算: ポインタ禁止、void 禁止、double 禁止
+                BinaryOp::BitwiseAnd
+                | BinaryOp::BitwiseOr
+                | BinaryOp::BitwiseXor
+                | BinaryOp::ShiftLeft
+                | BinaryOp::ShiftRight => {
+                    if left_type.is_void() || right_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "void expression used as operand of bitwise operation".to_string(),
+                        ));
+                    }
+                    if left_type.is_pointer() || right_type.is_pointer() {
+                        return Err(CompileError::TypeError(format!(
+                            "bitwise operator '{:?}' cannot be applied to pointer types",
+                            op
+                        )));
+                    }
+                    if left_type == Type::Double || right_type == Type::Double {
+                        return Err(CompileError::TypeError(
+                            "bitwise operator cannot be applied to double".to_string(),
+                        ));
+                    }
+                    let common = common_type(&left_type, &right_type);
+                    convert_operand(left, &left_type, &common);
+                    convert_operand(right, &right_type, &common);
+                    Ok(common)
+                }
+
                 // カンマ演算子: 右辺の型を返す
                 BinaryOp::Comma => Ok(right_type),
             }

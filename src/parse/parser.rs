@@ -40,12 +40,16 @@
 //! <for_init>       ::= <declaration> | <exp>? ";"
 //! <exp>            ::= <assignment> ("," <assignment>)*
 //! <assignment>     ::= <lvalue> <assign_op> <assignment> | <conditional>
-//! <assign_op>      ::= "=" | "+=" | "-=" | "*=" | "/=" | "%="
+//! <assign_op>      ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
 //! <conditional>    ::= <logical_or> ("?" <exp> ":" <conditional>)?
 //! <logical_or>     ::= <logical_and> ( "||" <logical_and> )*
-//! <logical_and>    ::= <equality> ( "&&" <equality> )*
+//! <logical_and>    ::= <bitwise_or> ( "&&" <bitwise_or> )*
+//! <bitwise_or>     ::= <bitwise_xor> ( "|" <bitwise_xor> )*
+//! <bitwise_xor>    ::= <bitwise_and> ( "^" <bitwise_and> )*
+//! <bitwise_and>    ::= <equality> ( "&" <equality> )*
 //! <equality>       ::= <relational> ( ("==" | "!=") <relational> )*
-//! <relational>     ::= <additive> ( ("<" | "<=" | ">" | ">=") <additive> )*
+//! <relational>     ::= <shift> ( ("<" | "<=" | ">" | ">=") <shift> )*
+//! <shift>          ::= <additive> ( ("<<" | ">>") <additive> )*
 //! <additive>       ::= <multiplicative> ( ("+" | "-") <multiplicative> )*
 //! <multiplicative> ::= <cast> ( ("*" | "/" | "%") <cast> )*
 //! <cast>           ::= "(" <type> <abstract_declarator> ")" <cast>
@@ -181,7 +185,9 @@ impl<'a> Parser<'a> {
             | TokenKind::KwChar
             | TokenKind::KwVoid
             | TokenKind::KwStruct
-            | TokenKind::KwEnum => true,
+            | TokenKind::KwEnum
+            | TokenKind::KwConst
+            | TokenKind::KwVolatile => true,
             TokenKind::Identifier(name) => {
                 name == "va_list" || self.typedef_names.contains_key(name)
             }
@@ -203,7 +209,9 @@ impl<'a> Parser<'a> {
             | TokenKind::KwChar
             | TokenKind::KwVoid
             | TokenKind::KwStruct
-            | TokenKind::KwEnum => true,
+            | TokenKind::KwEnum
+            | TokenKind::KwConst
+            | TokenKind::KwVolatile => true,
             TokenKind::Identifier(name) => {
                 name == "va_list" || self.typedef_names.contains_key(name)
             }
@@ -234,6 +242,12 @@ impl<'a> Parser<'a> {
                 break;
             }
             match &self.peek()?.kind {
+                // Skip const/volatile qualifiers (parse-only, no semantics yet)
+                TokenKind::KwConst | TokenKind::KwVolatile => {
+                    self.advance()?;
+                    // Don't increment count - qualifiers don't count as type specifiers
+                    continue;
+                }
                 TokenKind::KwVoid => {
                     if has_void {
                         return Err(CompileError::ParseError(
@@ -577,11 +591,20 @@ impl<'a> Parser<'a> {
     /// `int *x`, `int **pp` などのポインタ宣言をパースする。
     /// 先頭の `*` の個数をカウントし、識別子を読み、型をラップして返す。
     fn parse_declarator(&mut self, base_type: Type) -> Result<(Type, String)> {
-        // leading '*' をカウント
+        // leading '*' をカウント（const/volatile を '*' の後でスキップ）
         let mut stars = 0;
         while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Star {
             self.advance()?;
             stars += 1;
+            // `* const` や `* volatile` をスキップ（parse-only）
+            while self.pos < self.tokens.len()
+                && matches!(
+                    self.peek()?.kind,
+                    TokenKind::KwConst | TokenKind::KwVolatile
+                )
+            {
+                self.advance()?;
+            }
         }
 
         let name_token = self.advance()?;
@@ -630,6 +653,15 @@ impl<'a> Parser<'a> {
         while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Star {
             self.advance()?;
             stars += 1;
+            // `* const` や `* volatile` をスキップ（parse-only）
+            while self.pos < self.tokens.len()
+                && matches!(
+                    self.peek()?.kind,
+                    TokenKind::KwConst | TokenKind::KwVolatile
+                )
+            {
+                self.advance()?;
+            }
         }
 
         let mut ty = base_type;
@@ -853,7 +885,9 @@ impl<'a> Parser<'a> {
             | TokenKind::KwStatic
             | TokenKind::KwExtern
             | TokenKind::KwStruct
-            | TokenKind::KwEnum => {
+            | TokenKind::KwEnum
+            | TokenKind::KwConst
+            | TokenKind::KwVolatile => {
                 let decls = self.parse_declaration()?;
                 Ok(decls.into_iter().map(BlockItem::Declaration).collect())
             }
@@ -1227,6 +1261,11 @@ impl<'a> Parser<'a> {
                 TokenKind::StarAssign => Some(Some(BinaryOp::Multiply)),
                 TokenKind::SlashAssign => Some(Some(BinaryOp::Divide)),
                 TokenKind::PercentAssign => Some(Some(BinaryOp::Remainder)),
+                TokenKind::AmpersandAssign => Some(Some(BinaryOp::BitwiseAnd)),
+                TokenKind::PipeAssign => Some(Some(BinaryOp::BitwiseOr)),
+                TokenKind::CaretAssign => Some(Some(BinaryOp::BitwiseXor)),
+                TokenKind::ShiftLeftAssign => Some(Some(BinaryOp::ShiftLeft)),
+                TokenKind::ShiftRightAssign => Some(Some(BinaryOp::ShiftRight)),
                 _ => None,
             };
 
@@ -1294,10 +1333,10 @@ impl<'a> Parser<'a> {
     /// 論理ANDの左結合パース。
     ///
     /// ```text
-    /// <logical_and> ::= <equality> ( "&&" <equality> )*
+    /// <logical_and> ::= <bitwise_or> ( "&&" <bitwise_or> )*
     /// ```
     fn parse_logical_and(&mut self) -> Result<Expr> {
-        let mut left = self.parse_equality()?;
+        let mut left = self.parse_bitwise_or()?;
         loop {
             if self.pos >= self.tokens.len() {
                 break;
@@ -1305,8 +1344,77 @@ impl<'a> Parser<'a> {
             match &self.peek()?.kind {
                 TokenKind::AndAnd => {
                     self.advance()?;
-                    let right = self.parse_equality()?;
+                    let right = self.parse_bitwise_or()?;
                     left = Expr::Binary(BinaryOp::LogicalAnd, Box::new(left), Box::new(right));
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    /// ビットORの左結合パース。
+    ///
+    /// ```text
+    /// <bitwise_or> ::= <bitwise_xor> ( "|" <bitwise_xor> )*
+    /// ```
+    fn parse_bitwise_or(&mut self) -> Result<Expr> {
+        let mut left = self.parse_bitwise_xor()?;
+        loop {
+            if self.pos >= self.tokens.len() {
+                break;
+            }
+            match &self.peek()?.kind {
+                TokenKind::Pipe => {
+                    self.advance()?;
+                    let right = self.parse_bitwise_xor()?;
+                    left = Expr::Binary(BinaryOp::BitwiseOr, Box::new(left), Box::new(right));
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    /// ビットXORの左結合パース。
+    ///
+    /// ```text
+    /// <bitwise_xor> ::= <bitwise_and> ( "^" <bitwise_and> )*
+    /// ```
+    fn parse_bitwise_xor(&mut self) -> Result<Expr> {
+        let mut left = self.parse_bitwise_and()?;
+        loop {
+            if self.pos >= self.tokens.len() {
+                break;
+            }
+            match &self.peek()?.kind {
+                TokenKind::Caret => {
+                    self.advance()?;
+                    let right = self.parse_bitwise_and()?;
+                    left = Expr::Binary(BinaryOp::BitwiseXor, Box::new(left), Box::new(right));
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    /// ビットANDの左結合パース。
+    ///
+    /// ```text
+    /// <bitwise_and> ::= <equality> ( "&" <equality> )*
+    /// ```
+    fn parse_bitwise_and(&mut self) -> Result<Expr> {
+        let mut left = self.parse_equality()?;
+        loop {
+            if self.pos >= self.tokens.len() {
+                break;
+            }
+            match &self.peek()?.kind {
+                TokenKind::Ampersand => {
+                    self.advance()?;
+                    let right = self.parse_equality()?;
+                    left = Expr::Binary(BinaryOp::BitwiseAnd, Box::new(left), Box::new(right));
                 }
                 _ => break,
             }
@@ -1340,10 +1448,10 @@ impl<'a> Parser<'a> {
     /// 関係演算の左結合パース。
     ///
     /// ```text
-    /// <relational> ::= <additive> ( ("<" | "<=" | ">" | ">=") <additive> )*
+    /// <relational> ::= <shift> ( ("<" | "<=" | ">" | ">=") <shift> )*
     /// ```
     fn parse_relational(&mut self) -> Result<Expr> {
-        let mut left = self.parse_additive()?;
+        let mut left = self.parse_shift()?;
         loop {
             if self.pos >= self.tokens.len() {
                 break;
@@ -1353,6 +1461,29 @@ impl<'a> Parser<'a> {
                 TokenKind::LessEqual => BinaryOp::LessEqual,
                 TokenKind::Greater => BinaryOp::GreaterThan,
                 TokenKind::GreaterEqual => BinaryOp::GreaterEqual,
+                _ => break,
+            };
+            self.advance()?;
+            let right = self.parse_shift()?;
+            left = Expr::Binary(op, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    /// シフト演算の左結合パース。
+    ///
+    /// ```text
+    /// <shift> ::= <additive> ( ("<<" | ">>") <additive> )*
+    /// ```
+    fn parse_shift(&mut self) -> Result<Expr> {
+        let mut left = self.parse_additive()?;
+        loop {
+            if self.pos >= self.tokens.len() {
+                break;
+            }
+            let op = match &self.peek()?.kind {
+                TokenKind::ShiftLeft => BinaryOp::ShiftLeft,
+                TokenKind::ShiftRight => BinaryOp::ShiftRight,
                 _ => break,
             };
             self.advance()?;

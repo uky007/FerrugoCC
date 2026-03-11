@@ -192,6 +192,12 @@ pub enum TackyBinaryOp {
     LessOrEqual,
     GreaterThan,
     GreaterOrEqual,
+    // ビット演算
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    ShiftLeft,
+    ShiftRight,
     // Double 演算
     AddDouble,
     SubDouble,

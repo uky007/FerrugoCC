@@ -4,7 +4,7 @@
 //!
 //! # パイプライン
 //! ```text
-//! source.c → [Lex] → [Parse] → [Validate] → [TackyGen] → [Optimize/Obfuscate]
+//! source.c → [Preprocess] → [Lex] → [Parse] → [Validate] → [TackyGen] → [Optimize/Obfuscate]
 //!          → [Codegen] → [RegAlloc+Coalescing] → [Fixup] → [Emit] → source.s → [gcc] → binary
 //! ```
 //!
@@ -316,7 +316,7 @@ fn main() {
         None
     };
 
-    if let Err(e) = driver::run(&cli.source, stage, obf_config) {
+    if let Err(e) = driver::run(&cli.source, stage, obf_config, driver::PreprocessMode::External) {
         eprintln!("ferrugocc: {e}");
         process::exit(1);
     }

@@ -108,14 +108,26 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 }
             }
             b'<' => {
-                if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                if pos + 1 < bytes.len() && bytes[pos + 1] == b'<' {
+                    if pos + 2 < bytes.len() && bytes[pos + 2] == b'=' {
+                        Some((TokenKind::ShiftLeftAssign, 3))
+                    } else {
+                        Some((TokenKind::ShiftLeft, 2))
+                    }
+                } else if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
                     Some((TokenKind::LessEqual, 2))
                 } else {
                     Some((TokenKind::Less, 1))
                 }
             }
             b'>' => {
-                if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                if pos + 1 < bytes.len() && bytes[pos + 1] == b'>' {
+                    if pos + 2 < bytes.len() && bytes[pos + 2] == b'=' {
+                        Some((TokenKind::ShiftRightAssign, 3))
+                    } else {
+                        Some((TokenKind::ShiftRight, 2))
+                    }
+                } else if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
                     Some((TokenKind::GreaterEqual, 2))
                 } else {
                     Some((TokenKind::Greater, 1))
@@ -131,6 +143,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             b'&' => {
                 if pos + 1 < bytes.len() && bytes[pos + 1] == b'&' {
                     Some((TokenKind::AndAnd, 2))
+                } else if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                    Some((TokenKind::AmpersandAssign, 2))
                 } else {
                     Some((TokenKind::Ampersand, 1))
                 }
@@ -138,11 +152,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             b'|' => {
                 if pos + 1 < bytes.len() && bytes[pos + 1] == b'|' {
                     Some((TokenKind::OrOr, 2))
+                } else if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                    Some((TokenKind::PipeAssign, 2))
                 } else {
-                    return Err(CompileError::LexError(format!(
-                        "unexpected character '|' at line {line}, column {column} \
-                         (bitwise OR is not supported)"
-                    )));
+                    Some((TokenKind::Pipe, 1))
+                }
+            }
+            b'^' => {
+                if pos + 1 < bytes.len() && bytes[pos + 1] == b'=' {
+                    Some((TokenKind::CaretAssign, 2))
+                } else {
+                    Some((TokenKind::Caret, 1))
                 }
             }
             // Chapter 7: +, -, *, /, % は先読みが必要
@@ -236,12 +256,101 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
 
         // ── 数値リテラル（整数 or 浮動小数点）──
         // 数字で始まる場合: `.` か `e`/`E` があれば浮動小数点、なければ整数。
+        // `0x`/`0X` で始まる場合は16進整数リテラル。
         // `.` で始まり次が数字の場合も浮動小数点（`.5` 等）。
         if b.is_ascii_digit()
             || (b == b'.' && pos + 1 < bytes.len() && bytes[pos + 1].is_ascii_digit())
         {
             let start = pos;
             let start_col = column;
+
+            // ── 16進リテラル（0x / 0X）──
+            if b == b'0'
+                && pos + 1 < bytes.len()
+                && (bytes[pos + 1] == b'x' || bytes[pos + 1] == b'X')
+            {
+                pos += 2; // consume "0x"
+                column += 2;
+                let hex_start = pos;
+                while pos < bytes.len()
+                    && (bytes[pos].is_ascii_hexdigit())
+                {
+                    pos += 1;
+                    column += 1;
+                }
+                if pos == hex_start {
+                    return Err(CompileError::LexError(format!(
+                        "invalid hexadecimal literal at line {line}, column {start_col}: \
+                         expected hex digit after '0x'"
+                    )));
+                }
+                let hex_text = &source[hex_start..pos];
+
+                // サフィックス解析（U/u, L/l）
+                let mut has_u = false;
+                let mut has_l = false;
+                for _ in 0..2 {
+                    if pos < bytes.len() && (bytes[pos] == b'U' || bytes[pos] == b'u') && !has_u {
+                        has_u = true;
+                        pos += 1;
+                        column += 1;
+                    } else if pos < bytes.len()
+                        && (bytes[pos] == b'L' || bytes[pos] == b'l')
+                        && !has_l
+                    {
+                        has_l = true;
+                        pos += 1;
+                        column += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if pos < bytes.len()
+                    && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
+                {
+                    return Err(CompileError::LexError(format!(
+                        "invalid token at line {line}, column {start_col}: \
+                         invalid suffix on hexadecimal literal"
+                    )));
+                }
+
+                let value = u64::from_str_radix(hex_text, 16).map_err(|e| {
+                    CompileError::LexError(format!(
+                        "invalid hexadecimal literal '0x{hex_text}' at line {line}, \
+                         column {start_col}: {e}"
+                    ))
+                })?;
+
+                let kind = if has_u {
+                    if has_l {
+                        TokenKind::ULongLiteral(value)
+                    } else {
+                        TokenKind::UIntLiteral(value)
+                    }
+                } else if has_l {
+                    TokenKind::LongLiteral(value as i64)
+                } else {
+                    // 32ビットに収まれば IntLiteral、それ以上は LongLiteral
+                    if value <= i32::MAX as u64 {
+                        TokenKind::IntLiteral(value as i64)
+                    } else if value <= i64::MAX as u64 {
+                        TokenKind::LongLiteral(value as i64)
+                    } else {
+                        TokenKind::ULongLiteral(value)
+                    }
+                };
+                tokens.push(Token {
+                    kind,
+                    span: Span {
+                        offset: start,
+                        len: pos - start,
+                        line,
+                        column: start_col,
+                    },
+                });
+                continue;
+            }
+
             let mut is_float = false;
 
             // `.` で始まる場合（例: `.5`）
@@ -571,6 +680,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "switch" => TokenKind::KwSwitch,
                 "case" => TokenKind::KwCase,
                 "default" => TokenKind::KwDefault,
+                "const" => TokenKind::KwConst,
+                "volatile" => TokenKind::KwVolatile,
                 _ => TokenKind::Identifier(text.to_string()),
             };
             tokens.push(Token {
@@ -783,11 +894,19 @@ mod tests {
         );
     }
 
-    /// `|` 単体はエラー
+    /// `|` 単体はビットOR（Pipe）
     #[test]
-    fn lex_single_pipe_error() {
-        let result = lex("1 | 2");
-        assert!(result.is_err());
+    fn lex_single_pipe() {
+        let tokens = lex("1 | 2").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &TokenKind::IntLiteral(1),
+                &TokenKind::Pipe,
+                &TokenKind::IntLiteral(2),
+            ]
+        );
     }
 
     /// Chapter 6: if/else キーワードと三項演算子トークン
@@ -1025,7 +1144,7 @@ mod tests {
     fn lex_ellipsis() {
         let tokens = lex("int printf(const char *, ...);").unwrap();
         let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
-        // "const" は Identifier（キーワード未対応）
+        // "const" is now KwConst keyword
         assert!(kinds.contains(&&TokenKind::Ellipsis));
     }
 
@@ -1044,5 +1163,72 @@ mod tests {
                 &TokenKind::Ellipsis,
             ]
         );
+    }
+
+    /// ビット演算子のトークン化
+    #[test]
+    fn lex_bitwise_operators() {
+        let tokens = lex("1 & 2 | 3 ^ 4").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &TokenKind::IntLiteral(1),
+                &TokenKind::Ampersand,
+                &TokenKind::IntLiteral(2),
+                &TokenKind::Pipe,
+                &TokenKind::IntLiteral(3),
+                &TokenKind::Caret,
+                &TokenKind::IntLiteral(4),
+            ]
+        );
+    }
+
+    /// シフト演算子のトークン化
+    #[test]
+    fn lex_shift_operators() {
+        let tokens = lex("1 << 2 >> 3").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &TokenKind::IntLiteral(1),
+                &TokenKind::ShiftLeft,
+                &TokenKind::IntLiteral(2),
+                &TokenKind::ShiftRight,
+                &TokenKind::IntLiteral(3),
+            ]
+        );
+    }
+
+    /// ビット演算複合代入のトークン化
+    #[test]
+    fn lex_bitwise_compound_assign() {
+        let tokens = lex("a &= 1 |= 2 ^= 3 <<= 4 >>= 5").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &TokenKind::Identifier("a".to_string()),
+                &TokenKind::AmpersandAssign,
+                &TokenKind::IntLiteral(1),
+                &TokenKind::PipeAssign,
+                &TokenKind::IntLiteral(2),
+                &TokenKind::CaretAssign,
+                &TokenKind::IntLiteral(3),
+                &TokenKind::ShiftLeftAssign,
+                &TokenKind::IntLiteral(4),
+                &TokenKind::ShiftRightAssign,
+                &TokenKind::IntLiteral(5),
+            ]
+        );
+    }
+
+    /// const/volatile キーワードのトークン化
+    #[test]
+    fn lex_const_volatile_keywords() {
+        let tokens = lex("const volatile").unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| &t.kind).collect();
+        assert_eq!(kinds, vec![&TokenKind::KwConst, &TokenKind::KwVolatile]);
     }
 }

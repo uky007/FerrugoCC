@@ -496,6 +496,17 @@ pub enum BinaryOp {
     LogicalAnd,
     /// `||` — 論理OR（短絡評価）
     LogicalOr,
+    // ── ビット演算 ──
+    /// `&` — ビットAND
+    BitwiseAnd,
+    /// `|` — ビットOR
+    BitwiseOr,
+    /// `^` — ビットXOR
+    BitwiseXor,
+    /// `<<` — 左シフト
+    ShiftLeft,
+    /// `>>` — 右シフト
+    ShiftRight,
     /// `,` — カンマ演算子（Chapter 7）。左辺を評価して捨て、右辺の値を返す。
     Comma,
 }

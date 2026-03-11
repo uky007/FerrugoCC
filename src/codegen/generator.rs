@@ -1668,6 +1668,61 @@ fn generate_binary_instruction(
             });
         }
 
+        TackyBinaryOp::BitwiseAnd | TackyBinaryOp::BitwiseOr | TackyBinaryOp::BitwiseXor => {
+            let asm_type = safe_asm_type(&dst_type);
+            let left_op = val_to_operand(left, static_vars, stack_vars)?;
+            let right_op = val_to_operand(right, static_vars, stack_vars)?;
+            let asm_op = match op {
+                TackyBinaryOp::BitwiseAnd => AsmBinaryOp::And,
+                TackyBinaryOp::BitwiseOr => AsmBinaryOp::Or,
+                TackyBinaryOp::BitwiseXor => AsmBinaryOp::BitXor,
+                _ => unreachable!(),
+            };
+            instrs.push(Instruction::Mov {
+                asm_type,
+                src: left_op,
+                dst: dst_op.clone(),
+            });
+            instrs.push(Instruction::Binary {
+                asm_type,
+                op: asm_op,
+                src: right_op,
+                dst: dst_op,
+            });
+        }
+
+        TackyBinaryOp::ShiftLeft | TackyBinaryOp::ShiftRight => {
+            let asm_type = safe_asm_type(&dst_type);
+            let left_op = val_to_operand(left, static_vars, stack_vars)?;
+            let right_op = val_to_operand(right, static_vars, stack_vars)?;
+            let asm_op = if matches!(op, TackyBinaryOp::ShiftLeft) {
+                AsmBinaryOp::Sal
+            } else if dst_type.is_unsigned() {
+                AsmBinaryOp::Shr
+            } else {
+                AsmBinaryOp::Sar
+            };
+            // Move left operand to dst
+            instrs.push(Instruction::Mov {
+                asm_type,
+                src: left_op,
+                dst: dst_op.clone(),
+            });
+            // Move shift amount to CX (shift uses CL)
+            instrs.push(Instruction::Mov {
+                asm_type,
+                src: right_op,
+                dst: Operand::Register(Reg::CX),
+            });
+            // Shift dst by CL
+            instrs.push(Instruction::Binary {
+                asm_type,
+                op: asm_op,
+                src: Operand::Register(Reg::CX),
+                dst: dst_op,
+            });
+        }
+
         TackyBinaryOp::Divide | TackyBinaryOp::Remainder => {
             let asm_type = safe_asm_type(&dst_type);
             let left_op = val_to_operand(left, static_vars, stack_vars)?;

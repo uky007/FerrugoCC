@@ -84,6 +84,10 @@ pub enum TokenKind {
     KwCase,
     /// `default` キーワード — switch のデフォルトラベル
     KwDefault,
+    /// `const` キーワード — 型修飾子（parse-only）
+    KwConst,
+    /// `volatile` キーワード — 型修飾子（parse-only）
+    KwVolatile,
 
     // ── 演算子 ──（Chapter 2 で追加）
     /// `-` — 単項マイナス / 二項減算
@@ -122,6 +126,24 @@ pub enum TokenKind {
     AndAnd,
     /// `||` — 論理OR
     OrOr,
+    /// `|` — ビットOR
+    Pipe,
+    /// `^` — ビットXOR
+    Caret,
+    /// `<<` — 左シフト
+    ShiftLeft,
+    /// `>>` — 右シフト
+    ShiftRight,
+    /// `&=` — ビットAND複合代入
+    AmpersandAssign,
+    /// `|=` — ビットOR複合代入
+    PipeAssign,
+    /// `^=` — ビットXOR複合代入
+    CaretAssign,
+    /// `<<=` — 左シフト複合代入
+    ShiftLeftAssign,
+    /// `>>=` — 右シフト複合代入
+    ShiftRightAssign,
 
     // ── 演算子 ──（Chapter 5 で追加）
     /// `=` — 代入

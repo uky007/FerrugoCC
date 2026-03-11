@@ -2033,6 +2033,31 @@ impl TackyGenerator {
                 });
                 Ok((dst, Type::Int))
             }
+
+            BinaryOp::BitwiseAnd
+            | BinaryOp::BitwiseOr
+            | BinaryOp::BitwiseXor
+            | BinaryOp::ShiftLeft
+            | BinaryOp::ShiftRight => {
+                let (left_val, _) = self.generate_expr(left, instrs, func_table)?;
+                let (right_val, _) = self.generate_expr(right, instrs, func_table)?;
+                let dst = self.new_temp(result_type.clone());
+                let tacky_op = match op {
+                    BinaryOp::BitwiseAnd => TackyBinaryOp::BitwiseAnd,
+                    BinaryOp::BitwiseOr => TackyBinaryOp::BitwiseOr,
+                    BinaryOp::BitwiseXor => TackyBinaryOp::BitwiseXor,
+                    BinaryOp::ShiftLeft => TackyBinaryOp::ShiftLeft,
+                    BinaryOp::ShiftRight => TackyBinaryOp::ShiftRight,
+                    _ => unreachable!(),
+                };
+                instrs.push(TackyInstruction::Binary {
+                    op: tacky_op,
+                    left: left_val,
+                    right: right_val,
+                    dst: dst.clone(),
+                });
+                Ok((dst, result_type))
+            }
         }
     }
 
@@ -2126,6 +2151,11 @@ impl TackyGenerator {
                     BinaryOp::Multiply => TackyBinaryOp::Multiply,
                     BinaryOp::Divide => TackyBinaryOp::Divide,
                     BinaryOp::Remainder => TackyBinaryOp::Remainder,
+                    BinaryOp::BitwiseAnd => TackyBinaryOp::BitwiseAnd,
+                    BinaryOp::BitwiseOr => TackyBinaryOp::BitwiseOr,
+                    BinaryOp::BitwiseXor => TackyBinaryOp::BitwiseXor,
+                    BinaryOp::ShiftLeft => TackyBinaryOp::ShiftLeft,
+                    BinaryOp::ShiftRight => TackyBinaryOp::ShiftRight,
                     _ => {
                         return Err(CompileError::CodegenError(format!(
                             "unsupported compound assignment operator: {:?}",

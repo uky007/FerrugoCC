@@ -5,7 +5,7 @@
 //!
 //! # パイプライン
 //! ```text
-//! source.c → [Lex] → [Parse] → [Validate] → [TackyGen]
+//! source.c → [Preprocess] → [Lex] → [Parse] → [Validate] → [TackyGen]
 //!          → [Optimize or Obfuscate] → [Codegen] → [Emit] → source.s → [gcc] → binary
 //! ```
 //!
@@ -29,6 +29,18 @@ use crate::parse;
 use crate::tacky;
 use crate::typecheck;
 
+/// 前処理モード。
+///
+/// ソースファイルを字句解析に渡す前にどのように前処理するかを指定する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum PreprocessMode {
+    /// 前処理をスキップ（ソースをそのまま字句解析に渡す）
+    None,
+    /// 外部プリプロセッサ（gcc -E -P）を使用
+    External,
+}
+
 /// コンパイルをどのステージまで実行するかを指定する列挙型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -48,14 +60,57 @@ pub enum Stage {
     Full,
 }
 
+/// 外部プリプロセッサ（gcc -E -P）を実行する。
+///
+/// ソースファイルのディレクトリを `-I` に含めることで、
+/// ローカルの `#include` を解決できるようにする。
+fn preprocess_external(source_path: &Path) -> Result<String> {
+    let source_dir = source_path.parent().unwrap_or(Path::new("."));
+    let output = Command::new("gcc")
+        .arg("-E")
+        .arg("-P")
+        .arg("-I")
+        .arg(source_dir)
+        .arg(source_path)
+        .output()
+        .map_err(|e| {
+            CompileError::ExternalToolError(format!(
+                "failed to run preprocessor (gcc -E): {e}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CompileError::ExternalToolError(format!(
+            "preprocessing failed:\n{stderr}"
+        )));
+    }
+
+    String::from_utf8(output.stdout).map_err(|e| {
+        CompileError::ExternalToolError(format!(
+            "preprocessor output is not valid UTF-8: {e}"
+        ))
+    })
+}
+
 /// コンパイルパイプラインを実行する。
 ///
 /// `source_path` のCソースファイルを読み込み、`stage` で指定された
 /// ステージまで処理を行う。
 ///
 /// `obf_config` が Some の場合、TACKY IR 最適化の代わりに難読化パスを適用する。
-pub fn run(source_path: &Path, stage: Stage, obf_config: Option<ObfuscationConfig>) -> Result<()> {
-    let source = std::fs::read_to_string(source_path)?;
+/// `preprocess` で前処理モードを指定する。
+pub fn run(
+    source_path: &Path,
+    stage: Stage,
+    obf_config: Option<ObfuscationConfig>,
+    preprocess: PreprocessMode,
+) -> Result<()> {
+    // ── Stage 0: 前処理 ──
+    let source = match preprocess {
+        PreprocessMode::None => std::fs::read_to_string(source_path)?,
+        PreprocessMode::External => preprocess_external(source_path)?,
+    };
 
     // ── Stage 1: 字句解析 ──
     let tokens = lex::lex(&source)?;

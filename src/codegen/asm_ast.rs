@@ -272,6 +272,18 @@ pub enum AsmBinaryOp {
     DivDouble,
     /// `xorpd` — XOR（符号ビット反転用）（Chapter 13）
     Xor,
+    /// `andl`/`andq` — ビットAND
+    And,
+    /// `orl`/`orq` — ビットOR
+    Or,
+    /// `xorl`/`xorq` — ビットXOR（整数、SSE ではない）
+    BitXor,
+    /// `sall`/`salq` — 算術左シフト
+    Sal,
+    /// `sarl`/`sarq` — 算術右シフト（符号付き）
+    Sar,
+    /// `shrl`/`shrq` — 論理右シフト（符号なし）
+    Shr,
 }
 
 /// 条件コード

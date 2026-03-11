@@ -389,6 +389,12 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
                     AsmBinaryOp::Mult => "mulsd",
                     AsmBinaryOp::DivDouble => "divsd",
                     AsmBinaryOp::Xor => "xorpd",
+                    AsmBinaryOp::And
+                    | AsmBinaryOp::Or
+                    | AsmBinaryOp::BitXor
+                    | AsmBinaryOp::Sal
+                    | AsmBinaryOp::Sar
+                    | AsmBinaryOp::Shr => unreachable!("bitwise/shift ops not for Double type"),
                 };
                 writeln!(
                     out,
@@ -398,18 +404,32 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
                 )
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
             } else {
+                // Shift instructions need %cl as source
+                let is_shift = matches!(op, AsmBinaryOp::Sal | AsmBinaryOp::Sar | AsmBinaryOp::Shr);
                 let base = match op {
                     AsmBinaryOp::Add => "add",
                     AsmBinaryOp::Sub => "sub",
                     AsmBinaryOp::Mult => "imul",
+                    AsmBinaryOp::And => "and",
+                    AsmBinaryOp::Or => "or",
+                    AsmBinaryOp::BitXor => "xor",
+                    AsmBinaryOp::Sal => "sal",
+                    AsmBinaryOp::Sar => "sar",
+                    AsmBinaryOp::Shr => "shr",
                     AsmBinaryOp::DivDouble => unreachable!("DivDouble only for Double type"),
                     AsmBinaryOp::Xor => unreachable!("Xor only for Double type"),
                 };
                 let suffix = type_suffix(asm_type);
+                // For shift instructions, source operand must be %cl (byte register)
+                let src_str = if is_shift {
+                    format_operand_byte(src)
+                } else {
+                    format_operand_typed(src, asm_type)
+                };
                 writeln!(
                     out,
                     "    {base}{suffix} {}, {}",
-                    format_operand_typed(src, asm_type),
+                    src_str,
                     format_operand_typed(dst, asm_type)
                 )
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;

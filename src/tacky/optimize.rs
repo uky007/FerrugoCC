@@ -335,6 +335,50 @@ fn simplify_binary(
             }
             None
         }
+        // Bitwise AND: x & 0 = 0
+        TackyBinaryOp::BitwiseAnd => {
+            if right_zero {
+                return Some(make_copy_zero(left, dst, var_types));
+            }
+            if left_zero {
+                return Some(make_copy_zero(right, dst, var_types));
+            }
+            None
+        }
+        // Bitwise OR: x | 0 = x, 0 | x = x
+        TackyBinaryOp::BitwiseOr => {
+            if right_zero {
+                return Some(make_copy(left, dst));
+            }
+            if left_zero {
+                return Some(make_copy(right, dst));
+            }
+            None
+        }
+        // Bitwise XOR: x ^ 0 = x, 0 ^ x = x
+        TackyBinaryOp::BitwiseXor => {
+            if right_zero {
+                return Some(make_copy(left, dst));
+            }
+            if left_zero {
+                return Some(make_copy(right, dst));
+            }
+            None
+        }
+        // Shift left: x << 0 = x
+        TackyBinaryOp::ShiftLeft => {
+            if right_zero {
+                return Some(make_copy(left, dst));
+            }
+            None
+        }
+        // Shift right: x >> 0 = x
+        TackyBinaryOp::ShiftRight => {
+            if right_zero {
+                return Some(make_copy(left, dst));
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -538,6 +582,11 @@ fn fold_int_binary(op: TackyBinaryOp, l: i64, r: i64) -> Option<i64> {
         TackyBinaryOp::LessOrEqual => Some(if l <= r { 1 } else { 0 }),
         TackyBinaryOp::GreaterThan => Some(if l > r { 1 } else { 0 }),
         TackyBinaryOp::GreaterOrEqual => Some(if l >= r { 1 } else { 0 }),
+        TackyBinaryOp::BitwiseAnd => Some(l & r),
+        TackyBinaryOp::BitwiseOr => Some(l | r),
+        TackyBinaryOp::BitwiseXor => Some(l ^ r),
+        TackyBinaryOp::ShiftLeft => Some(l.wrapping_shl(r as u32)),
+        TackyBinaryOp::ShiftRight => Some(l.wrapping_shr(r as u32)),
         _ => None,
     }
 }
@@ -567,6 +616,11 @@ fn fold_uint_binary(op: TackyBinaryOp, l: u64, r: u64) -> Option<u64> {
         TackyBinaryOp::LessOrEqual => Some(if l <= r { 1 } else { 0 }),
         TackyBinaryOp::GreaterThan => Some(if l > r { 1 } else { 0 }),
         TackyBinaryOp::GreaterOrEqual => Some(if l >= r { 1 } else { 0 }),
+        TackyBinaryOp::BitwiseAnd => Some(l & r),
+        TackyBinaryOp::BitwiseOr => Some(l | r),
+        TackyBinaryOp::BitwiseXor => Some(l ^ r),
+        TackyBinaryOp::ShiftLeft => Some(l.wrapping_shl(r as u32)),
+        TackyBinaryOp::ShiftRight => Some(l.wrapping_shr(r as u32)),
         _ => None,
     }
 }
@@ -990,6 +1044,9 @@ fn is_commutative(op: TackyBinaryOp) -> bool {
             | TackyBinaryOp::NotEqual
             | TackyBinaryOp::AddDouble
             | TackyBinaryOp::MulDouble
+            | TackyBinaryOp::BitwiseAnd
+            | TackyBinaryOp::BitwiseOr
+            | TackyBinaryOp::BitwiseXor
     )
 }
 
