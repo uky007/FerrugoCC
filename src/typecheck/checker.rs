@@ -958,12 +958,10 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     Ok(common)
                 }
 
-                // ビット演算: ポインタ禁止、void 禁止、double 禁止
+                // ビット演算 (& | ^): ポインタ禁止、void 禁止、double 禁止
                 BinaryOp::BitwiseAnd
                 | BinaryOp::BitwiseOr
-                | BinaryOp::BitwiseXor
-                | BinaryOp::ShiftLeft
-                | BinaryOp::ShiftRight => {
+                | BinaryOp::BitwiseXor => {
                     if left_type.is_void() || right_type.is_void() {
                         return Err(CompileError::TypeError(
                             "void expression used as operand of bitwise operation".to_string(),
@@ -984,6 +982,32 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     convert_operand(left, &left_type, &common);
                     convert_operand(right, &right_type, &common);
                     Ok(common)
+                }
+
+                // シフト演算 (<< >>): 各オペランドを独立に整数昇格、
+                // 結果型は昇格後の左辺型（C 標準 6.5.7）
+                BinaryOp::ShiftLeft | BinaryOp::ShiftRight => {
+                    if left_type.is_void() || right_type.is_void() {
+                        return Err(CompileError::TypeError(
+                            "void expression used as operand of shift operation".to_string(),
+                        ));
+                    }
+                    if left_type.is_pointer() || right_type.is_pointer() {
+                        return Err(CompileError::TypeError(
+                            "shift operator cannot be applied to pointer types".to_string(),
+                        ));
+                    }
+                    if left_type == Type::Double || right_type == Type::Double {
+                        return Err(CompileError::TypeError(
+                            "shift operator cannot be applied to double".to_string(),
+                        ));
+                    }
+                    // 各オペランドを独立に整数昇格
+                    let promoted_left = integer_promote(&left_type);
+                    let promoted_right = integer_promote(&right_type);
+                    convert_operand(left, &left_type, &promoted_left);
+                    convert_operand(right, &right_type, &promoted_right);
+                    Ok(promoted_left)
                 }
 
                 // カンマ演算子: 右辺の型を返す
@@ -1328,6 +1352,15 @@ fn is_null_pointer_constant(expr: &Expr) -> bool {
 /// | Long     | Long | Long | Long  | ULong |
 /// | UInt     | UInt | Long | UInt  | ULong |
 /// | ULong    | ULong| ULong| ULong | ULong |
+/// 整数昇格 (integer promotion): Char/UChar/Int → Int, それ以外はそのまま。
+fn integer_promote(t: &Type) -> Type {
+    if t.is_character() {
+        Type::Int
+    } else {
+        t.clone()
+    }
+}
+
 fn common_type(a: &Type, b: &Type) -> Type {
     // Integer promotion: Char/UChar → Int（Chapter 16）
     let a = if a.is_character() { &Type::Int } else { a };

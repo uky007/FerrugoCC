@@ -325,3 +325,51 @@ int main(void) {
 "#;
     assert_eq!(compile_and_run(src, false), 42);
 }
+
+// ── エラーケース ──
+
+#[test]
+fn preprocess_missing_header_fails() {
+    let dir = TempDir::new().unwrap();
+    let source = r#"
+#include "nonexistent_header.h"
+int main(void) { return 0; }
+"#;
+    let src_path = dir.path().join("test.c");
+    std::fs::write(&src_path, source).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ferrugocc"))
+        .arg("-S")
+        .arg(&src_path)
+        .output()
+        .expect("failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "compilation should fail for missing header"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("preprocessing failed") || stderr.contains("nonexistent_header.h"),
+        "stderr should mention preprocessing failure: {stderr}"
+    );
+}
+
+#[test]
+fn preprocess_error_directive_fails() {
+    let dir = TempDir::new().unwrap();
+    let source = "#error \"intentional error\"\nint main(void) { return 0; }\n";
+    let src_path = dir.path().join("test.c");
+    std::fs::write(&src_path, source).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ferrugocc"))
+        .arg("-S")
+        .arg(&src_path)
+        .output()
+        .expect("failed to run compiler");
+
+    assert!(
+        !output.status.success(),
+        "compilation should fail for #error directive"
+    );
+}

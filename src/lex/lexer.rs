@@ -330,9 +330,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 } else if has_l {
                     TokenKind::LongLiteral(value as i64)
                 } else {
-                    // 32ビットに収まれば IntLiteral、それ以上は LongLiteral
+                    // C 標準 6.4.4.1: 16 進無接尾辞の型候補は
+                    // int → unsigned int → long → unsigned long
                     if value <= i32::MAX as u64 {
                         TokenKind::IntLiteral(value as i64)
+                    } else if value <= u32::MAX as u64 {
+                        TokenKind::UIntLiteral(value)
                     } else if value <= i64::MAX as u64 {
                         TokenKind::LongLiteral(value as i64)
                     } else {
