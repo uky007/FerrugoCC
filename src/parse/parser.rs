@@ -104,6 +104,8 @@ struct Parser<'a> {
     /// 直前にパースした型が enum 定義（`enum { ... }`）かどうか。
     /// `enum { ... };` のような定義のみ構文に対応するために使う。
     last_parsed_enum_def: bool,
+    /// 匿名 struct/union 用の連番カウンタ。
+    anon_counter: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -115,6 +117,7 @@ impl<'a> Parser<'a> {
             typedef_names: HashMap::new(),
             enum_constants: HashMap::new(),
             last_parsed_enum_def: false,
+            anon_counter: 0,
         }
     }
 
@@ -173,29 +176,10 @@ impl<'a> Parser<'a> {
     /// キャスト式 `(type)expr` と括弧式 `(expr)` の区別に使う。
     #[allow(dead_code)]
     fn is_type_keyword(&self) -> bool {
-        if self.pos >= self.tokens.len() {
-            return false;
-        }
-        match &self.tokens[self.pos].kind {
-            TokenKind::KwInt
-            | TokenKind::KwLong
-            | TokenKind::KwUnsigned
-            | TokenKind::KwSigned
-            | TokenKind::KwDouble
-            | TokenKind::KwChar
-            | TokenKind::KwVoid
-            | TokenKind::KwStruct
-            | TokenKind::KwEnum
-            | TokenKind::KwConst
-            | TokenKind::KwVolatile => true,
-            TokenKind::Identifier(name) => {
-                name == "va_list" || self.typedef_names.contains_key(name)
-            }
-            _ => false,
-        }
+        self.is_type_token_at(self.pos)
     }
 
-    /// 指定位置のトークンが型キーワードまたは typedef 名かどうかを判定する。
+    /// 指定位置のトークンが型キーワード・修飾子・関数指定子・typedef 名かどうかを判定する。
     fn is_type_token_at(&self, pos: usize) -> bool {
         if pos >= self.tokens.len() {
             return false;
@@ -203,15 +187,20 @@ impl<'a> Parser<'a> {
         match &self.tokens[pos].kind {
             TokenKind::KwInt
             | TokenKind::KwLong
+            | TokenKind::KwShort
             | TokenKind::KwUnsigned
             | TokenKind::KwSigned
             | TokenKind::KwDouble
             | TokenKind::KwChar
             | TokenKind::KwVoid
             | TokenKind::KwStruct
+            | TokenKind::KwUnion
             | TokenKind::KwEnum
             | TokenKind::KwConst
-            | TokenKind::KwVolatile => true,
+            | TokenKind::KwVolatile
+            | TokenKind::KwRestrict
+            | TokenKind::KwInline
+            | TokenKind::KwNoreturn => true,
             TokenKind::Identifier(name) => {
                 name == "va_list" || self.typedef_names.contains_key(name)
             }
@@ -234,6 +223,7 @@ impl<'a> Parser<'a> {
         let mut has_signed = false;
         let mut has_double = false;
         let mut has_char = false;
+        let mut has_short = false;
         let mut has_void = false;
         let mut count = 0;
 
@@ -242,10 +232,13 @@ impl<'a> Parser<'a> {
                 break;
             }
             match &self.peek()?.kind {
-                // Skip const/volatile qualifiers (parse-only, no semantics yet)
-                TokenKind::KwConst | TokenKind::KwVolatile => {
+                // Skip qualifiers and function specifiers (parse-only)
+                TokenKind::KwConst
+                | TokenKind::KwVolatile
+                | TokenKind::KwRestrict
+                | TokenKind::KwInline
+                | TokenKind::KwNoreturn => {
                     self.advance()?;
-                    // Don't increment count - qualifiers don't count as type specifiers
                     continue;
                 }
                 TokenKind::KwVoid => {
@@ -289,14 +282,11 @@ impl<'a> Parser<'a> {
                     count += 1;
                 }
                 TokenKind::KwLong => {
-                    if has_long {
+                    // long long は long と同義として許容（LP64）
+                    // long double も許容（Double で近似）
+                    if has_short {
                         return Err(CompileError::ParseError(
-                            "duplicate 'long' type specifier".to_string(),
-                        ));
-                    }
-                    if has_double {
-                        return Err(CompileError::ParseError(
-                            "cannot combine 'double' with other type specifiers".to_string(),
+                            "cannot combine 'long' and 'short'".to_string(),
                         ));
                     }
                     if has_char {
@@ -310,6 +300,21 @@ impl<'a> Parser<'a> {
                         ));
                     }
                     has_long = true;
+                    self.advance()?;
+                    count += 1;
+                }
+                TokenKind::KwShort => {
+                    if has_short {
+                        return Err(CompileError::ParseError(
+                            "duplicate 'short' type specifier".to_string(),
+                        ));
+                    }
+                    if has_long || has_double || has_char || has_void {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'short' with other type specifiers".to_string(),
+                        ));
+                    }
+                    has_short = true;
                     self.advance()?;
                     count += 1;
                 }
@@ -369,11 +374,12 @@ impl<'a> Parser<'a> {
                             "duplicate 'double' type specifier".to_string(),
                         ));
                     }
-                    if has_int || has_long || has_unsigned || has_signed || has_char || has_void {
+                    if has_int || has_unsigned || has_signed || has_char || has_void {
                         return Err(CompileError::ParseError(
                             "cannot combine 'double' with other type specifiers".to_string(),
                         ));
                     }
+                    // `long double` は Double として近似（parse-only）
                     has_double = true;
                     self.advance()?;
                     count += 1;
@@ -393,10 +399,11 @@ impl<'a> Parser<'a> {
                     self.advance()?;
                     count += 1;
                 }
-                TokenKind::KwStruct => {
+                TokenKind::KwStruct | TokenKind::KwUnion => {
                     if count > 0 {
                         return Err(CompileError::ParseError(
-                            "cannot combine 'struct' with other type specifiers".to_string(),
+                            "cannot combine 'struct'/'union' with other type specifiers"
+                                .to_string(),
                         ));
                     }
                     return self.parse_struct_type();
@@ -414,6 +421,16 @@ impl<'a> Parser<'a> {
                     if name == "va_list" {
                         self.advance()?;
                         return Ok(Type::VaList);
+                    }
+                    // GCC 組み込み型（parse-only: Long で近似）
+                    if name == "__uint128_t" || name == "__int128_t" || name == "__int128" {
+                        self.advance()?;
+                        return Ok(Type::Long);
+                    }
+                    // float → Double として近似（parse-only）
+                    if name == "float" {
+                        self.advance()?;
+                        return Ok(Type::Double);
                     }
                     // 他の型キーワードが未出現の場合のみ typedef 名として認識
                     if let Some(ty) = self.typedef_names.get(name).cloned() {
@@ -449,11 +466,17 @@ impl<'a> Parser<'a> {
         } else if has_unsigned {
             if has_long {
                 Ok(Type::ULong)
+            } else if has_short {
+                // unsigned short → treat as UInt (16-bit semantics not yet supported)
+                Ok(Type::UInt)
             } else {
                 Ok(Type::UInt)
             }
         } else if has_long {
             Ok(Type::Long)
+        } else if has_short {
+            // short / short int / signed short → treat as Int (16-bit semantics not yet)
+            Ok(Type::Int)
         } else {
             // has_int or has_signed (or both)
             Ok(Type::Int)
@@ -466,12 +489,18 @@ impl<'a> Parser<'a> {
     fn parse_struct_type(&mut self) -> Result<Type> {
         self.advance()?; // consume 'struct'
 
-        // タグ名を取得
+        // タグ名を取得（匿名 struct/union は合成名を生成）
         let tag = match &self.peek()?.kind {
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance()?;
                 name
+            }
+            TokenKind::OpenBrace => {
+                // 匿名 struct/union: `struct { ... }` or `union { ... }`
+                let id = self.anon_counter;
+                self.anon_counter += 1;
+                format!("__anon_{id}")
             }
             _ => {
                 return Err(CompileError::ParseError(
@@ -487,12 +516,34 @@ impl<'a> Parser<'a> {
             let mut members = Vec::new();
             while self.peek()?.kind != TokenKind::CloseBrace {
                 let member_base = self.parse_type_specifier()?;
-                let (member_type, member_name) = self.parse_declarator(member_base)?;
-                self.expect(&TokenKind::Semicolon)?;
+                // 構造体メンバは tolerant パーサを使用（システムヘッダの
+                // 複雑な配列サイズ式・関数ポインタ・無名メンバに対応）
+                let (member_type, member_name) =
+                    self.parse_param_declarator(member_base.clone())?;
+                // ビットフィールド `:width` をスキップ
+                if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Colon {
+                    self.advance()?; // consume ':'
+                    self.advance()?; // consume width (IntLiteral)
+                }
                 members.push(MemberDecl {
                     name: member_name,
-                    member_type,
+                    member_type: member_type.clone(),
                 });
+                // カンマ区切りメンバ: `int a:1, b:2, c:3;`
+                while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Comma {
+                    self.advance()?; // consume ','
+                    let (extra_type, extra_name) =
+                        self.parse_param_declarator(member_base.clone())?;
+                    if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Colon {
+                        self.advance()?;
+                        self.advance()?;
+                    }
+                    members.push(MemberDecl {
+                        name: extra_name,
+                        member_type: extra_type,
+                    });
+                }
+                self.expect(&TokenKind::Semicolon)?;
             }
             self.expect(&TokenKind::CloseBrace)?;
 
@@ -600,10 +651,62 @@ impl<'a> Parser<'a> {
             while self.pos < self.tokens.len()
                 && matches!(
                     self.peek()?.kind,
-                    TokenKind::KwConst | TokenKind::KwVolatile
+                    TokenKind::KwConst | TokenKind::KwVolatile | TokenKind::KwRestrict
                 )
             {
                 self.advance()?;
+            }
+        }
+
+        // 関数ポインタ: `(*name)(params)` — parse-only, Pointer(Void) として扱う
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
+            // `(` の後に `*` があれば関数ポインタ宣言子
+            if self.pos + 1 < self.tokens.len()
+                && matches!(self.tokens[self.pos + 1].kind, TokenKind::Star | TokenKind::Caret)
+            {
+                self.advance()?; // consume '('
+                self.advance()?; // consume '*' or '^'
+                // Clang nullability attributes: _Nullable, _Nonnull, _Null_unspecified
+                while self.pos < self.tokens.len() {
+                    if let TokenKind::Identifier(attr) = &self.peek()?.kind {
+                        if attr.starts_with("_N") || attr.starts_with("_null") {
+                            self.advance()?;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                let name_token = self.advance()?;
+                let name = match &name_token.kind {
+                    TokenKind::Identifier(name) => name.clone(),
+                    other => {
+                        return Err(CompileError::ParseError(format!(
+                            "expected identifier in function pointer declarator, got {:?}",
+                            other
+                        )));
+                    }
+                };
+                self.expect(&TokenKind::CloseParen)?;
+                // パラメータリストをスキップ: `(...)` — balanced parens
+                if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
+                    let mut depth = 0;
+                    loop {
+                        let tok = self.advance()?;
+                        match tok.kind {
+                            TokenKind::OpenParen => depth += 1,
+                            TokenKind::CloseParen => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // 関数ポインタ → Pointer(Void) として近似
+                let ty = Type::Pointer(Box::new(Type::Void));
+                return Ok((ty, name));
             }
         }
 
@@ -623,8 +726,9 @@ impl<'a> Parser<'a> {
             ty = Type::Pointer(Box::new(ty));
         }
 
-        // Chapter 15: 配列サフィックス `[N]`
-        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
+        // Chapter 15: 配列サフィックス `[N]`（多次元対応、厳格モード）
+        // ユーザコード用: IntLiteral のみ受理。複雑な定数式は未サポート。
+        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
             self.advance()?; // consume '['
             if let TokenKind::IntLiteral(n) = &self.peek()?.kind {
                 let n = *n as usize;
@@ -637,6 +741,129 @@ impl<'a> Parser<'a> {
                 return Err(CompileError::ParseError(
                     "expected array size or ']' in declarator".to_string(),
                 ));
+            }
+            self.expect(&TokenKind::CloseBracket)?;
+        }
+
+        Ok((ty, name))
+    }
+
+    /// パラメータ宣言子のパース。
+    ///
+    /// 名前付き `int x` と名前なし `int` の両方を受け付ける。
+    /// システムヘッダの `int printf(const char *, ...)` 等に対応。
+    fn parse_param_declarator(&mut self, base_type: Type) -> Result<(Type, String)> {
+        // ポインタの `*` をカウント（const/volatile/restrict をスキップ）
+        let mut stars = 0;
+        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Star {
+            self.advance()?;
+            stars += 1;
+            while self.pos < self.tokens.len()
+                && matches!(
+                    self.peek()?.kind,
+                    TokenKind::KwConst | TokenKind::KwVolatile | TokenKind::KwRestrict
+                )
+            {
+                self.advance()?;
+            }
+        }
+
+        // 関数ポインタ: `(*name)(params)` or `(* _Nonnull)(...)` — parse-only
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
+            if self.pos + 1 < self.tokens.len()
+                && matches!(self.tokens[self.pos + 1].kind, TokenKind::Star | TokenKind::Caret)
+            {
+                self.advance()?; // consume '('
+                self.advance()?; // consume '*' or '^'
+                // Clang nullability attributes: _Nullable, _Nonnull, _Null_unspecified
+                while self.pos < self.tokens.len() {
+                    if let TokenKind::Identifier(attr) = &self.peek()?.kind {
+                        if attr.starts_with("_N") || attr.starts_with("_null") {
+                            self.advance()?;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                // 名前があれば取得、なければ匿名（`(*)(...)`）
+                let name =
+                    if let TokenKind::Identifier(name) = &self.peek()?.kind {
+                        let name = name.clone();
+                        self.advance()?;
+                        name
+                    } else {
+                        String::new()
+                    };
+                self.expect(&TokenKind::CloseParen)?;
+                // パラメータリストをスキップ
+                if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
+                    let mut depth = 0;
+                    loop {
+                        let tok = self.advance()?;
+                        match tok.kind {
+                            TokenKind::OpenParen => depth += 1,
+                            TokenKind::CloseParen => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let ty = Type::Pointer(Box::new(Type::Void));
+                return Ok((ty, name));
+            }
+        }
+
+        // 次のトークンが識別子なら名前付きパラメータ
+        let name = if self.pos < self.tokens.len() {
+            if let TokenKind::Identifier(name) = &self.peek()?.kind {
+                let name = name.clone();
+                self.advance()?;
+                name
+            } else {
+                // 名前なしパラメータ（例: `int`, `const char *`）
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let mut ty = base_type;
+        for _ in 0..stars {
+            ty = Type::Pointer(Box::new(ty));
+        }
+
+        // 配列サフィックス `[N]`（多次元対応）
+        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
+            self.advance()?; // consume '['
+            // 単純な `[N]` — IntLiteral 直後に `]`
+            if matches!(&self.peek()?.kind, TokenKind::IntLiteral(_))
+                && self.pos + 1 < self.tokens.len()
+                && self.tokens[self.pos + 1].kind == TokenKind::CloseBracket
+            {
+                if let TokenKind::IntLiteral(n) = &self.peek()?.kind {
+                    let n = *n as usize;
+                    self.advance()?;
+                    ty = Type::Array(Box::new(ty), n);
+                }
+            } else if self.peek()?.kind == TokenKind::CloseBracket {
+                ty = Type::Array(Box::new(ty), 0);
+            } else {
+                // 複雑な定数式: balanced bracket skip
+                let mut depth = 1;
+                while depth > 0 {
+                    let tok = self.advance()?;
+                    match tok.kind {
+                        TokenKind::OpenBracket => depth += 1,
+                        TokenKind::CloseBracket => depth -= 1,
+                        _ => {}
+                    }
+                }
+                ty = Type::Array(Box::new(ty), 0);
+                continue;
             }
             self.expect(&TokenKind::CloseBracket)?;
         }
@@ -657,7 +884,7 @@ impl<'a> Parser<'a> {
             while self.pos < self.tokens.len()
                 && matches!(
                     self.peek()?.kind,
-                    TokenKind::KwConst | TokenKind::KwVolatile
+                    TokenKind::KwConst | TokenKind::KwVolatile | TokenKind::KwRestrict
                 )
             {
                 self.advance()?;
@@ -755,7 +982,39 @@ impl<'a> Parser<'a> {
         }
         self.last_parsed_enum_def = false;
 
-        let (decl_type, name) = self.parse_declarator(base_type.clone())?;
+        // 複雑な宣言子（関数ポインタを返す関数等）の回復:
+        // `(*` or `(^` で始まる場合のみ（`void(*signal(...))(int);` 等の複雑パターン）
+        let try_recovery = self.pos + 1 < self.tokens.len()
+            && self.peek()?.kind == TokenKind::OpenParen
+            && matches!(
+                self.tokens[self.pos + 1].kind,
+                TokenKind::Star | TokenKind::Caret
+            );
+        let saved_pos = self.pos;
+        let (decl_type, name) = match self.parse_declarator(base_type.clone()) {
+            Ok(result) => result,
+            Err(e) => {
+                if try_recovery {
+                    // 回復: `;` までスキップしてダミー宣言を返す
+                    self.pos = saved_pos;
+                    while self.pos < self.tokens.len()
+                        && self.peek()?.kind != TokenKind::Semicolon
+                    {
+                        self.advance()?;
+                    }
+                    if self.pos < self.tokens.len() {
+                        self.advance()?; // consume ';'
+                    }
+                    return Ok(vec![TopLevelDecl::Variable(Declaration {
+                        name: String::new(),
+                        var_type: base_type,
+                        init: None,
+                        storage_class,
+                    })]);
+                }
+                return Err(e);
+            }
+        };
 
         // `(` → 関数、`=`/`;` → 変数
         if self.peek()?.kind == TokenKind::OpenParen {
@@ -773,7 +1032,7 @@ impl<'a> Parser<'a> {
             } else {
                 let mut params = Vec::new();
                 let param_base = self.parse_type_specifier()?;
-                let (mut param_type, param_name) = self.parse_declarator(param_base)?;
+                let (mut param_type, param_name) = self.parse_param_declarator(param_base)?;
                 // Chapter 15: 配列パラメータ → ポインタに変換
                 if let Type::Array(elem, _) = param_type {
                     param_type = Type::Pointer(elem);
@@ -788,7 +1047,7 @@ impl<'a> Parser<'a> {
                         break;
                     }
                     let param_base = self.parse_type_specifier()?;
-                    let (mut param_type, param_name) = self.parse_declarator(param_base)?;
+                    let (mut param_type, param_name) = self.parse_param_declarator(param_base)?;
                     if let Type::Array(elem, _) = param_type {
                         param_type = Type::Pointer(elem);
                     }
@@ -877,6 +1136,7 @@ impl<'a> Parser<'a> {
         match &self.peek()?.kind {
             TokenKind::KwInt
             | TokenKind::KwLong
+            | TokenKind::KwShort
             | TokenKind::KwUnsigned
             | TokenKind::KwSigned
             | TokenKind::KwDouble
@@ -885,9 +1145,13 @@ impl<'a> Parser<'a> {
             | TokenKind::KwStatic
             | TokenKind::KwExtern
             | TokenKind::KwStruct
+            | TokenKind::KwUnion
             | TokenKind::KwEnum
             | TokenKind::KwConst
-            | TokenKind::KwVolatile => {
+            | TokenKind::KwVolatile
+            | TokenKind::KwRestrict
+            | TokenKind::KwInline
+            | TokenKind::KwNoreturn => {
                 let decls = self.parse_declaration()?;
                 Ok(decls.into_iter().map(BlockItem::Declaration).collect())
             }

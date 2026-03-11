@@ -678,13 +678,40 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "sizeof" => TokenKind::KwSizeof,
                 "char" => TokenKind::KwChar,
                 "struct" => TokenKind::KwStruct,
+                "union" => TokenKind::KwUnion,
                 "typedef" => TokenKind::KwTypedef,
                 "enum" => TokenKind::KwEnum,
                 "switch" => TokenKind::KwSwitch,
                 "case" => TokenKind::KwCase,
                 "default" => TokenKind::KwDefault,
-                "const" => TokenKind::KwConst,
-                "volatile" => TokenKind::KwVolatile,
+                "short" => TokenKind::KwShort,
+                "const" | "__const" | "__const__" => TokenKind::KwConst,
+                "volatile" | "__volatile" | "__volatile__" => TokenKind::KwVolatile,
+                "restrict" | "__restrict" | "__restrict__" => TokenKind::KwRestrict,
+                "inline" | "__inline" | "__inline__" => TokenKind::KwInline,
+                "_Noreturn" | "__noreturn__" => TokenKind::KwNoreturn,
+                "__signed__" => TokenKind::KwSigned,
+
+                // __extension__ は no-op — トークンを発行しない
+                "__extension__" => continue,
+
+                // __attribute__((...)) — 二重括弧を含む全体を読み飛ばす
+                "__attribute__" | "__attribute" => {
+                    skip_attribute_parens(bytes, &mut pos, &mut column, &mut line)?;
+                    continue;
+                }
+
+                // __asm / __asm__("...") — 括弧を含む全体を読み飛ばす
+                "__asm" | "__asm__" | "asm" => {
+                    skip_balanced_parens(bytes, &mut pos, &mut column, &mut line)?;
+                    continue;
+                }
+
+                // __builtin_va_list は va_list として識別子を発行
+                "__builtin_va_list" | "__darwin_va_list" => {
+                    TokenKind::Identifier("va_list".to_string())
+                }
+
                 _ => TokenKind::Identifier(text.to_string()),
             };
             tokens.push(Token {
@@ -699,6 +726,15 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             continue;
         }
 
+        // ── # で始まる行（#pragma 等）→ 行末まで読み飛ばす ──
+        if b == b'#' {
+            while pos < bytes.len() && bytes[pos] != b'\n' {
+                pos += 1;
+                column += 1;
+            }
+            continue;
+        }
+
         // ── 未知の文字 ──
         return Err(CompileError::LexError(format!(
             "unexpected character '{}' at line {line}, column {column}",
@@ -707,6 +743,72 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
     }
 
     Ok(tokens)
+}
+
+/// `__attribute__((...))`  の二重括弧を読み飛ばす。
+/// `__attribute__` の直後に `((` が来ない場合は何もしない（安全に無視）。
+fn skip_attribute_parens(
+    bytes: &[u8],
+    pos: &mut usize,
+    column: &mut usize,
+    line: &mut usize,
+) -> Result<()> {
+    // 空白を飛ばして `(` を探す
+    skip_whitespace(bytes, pos, column, line);
+    if *pos >= bytes.len() || bytes[*pos] != b'(' {
+        return Ok(());
+    }
+    // 一般的な balanced paren skip（外側の括弧を含む）
+    skip_balanced_parens(bytes, pos, column, line)
+}
+
+/// 現在位置が `(` なら、対応する `)` まで（ネスト対応）読み飛ばす。
+/// `(` でなければ何もしない。
+fn skip_balanced_parens(
+    bytes: &[u8],
+    pos: &mut usize,
+    column: &mut usize,
+    line: &mut usize,
+) -> Result<()> {
+    skip_whitespace(bytes, pos, column, line);
+    if *pos >= bytes.len() || bytes[*pos] != b'(' {
+        return Ok(());
+    }
+    let mut depth: usize = 0;
+    while *pos < bytes.len() {
+        let b = bytes[*pos];
+        *pos += 1;
+        if b == b'\n' {
+            *line += 1;
+            *column = 1;
+        } else {
+            *column += 1;
+        }
+        if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(());
+            }
+        }
+    }
+    Err(CompileError::LexError(
+        "unterminated parentheses in __attribute__/__asm".to_string(),
+    ))
+}
+
+/// 空白・改行を読み飛ばす（位置カウンタを更新）。
+fn skip_whitespace(bytes: &[u8], pos: &mut usize, column: &mut usize, line: &mut usize) {
+    while *pos < bytes.len() && bytes[*pos].is_ascii_whitespace() {
+        if bytes[*pos] == b'\n' {
+            *line += 1;
+            *column = 1;
+        } else {
+            *column += 1;
+        }
+        *pos += 1;
+    }
 }
 
 #[cfg(test)]

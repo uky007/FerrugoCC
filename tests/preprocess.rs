@@ -326,6 +326,55 @@ int main(void) {
     assert_eq!(compile_and_run(src, false), 42);
 }
 
+// ── システムヘッダ受理（Phase 1.5: GCC extension tolerance） ──
+
+/// `gcc -E -P` 出力を `--parse` で受理できることを確認。
+/// 各ヘッダは __attribute__, __extension__, restrict 等の GCC 拡張を含む。
+fn assert_system_header_parses(header: &str) {
+    let dir = TempDir::new().unwrap();
+    let source = format!("#include <{header}>\nint main(void) {{ return 0; }}\n");
+    let src_path = dir.path().join("test.c");
+    std::fs::write(&src_path, &source).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ferrugocc"))
+        .arg("--parse")
+        .arg(&src_path)
+        .output()
+        .expect("failed to run compiler");
+
+    assert!(
+        output.status.success(),
+        "parsing {header} failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn system_header_stdio() {
+    assert_system_header_parses("stdio.h");
+}
+
+#[test]
+fn system_header_stdlib() {
+    assert_system_header_parses("stdlib.h");
+}
+
+#[test]
+fn system_header_string() {
+    assert_system_header_parses("string.h");
+}
+
+#[test]
+fn system_header_stdint() {
+    assert_system_header_parses("stdint.h");
+}
+
+#[test]
+fn system_header_sys_types() {
+    assert_system_header_parses("sys/types.h");
+}
+
 // ── エラーケース ──
 
 #[test]

@@ -74,6 +74,8 @@ pub enum TokenKind {
     KwChar,
     /// `struct` キーワード — 構造体型（Chapter 18）
     KwStruct,
+    /// `union` キーワード — 共用体型（parse-only: struct として扱う）
+    KwUnion,
     /// `typedef` キーワード — 型エイリアス定義
     KwTypedef,
     /// `enum` キーワード — 列挙型
@@ -84,10 +86,18 @@ pub enum TokenKind {
     KwCase,
     /// `default` キーワード — switch のデフォルトラベル
     KwDefault,
+    /// `short` キーワード — 短整数型
+    KwShort,
     /// `const` キーワード — 型修飾子（parse-only）
     KwConst,
     /// `volatile` キーワード — 型修飾子（parse-only）
     KwVolatile,
+    /// `restrict` / `__restrict` / `__restrict__` — 型修飾子（parse-only, 無視）
+    KwRestrict,
+    /// `inline` / `__inline__` / `__inline` — 関数指定子（parse-only, 無視）
+    KwInline,
+    /// `_Noreturn` / `__attribute__((noreturn))` 相当（parse-only, 無視）
+    KwNoreturn,
 
     // ── 演算子 ──（Chapter 2 で追加）
     /// `-` — 単項マイナス / 二項減算
