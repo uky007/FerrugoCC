@@ -2356,14 +2356,36 @@ impl TackyGenerator {
                         )));
                     }
                 }
-            } else if var_type.is_pointer() && matches!(op, BinaryOp::Add) {
+            } else if var_type.is_pointer() && matches!(op, BinaryOp::Add | BinaryOp::Subtract) {
                 let elem_size = var_type.target_type().unwrap().size();
-                instrs.push(TackyInstruction::AddPtr {
-                    ptr: old_val.clone(),
-                    index: rhs_val,
-                    scale: elem_size,
-                    dst: dst.clone(),
-                });
+                if matches!(op, BinaryOp::Add) {
+                    instrs.push(TackyInstruction::AddPtr {
+                        ptr: old_val.clone(),
+                        index: rhs_val,
+                        scale: elem_size,
+                        dst: dst.clone(),
+                    });
+                } else {
+                    // ptr -= int: scale and subtract
+                    let scaled = if elem_size != 1 {
+                        let tmp = self.new_temp(Type::Long);
+                        instrs.push(TackyInstruction::Binary {
+                            op: TackyBinaryOp::Multiply,
+                            left: rhs_val,
+                            right: TackyVal::Constant(TackyConst::Long(elem_size as i64)),
+                            dst: tmp.clone(),
+                        });
+                        tmp
+                    } else {
+                        rhs_val
+                    };
+                    instrs.push(TackyInstruction::Binary {
+                        op: TackyBinaryOp::Subtract,
+                        left: old_val.clone(),
+                        right: scaled,
+                        dst: dst.clone(),
+                    });
+                }
                 instrs.push(TackyInstruction::Store {
                     src: dst.clone(),
                     dst_ptr: addr,

@@ -362,3 +362,25 @@ int main(void) {
     assert_eq!(normal, 53);
     assert_eq!(obfuscated, 53);
 }
+
+// ── pointer -= on general lvalue (non-variable) ──
+
+#[test]
+fn pointer_subtract_assign_deref() {
+    if !can_run_x86_64() { return; }
+    let src = r#"
+int main(void) {
+    int arr[5];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 30;
+    arr[3] = 40;
+    arr[4] = 42;
+    int *p = &arr[4];
+    int **pp = &p;
+    *pp -= 2;
+    return *p + arr[0];
+}
+"#;
+    assert_eq!(compile_and_run(src, false), 40);
+}
