@@ -69,6 +69,23 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                     }
                 }
             }
+            // Prefix _ on data directives referencing symbols (.quad sym, .long sym)
+            for directive in &[".quad ", ".long "] {
+                if let Some(idx) = trimmed.find(directive) {
+                    let after = &trimmed[idx + directive.len()..];
+                    let sym = after.split_whitespace().next().unwrap_or("");
+                    if !sym.is_empty()
+                        && !sym.starts_with('.')
+                        && sym.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                    {
+                        new_line = new_line.replacen(
+                            &format!("{directive}{sym}"),
+                            &format!("{directive}_{sym}"),
+                            1,
+                        );
+                    }
+                }
+            }
             // Prefix _ on sym(%rip) references (data/function addresses)
             let mut search_from = 0;
             while let Some(rel_idx) = new_line[search_from..].find("(%rip)") {
@@ -193,6 +210,30 @@ fn inih_compile_and_run_obfuscated() {
     }
     assert_eq!(
         compile_and_run_corpus("corpus/inih/test_inih.c", true),
+        42
+    );
+}
+
+// ── sds (Tier 1) ──
+
+#[test]
+fn sds_compile_and_run() {
+    if !can_run_x86_64() {
+        return;
+    }
+    assert_eq!(
+        compile_and_run_corpus("corpus/sds/test_sds.c", false),
+        42
+    );
+}
+
+#[test]
+fn sds_compile_and_run_obfuscated() {
+    if !can_run_x86_64() {
+        return;
+    }
+    assert_eq!(
+        compile_and_run_corpus("corpus/sds/test_sds.c", true),
         42
     );
 }
