@@ -18,14 +18,23 @@ fn can_run_x86_64() -> bool {
 }
 
 fn fixup_asm_for_macos(asm: &str) -> String {
+    use std::collections::HashSet;
+
     let mut result = Vec::new();
-    let mut symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Collect all non-local symbols (labels without . prefix)
+    let mut all_symbols: HashSet<String> = HashSet::new();
     for line in asm.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix(".globl ") {
-            symbols.insert(rest.trim().to_string());
+            all_symbols.insert(rest.trim().to_string());
+        }
+        // Labels: non-local (no . prefix)
+        if trimmed.ends_with(':') && !trimmed.starts_with('.') {
+            let label = trimmed.trim_end_matches(':');
+            all_symbols.insert(label.to_string());
         }
     }
+
     for line in asm.lines() {
         let trimmed = line.trim();
         if trimmed.contains(".note.GNU-stack") {
@@ -41,22 +50,45 @@ fn fixup_asm_for_macos(asm: &str) -> String {
             new_line = format!("    .globl _{sym}");
         } else if trimmed.ends_with(':') && !trimmed.starts_with('.') {
             let label = trimmed.trim_end_matches(':');
-            if symbols.contains(label) {
-                new_line = format!("_{label}:");
-            }
+            new_line = format!("_{label}:");
         } else {
-            for sym in &symbols {
-                if new_line.contains(&format!("call {sym}"))
-                    || new_line.contains(&format!("call\t{sym}"))
-                {
-                    new_line = new_line.replace(
-                        &format!("call {sym}"),
-                        &format!("call _{sym}"),
-                    );
-                    new_line = new_line.replace(
-                        &format!("call\t{sym}"),
-                        &format!("call\t_{sym}"),
-                    );
+            // Prefix _ on call targets (non-local, non-indirect)
+            for prefix in &["call ", "call\t"] {
+                if let Some(idx) = new_line.find(prefix) {
+                    let after = &new_line[idx + prefix.len()..];
+                    let sym = after.split_whitespace().next().unwrap_or("");
+                    if !sym.is_empty()
+                        && !sym.starts_with('.')
+                        && !sym.starts_with('*')
+                    {
+                        new_line = new_line.replacen(
+                            &format!("{prefix}{sym}"),
+                            &format!("{prefix}_{sym}"),
+                            1,
+                        );
+                    }
+                }
+            }
+            // Prefix _ on sym(%rip) references (data/function addresses)
+            let mut search_from = 0;
+            while let Some(rel_idx) = new_line[search_from..].find("(%rip)") {
+                let rip_idx = search_from + rel_idx;
+                // Find the symbol before (%rip)
+                let before = &new_line[..rip_idx];
+                // Walk backwards to find the start of the symbol (include . for local labels)
+                let sym_start = before
+                    .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                let sym = &new_line[sym_start..rip_idx];
+                if !sym.is_empty() && !sym.starts_with('.') {
+                    let replacement = format!("_{sym}(%rip)");
+                    let original = format!("{sym}(%rip)");
+                    new_line = new_line.replacen(&original, &replacement, 1);
+                    // Skip past the replacement to avoid infinite loop
+                    search_from = sym_start + replacement.len();
+                } else {
+                    search_from = rip_idx + 6; // skip past "(%rip)"
                 }
             }
         }
@@ -139,6 +171,30 @@ fn compile_and_run_corpus(source_path: &str, obfuscate: bool) -> i32 {
     };
 
     run_output.status.code().unwrap_or(-1)
+}
+
+// ── inih (Tier 1) ──
+
+#[test]
+fn inih_compile_and_run() {
+    if !can_run_x86_64() {
+        return;
+    }
+    assert_eq!(
+        compile_and_run_corpus("corpus/inih/test_inih.c", false),
+        42
+    );
+}
+
+#[test]
+fn inih_compile_and_run_obfuscated() {
+    if !can_run_x86_64() {
+        return;
+    }
+    assert_eq!(
+        compile_and_run_corpus("corpus/inih/test_inih.c", true),
+        42
+    );
 }
 
 // ── jsmn (Tier 1) ──
