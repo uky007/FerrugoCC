@@ -95,6 +95,39 @@ pub fn typecheck(program: &mut Program) -> Result<()> {
     Ok(())
 }
 
+/// `char s[] = "hello"` / `char s[10] = "hello"` — 文字列リテラルを char 配列初期化子に変換。
+/// サイズ 0 の場合は文字列長+1（null終端含む）から推論する。
+fn convert_string_to_char_array(decl: &mut Declaration) -> Result<()> {
+    if let Some(Expr::StringLiteral(s)) = &decl.init {
+        if let Type::Array(ref elem_type, count) = decl.var_type {
+            if matches!(**elem_type, Type::Char | Type::UChar) {
+                let bytes: Vec<u8> = s.bytes().collect();
+                let str_len = bytes.len() + 1; // null terminator 含む
+                let array_size = if count == 0 { str_len } else { count };
+                if count > 0 && bytes.len() > count {
+                    return Err(CompileError::TypeError(format!(
+                        "initializer-string for '{}' is too long ({} chars for array of {})",
+                        decl.name,
+                        bytes.len(),
+                        count
+                    )));
+                }
+                decl.var_type = Type::Array(elem_type.clone(), array_size);
+                let mut chars: Vec<Expr> = bytes
+                    .iter()
+                    .take(array_size)
+                    .map(|&b| Expr::Constant(b as i64))
+                    .collect();
+                while chars.len() < array_size {
+                    chars.push(Expr::Constant(0));
+                }
+                decl.init = Some(Expr::CompoundInit(chars));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// ファイルスコープ変数の型検査。
 fn typecheck_file_scope_var(
     decl: &mut Declaration,
@@ -120,6 +153,9 @@ fn typecheck_file_scope_var(
             decl.name
         )));
     }
+
+    // char s[] = "hello" / char s[10] = "hello": 文字列→char配列変換
+    convert_string_to_char_array(decl)?;
 
     symbols.insert(
         decl.name.clone(),
@@ -219,6 +255,9 @@ fn typecheck_local_declaration(
             decl.name
         )));
     }
+
+    // char s[] = "hello" / char s[10] = "hello": 文字列→char配列変換
+    convert_string_to_char_array(decl)?;
 
     symbols.insert(
         decl.name.clone(),

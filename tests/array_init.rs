@@ -282,3 +282,70 @@ int main(void) {
 "#;
     assert_eq!(compile_and_run(source), 11);
 }
+
+// ── char s[] = "hello" (文字列リテラルによる char 配列初期化) ──
+
+/// char s[] = "hello": サイズ推論 + null 終端
+#[test]
+fn char_array_from_string_basic() {
+    if !can_run_x86_64() { return; }
+    let source = r#"
+int main(void) {
+    char s[] = "hello";
+    if (s[0] != 104) return 1;
+    if (s[4] != 111) return 2;
+    if (s[5] != 0) return 3;
+    return 42;
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
+
+/// char s[10] = "hi": 明示サイズ + ゼロ埋め
+#[test]
+fn char_array_from_string_explicit_size() {
+    if !can_run_x86_64() { return; }
+    let source = r#"
+int main(void) {
+    char s[10] = "hi";
+    if (s[0] != 104) return 1;
+    if (s[1] != 105) return 2;
+    if (s[2] != 0) return 3;
+    if (s[9] != 0) return 4;
+    return 42;
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
+
+/// グローバル char[] = "hello"
+#[test]
+fn char_array_from_string_global() {
+    if !can_run_x86_64() { return; }
+    let source = r#"
+char greeting[] = "world";
+int main(void) {
+    if (greeting[0] != 119) return 1;
+    if (greeting[4] != 100) return 2;
+    if (greeting[5] != 0) return 3;
+    return 42;
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
+
+/// static ローカル char[] = "abc"
+#[test]
+fn char_array_from_string_static() {
+    if !can_run_x86_64() { return; }
+    let source = r#"
+int main(void) {
+    static char s[] = "abc";
+    if (s[0] != 97) return 1;
+    if (s[2] != 99) return 2;
+    if (s[3] != 0) return 3;
+    return 42;
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
