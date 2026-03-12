@@ -558,6 +558,92 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// enum 定数の初期値式をパースし、定数値として返す。
+    ///
+    /// 対応パターン: リテラル、`-lit`、`lit << lit`、`lit | lit`、
+    /// `(expr)`、既存 enum 定数名。
+    fn parse_enum_const_expr(&mut self) -> Result<i64> {
+        let val = self.parse_enum_const_bitor()?;
+        Ok(val)
+    }
+
+    /// enum 定数式: ビット OR (`|`)
+    fn parse_enum_const_bitor(&mut self) -> Result<i64> {
+        let mut val = self.parse_enum_const_shift()?;
+        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Pipe {
+            self.advance()?;
+            let rhs = self.parse_enum_const_shift()?;
+            val |= rhs;
+        }
+        Ok(val)
+    }
+
+    /// enum 定数式: シフト (`<<`, `>>`)
+    fn parse_enum_const_shift(&mut self) -> Result<i64> {
+        let mut val = self.parse_enum_const_unary()?;
+        while self.pos < self.tokens.len() {
+            match self.peek()?.kind {
+                TokenKind::ShiftLeft => {
+                    self.advance()?;
+                    let rhs = self.parse_enum_const_unary()?;
+                    val <<= rhs;
+                }
+                TokenKind::ShiftRight => {
+                    self.advance()?;
+                    let rhs = self.parse_enum_const_unary()?;
+                    val >>= rhs;
+                }
+                _ => break,
+            }
+        }
+        Ok(val)
+    }
+
+    /// enum 定数式: 単項 (`-`, `~`)
+    fn parse_enum_const_unary(&mut self) -> Result<i64> {
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Minus {
+            self.advance()?;
+            let val = self.parse_enum_const_primary()?;
+            return Ok(-val);
+        }
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Tilde {
+            self.advance()?;
+            let val = self.parse_enum_const_primary()?;
+            return Ok(!val);
+        }
+        self.parse_enum_const_primary()
+    }
+
+    /// enum 定数式: プライマリ (リテラル、enum 定数名、括弧)
+    fn parse_enum_const_primary(&mut self) -> Result<i64> {
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
+            self.advance()?; // consume '('
+            let val = self.parse_enum_const_expr()?;
+            self.expect(&TokenKind::CloseParen)?;
+            return Ok(val);
+        }
+        let tok = self.advance()?;
+        match &tok.kind {
+            TokenKind::IntLiteral(v) => Ok(*v),
+            TokenKind::LongLiteral(v) => Ok(*v),
+            TokenKind::UIntLiteral(v) => Ok(*v as i64),
+            TokenKind::ULongLiteral(v) => Ok(*v as i64),
+            TokenKind::Identifier(name) => {
+                if let Some(&val) = self.enum_constants.get(name) {
+                    Ok(val)
+                } else {
+                    Err(CompileError::ParseError(format!(
+                        "unknown enum constant '{name}' in enum initializer"
+                    )))
+                }
+            }
+            other => Err(CompileError::ParseError(format!(
+                "expected constant expression in enum initializer, got {:?}",
+                other
+            ))),
+        }
+    }
+
     /// enum 型のパース。
     ///
     /// `enum [tag] { NAME [= value], ... }` または `enum tag` を解析する。
@@ -596,28 +682,10 @@ impl<'a> Parser<'a> {
                     }
                 };
 
-                // 明示値: `NAME = value`
+                // 明示値: `NAME = const_expr`
                 if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Assign {
                     self.advance()?; // consume '='
-                    // 負値対応: '-' リテラル
-                    let negative = if self.peek()?.kind == TokenKind::Minus {
-                        self.advance()?;
-                        true
-                    } else {
-                        false
-                    };
-                    let val_token = self.advance()?;
-                    let value = match &val_token.kind {
-                        TokenKind::IntLiteral(v) => *v,
-                        TokenKind::LongLiteral(v) => *v,
-                        other => {
-                            return Err(CompileError::ParseError(format!(
-                                "expected integer constant for enum value, got {:?}",
-                                other
-                            )));
-                        }
-                    };
-                    next_value = if negative { -value } else { value };
+                    next_value = self.parse_enum_const_expr()?;
                 }
 
                 self.enum_constants.insert(const_name, next_value);
