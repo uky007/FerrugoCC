@@ -1628,68 +1628,87 @@ impl TackyGenerator {
         inner: &Expr,
         is_increment: bool,
         instrs: &mut Vec<TackyInstruction>,
-        _func_table: &HashMap<String, FunctionInfo>,
+        func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
         if let Expr::Var(name) = inner {
             let resolved = self.resolve_var_name(name);
             let ty = self.var_type(name);
-            let increment = if ty.is_pointer() {
-                ty.target_type().unwrap().size() as i64
-            } else {
-                1
-            };
-
             let var_val = TackyVal::Var(resolved.clone());
-            // Save old value
+
             let old_val = self.new_temp(ty.clone());
             instrs.push(TackyInstruction::Copy {
                 src: var_val.clone(),
                 dst: old_val.clone(),
             });
 
-            // Compute new value
-            let new_val = self.new_temp(ty.clone());
-            if ty.is_double() {
-                let inc_val = TackyVal::Constant(TackyConst::Double(1.0));
-                let tacky_op = if is_increment {
-                    TackyBinaryOp::AddDouble
-                } else {
-                    TackyBinaryOp::SubDouble
-                };
-                instrs.push(TackyInstruction::Binary {
-                    op: tacky_op,
-                    left: old_val.clone(),
-                    right: inc_val,
-                    dst: new_val.clone(),
-                });
-            } else {
-                let inc_const = self.make_increment_const(&ty, increment);
-                let tacky_op = if is_increment {
-                    TackyBinaryOp::Add
-                } else {
-                    TackyBinaryOp::Subtract
-                };
-                instrs.push(TackyInstruction::Binary {
-                    op: tacky_op,
-                    left: old_val.clone(),
-                    right: inc_const,
-                    dst: new_val.clone(),
-                });
-            }
-
-            // Store new value
+            let new_val = self.postfix_compute_new(&old_val, &ty, is_increment, instrs);
             instrs.push(TackyInstruction::Copy {
                 src: new_val,
                 dst: TackyVal::Var(resolved),
             });
 
-            // Return old value
             Ok((old_val, ty))
         } else {
-            Err(CompileError::CodegenError(
-                "unsupported lvalue in postfix increment/decrement".to_string(),
-            ))
+            // 一般的な lvalue（構造体メンバ、ポインタ間接参照等）
+            let (addr, ty) = self.generate_lvalue_addr(inner, instrs, func_table)?;
+
+            let old_val = self.new_temp(ty.clone());
+            instrs.push(TackyInstruction::Load {
+                src_ptr: addr.clone(),
+                dst: old_val.clone(),
+            });
+
+            let new_val = self.postfix_compute_new(&old_val, &ty, is_increment, instrs);
+            instrs.push(TackyInstruction::Store {
+                src: new_val,
+                dst_ptr: addr,
+            });
+
+            Ok((old_val, ty))
         }
+    }
+
+    fn postfix_compute_new(
+        &mut self,
+        old_val: &TackyVal,
+        ty: &Type,
+        is_increment: bool,
+        instrs: &mut Vec<TackyInstruction>,
+    ) -> TackyVal {
+        let new_val = self.new_temp(ty.clone());
+        if ty.is_double() {
+            let inc_val = TackyVal::Constant(TackyConst::Double(1.0));
+            let tacky_op = if is_increment {
+                TackyBinaryOp::AddDouble
+            } else {
+                TackyBinaryOp::SubDouble
+            };
+            instrs.push(TackyInstruction::Binary {
+                op: tacky_op,
+                left: old_val.clone(),
+                right: inc_val,
+                dst: new_val.clone(),
+            });
+        } else {
+            let increment = if ty.is_pointer() {
+                ty.target_type().unwrap().size() as i64
+            } else {
+                1
+            };
+            let inc_const = self.make_increment_const(ty, increment);
+            let tacky_op = if is_increment {
+                TackyBinaryOp::Add
+            } else {
+                TackyBinaryOp::Subtract
+            };
+            instrs.push(TackyInstruction::Binary {
+                op: tacky_op,
+                left: old_val.clone(),
+                right: inc_const,
+                dst: new_val.clone(),
+            });
+        }
+        new_val
     }
 
     fn make_increment_const(&self, ty: &Type, increment: i64) -> TackyVal {
