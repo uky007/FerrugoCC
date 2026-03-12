@@ -1,7 +1,15 @@
-//! E2E テスト — 実コーパス
+//! E2E テスト — 固定回帰コーパス
 //!
 //! 外部の実 C プロジェクトを FerrugoCC でコンパイルし、
 //! 正しい結果を返すことを検証する。
+//!
+//! ## Tier 1 (必須・CI 必須経路)
+//! - **jsmn**: JSON parser (~500 行) — 最小の自己完結コーパス
+//! - **inih**: INI parser (~200 行) — 文字列処理 + コールバック
+//! - **sds**: 動的文字列ライブラリ (~1200 行) — ポインタ演算 + 可変長引数
+//!
+//! 各コーパスは normal + obfuscated の両モードでテストする。
+//! 各 corpus ディレクトリの ORIGIN ファイルに upstream 由来情報を記載。
 
 use std::process::Command;
 use tempfile::TempDir;

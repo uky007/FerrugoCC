@@ -1,0 +1,11 @@
+inih — simple .INI file parser
+Source: https://github.com/benhoyt/inih
+License: BSD-3-Clause
+Retrieved: 2026-03-10
+
+Local patches:
+- test_inih.c: FerrugoCC test harness (exit 42 on success)
+
+Files from upstream (unmodified):
+- ini.c
+- ini.h

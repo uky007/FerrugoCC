@@ -1,0 +1,10 @@
+jsmn — minimalistic JSON parser in C
+Source: https://github.com/zserge/jsmn
+License: MIT
+Retrieved: 2026-03-09
+
+Local patches:
+- test_jsmn.c: FerrugoCC test harness (exit 42 on success)
+
+Files from upstream (unmodified):
+- jsmn.h

@@ -2,6 +2,7 @@
 test
 test.c
 benchmark/output/
+corpus/**/*.s
 demo_output/
 notes/
 results/
