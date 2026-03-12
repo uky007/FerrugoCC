@@ -384,6 +384,7 @@ fn generate_strlen(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         return_type: Type::Long,
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 
@@ -513,6 +514,7 @@ fn generate_strcmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         return_type: Type::Int,
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 
@@ -616,6 +618,7 @@ fn generate_strcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 
@@ -721,6 +724,7 @@ fn generate_memcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 
@@ -818,6 +822,7 @@ fn generate_memset(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 
@@ -942,6 +947,7 @@ fn generate_memcmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         return_type: Type::Int,
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 
@@ -1073,6 +1079,7 @@ fn generate_strncmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         return_type: Type::Int,
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 
@@ -1226,6 +1233,7 @@ fn generate_strncpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 
@@ -1338,6 +1346,7 @@ fn generate_strchr(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 
@@ -1477,6 +1486,7 @@ fn generate_strcat(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         return_type: Type::Pointer(Box::new(Type::Char)),
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 
@@ -2196,6 +2206,7 @@ fn build_outlined_function(
         return_type: output_type.clone(),
         var_types,
         is_variadic: false,
+        static_var_names: HashSet::new(),
     }
 }
 

@@ -175,8 +175,11 @@ pub fn optimize(program: TackyProgram) -> TackyProgram {
             func.body = unreachable_code_elimination(std::mem::take(&mut func.body));
             func.body = copy_propagation(std::mem::take(&mut func.body));
             func.body = common_subexpression_elimination(std::mem::take(&mut func.body));
-            func.body =
-                liveness_dead_code_elimination(std::mem::take(&mut func.body), &func.var_types);
+            func.body = liveness_dead_code_elimination(
+                std::mem::take(&mut func.body),
+                &func.var_types,
+                &func.static_var_names,
+            );
             if func.body != old_body {
                 changed = true;
             }
@@ -1186,6 +1189,7 @@ fn cse_val_is_var(val: &CseVal, name: &str) -> bool {
 fn liveness_dead_code_elimination(
     instrs: Vec<TackyInstruction>,
     _var_types: &HashMap<String, Type>,
+    static_var_names: &HashSet<String>,
 ) -> Vec<TackyInstruction> {
     if instrs.is_empty() {
         return instrs;
@@ -1270,7 +1274,10 @@ fn liveness_dead_code_elimination(
                 }
                 collect_uses_into(instr, &mut live);
             } else if let Some(def) = get_written_var(instr) {
-                if !live.contains(&def) && !address_taken.contains(&def) {
+                if !live.contains(&def)
+                    && !address_taken.contains(&def)
+                    && !static_var_names.contains(&def)
+                {
                     // Dead instruction — mark for removal
                     keep[i] = false;
                 } else {

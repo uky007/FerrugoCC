@@ -12,7 +12,7 @@
 //! - 型情報: `var_types` マップで全変数の型を追跡（最適化パスで使用）
 
 use crate::parse::ast::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// TACKY プログラム全体
 #[derive(Debug, Clone)]
@@ -35,6 +35,8 @@ pub struct TackyFunction {
     pub var_types: HashMap<String, Type>,
     /// 可変長引数関数かどうか
     pub is_variadic: bool,
+    /// グローバル/静的変数の名前セット（最適化で書き込み削除を防止）
+    pub static_var_names: HashSet<String>,
 }
 
 /// TACKY 三アドレスコード命令
