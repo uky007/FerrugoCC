@@ -334,3 +334,40 @@ int main(void) {
 "#;
     assert_eq!(compile_and_run(source), 42);
 }
+
+// ── テスト 8: va_copy ──
+
+#[test]
+fn va_def_va_copy() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int sum_twice(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    va_list ap2;
+    __builtin_va_copy(ap2, ap);
+
+    int sum1 = 0;
+    for (int i = 0; i < count; i = i + 1) {
+        sum1 = sum1 + va_arg(ap, int);
+    }
+    va_end(ap);
+
+    int sum2 = 0;
+    for (int i = 0; i < count; i = i + 1) {
+        sum2 = sum2 + va_arg(ap2, int);
+    }
+    va_end(ap2);
+
+    if (sum1 == sum2) return sum1;
+    return 0;
+}
+
+int main(void) {
+    return sum_twice(3, 10, 20, 12);
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}

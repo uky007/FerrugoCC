@@ -1233,7 +1233,9 @@ fn generate_instruction(
             let src_type = val_type(src, var_types);
             let dst_type = val_type(dst, var_types);
 
-            if src_type.is_struct() {
+            // struct と VaList はスタック割り当てオブジェクトなので Lea でアドレス取得。
+            // それ以外（ポインタ等）は値がアドレスなので Mov。
+            if src_type.is_struct() || matches!(src_type, Type::VaList) {
                 instrs.push(Instruction::Lea {
                     src: src_op,
                     dst: Operand::Register(Reg::CX),
@@ -1245,7 +1247,7 @@ fn generate_instruction(
                     dst: Operand::Register(Reg::CX),
                 });
             }
-            if dst_type.is_struct() {
+            if dst_type.is_struct() || matches!(dst_type, Type::VaList) {
                 instrs.push(Instruction::Lea {
                     src: dst_op,
                     dst: Operand::Register(Reg::DI),
