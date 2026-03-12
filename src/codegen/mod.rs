@@ -72,7 +72,9 @@ pub fn generate(
             insert_anti_disassembly(&mut functions);
         }
         if config.indirect_calls {
-            indirect_calls(&mut functions);
+            let local_names: std::collections::HashSet<String> =
+                functions.iter().map(|f| f.name.clone()).collect();
+            indirect_calls(&mut functions, &local_names);
         }
     }
 
@@ -276,18 +278,22 @@ fn insert_anti_disassembly(functions: &mut [AsmFunction]) {
 /// 関数呼び出しの間接化: `call func` を `lea func(%rip), %r10; call *%r10` に変換する。
 ///
 /// R10 は caller-saved の scratch レジスタで、Call 直前に使っても安全。
-fn indirect_calls(functions: &mut [AsmFunction]) {
+fn indirect_calls(
+    functions: &mut [AsmFunction],
+    local_names: &std::collections::HashSet<String>,
+) {
     for func in functions {
         let mut new_instrs = Vec::new();
         for instr in &func.instructions {
             match instr {
-                Instruction::Call(name) => {
-                    // lea func(%rip), %r10
+                Instruction::Call(name) if local_names.contains(name) => {
+                    // Only convert locally-defined functions to indirect calls.
+                    // External/libc functions need PLT/GOT and cannot use
+                    // simple RIP-relative `lea` (especially on macOS).
                     new_instrs.push(Instruction::Lea {
                         src: Operand::Data(name.clone()),
                         dst: Operand::Register(Reg::R10),
                     });
-                    // call *%r10
                     new_instrs.push(Instruction::CallIndirect(Operand::Register(Reg::R10)));
                 }
                 _ => new_instrs.push(instr.clone()),
