@@ -31,7 +31,7 @@
 //! Fixup 時に全ての負オフセット Stack オペランドを callee-saved push 分だけ
 //! 下方にシフトし、push 領域との重複を防ぐ（shift_stack_offsets）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::asm_ast::*;
 use crate::parse::ast::Type;
@@ -99,7 +99,11 @@ pub fn allocate_registers(
     // 強制スタック変数（配列、構造体等）の最も深いオフセットを取得し、
     // スピル変数がそれらと重ならないようにする。
     let mut next_spill_offset: i32 = scan_min_stack_offset(&instructions);
-    for (name, assignment) in &gp_coloring.assignments {
+    // ソート済みキーで反復し、スピルオフセットの割り当てを決定的にする
+    let mut gp_keys: Vec<&String> = gp_coloring.assignments.keys().collect();
+    gp_keys.sort();
+    for name in gp_keys {
+        let assignment = &gp_coloring.assignments[name];
         match assignment {
             Assignment::Register(reg) => {
                 assignments.insert(name.clone(), Operand::Register(*reg));
@@ -114,8 +118,11 @@ pub fn allocate_registers(
         }
     }
 
-    // XMM 割り当て結果をマージ
-    for (name, assignment) in &xmm_coloring.assignments {
+    // XMM 割り当て結果をマージ（ソート済みキーで決定的に）
+    let mut xmm_keys: Vec<&String> = xmm_coloring.assignments.keys().collect();
+    xmm_keys.sort();
+    for name in xmm_keys {
+        let assignment = &xmm_coloring.assignments[name];
         match assignment {
             Assignment::Register(reg) => {
                 assignments.insert(name.clone(), Operand::Register(*reg));
@@ -198,7 +205,7 @@ fn classify_pseudos(
 // ────────────────────────────────────────────
 
 /// 干渉グラフのノード
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum GraphNode {
     Pseudo(String),
     HardReg(Reg),
@@ -529,8 +536,8 @@ fn analyze_liveness(instructions: &[Instruction]) -> LivenessInfo {
 // ────────────────────────────────────────────
 
 struct InterferenceGraph {
-    /// 隣接リスト
-    adj: HashMap<GraphNode, HashSet<GraphNode>>,
+    /// 隣接リスト（BTreeMap で反復順序を決定的にする）
+    adj: BTreeMap<GraphNode, BTreeSet<GraphNode>>,
     /// Mov 辺: coalescing 候補の (src, dst) ペア
     mov_edges: Vec<(GraphNode, GraphNode)>,
 }
@@ -538,7 +545,7 @@ struct InterferenceGraph {
 impl InterferenceGraph {
     fn new() -> Self {
         InterferenceGraph {
-            adj: HashMap::new(),
+            adj: BTreeMap::new(),
             mov_edges: Vec::new(),
         }
     }
@@ -730,7 +737,7 @@ fn coalesce_graph(graph: &mut InterferenceGraph, k: usize) -> HashMap<GraphNode,
 fn briggs_criterion(graph: &InterferenceGraph, u: &GraphNode, v: &GraphNode, k: usize) -> bool {
     let u_neighbors = graph.adj.get(u).cloned().unwrap_or_default();
     let v_neighbors = graph.adj.get(v).cloned().unwrap_or_default();
-    let mut merged_neighbors: HashSet<GraphNode> = u_neighbors;
+    let mut merged_neighbors: BTreeSet<GraphNode> = u_neighbors;
     merged_neighbors.extend(v_neighbors);
     merged_neighbors.remove(u);
     merged_neighbors.remove(v);
@@ -803,7 +810,10 @@ fn merge_nodes(graph: &mut InterferenceGraph, from: &GraphNode, into: &GraphNode
 /// merge_map 内の各 (from → into) エントリについて、
 /// from の Pseudo に into の割り当て（色）をコピーする。
 fn apply_merge_map(coloring: &mut ColoringResult, merge_map: &HashMap<GraphNode, GraphNode>) {
-    for (from, into) in merge_map {
+    // ソート済みキーで反復し、割り当てを決定的にする
+    let mut entries: Vec<_> = merge_map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (from, into) in entries {
         if let GraphNode::Pseudo(from_name) = from {
             let canonical = find_canonical(merge_map, into);
             match &canonical {
@@ -850,8 +860,8 @@ fn color_graph(graph: InterferenceGraph, allocatable: &[Reg], _is_xmm: bool) -> 
     // オリジナルの隣接リストを保存
     let original_adj = graph.adj.clone();
 
-    // Pseudo ノードだけをリストアップ
-    let pseudo_nodes: Vec<String> = graph
+    // Pseudo ノードだけをリストアップ（ソートして決定的に）
+    let mut pseudo_nodes: Vec<String> = graph
         .adj
         .keys()
         .filter_map(|node| {
@@ -862,6 +872,7 @@ fn color_graph(graph: InterferenceGraph, allocatable: &[Reg], _is_xmm: bool) -> 
             }
         })
         .collect();
+    pseudo_nodes.sort();
 
     if pseudo_nodes.is_empty() {
         return ColoringResult {
@@ -870,16 +881,16 @@ fn color_graph(graph: InterferenceGraph, allocatable: &[Reg], _is_xmm: bool) -> 
     }
 
     // Simplify + Potential Spill（working copy で）
-    let mut working_adj: HashMap<GraphNode, HashSet<GraphNode>> = graph.adj;
+    let mut working_adj: BTreeMap<GraphNode, BTreeSet<GraphNode>> = graph.adj;
     let mut stack: Vec<(String, bool)> = Vec::new();
-    let mut remaining: HashSet<String> = pseudo_nodes.into_iter().collect();
+    let mut remaining: BTreeSet<String> = pseudo_nodes.into_iter().collect();
 
-    let working_degree = |adj: &HashMap<GraphNode, HashSet<GraphNode>>, name: &str| -> usize {
+    let working_degree = |adj: &BTreeMap<GraphNode, BTreeSet<GraphNode>>, name: &str| -> usize {
         let node = GraphNode::Pseudo(name.to_string());
         adj.get(&node).map_or(0, |s| s.len())
     };
 
-    let remove_from_working = |adj: &mut HashMap<GraphNode, HashSet<GraphNode>>, name: &str| {
+    let remove_from_working = |adj: &mut BTreeMap<GraphNode, BTreeSet<GraphNode>>, name: &str| {
         let node = GraphNode::Pseudo(name.to_string());
         if let Some(neighbors) = adj.remove(&node) {
             for n in &neighbors {

@@ -328,7 +328,7 @@ pub enum Operand {
 ///
 /// Chapter 20: Hash derive 追加（干渉グラフのノードとして使用）。
 /// BX, R10-R15, SP, BP, XMM8-13 追加（レジスタ割り当て用）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Reg {
     AX,
     BX,

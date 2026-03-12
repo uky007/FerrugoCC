@@ -144,7 +144,10 @@ pub fn generate(
         })
         .collect();
 
-    for (bits, (name, alignment)) in &double_constants {
+    // ソートして決定的な順序で出力
+    let mut sorted_doubles: Vec<_> = double_constants.iter().collect();
+    sorted_doubles.sort_by_key(|(bits, _)| *bits);
+    for (bits, (name, alignment)) in sorted_doubles {
         static_constants.push(AsmStaticConstant {
             name: name.clone(),
             alignment: *alignment,
@@ -272,8 +275,10 @@ fn generate_function(
         );
     }
 
-    // 1. 強制スタック変数を割り当て（パラメータ含む）
-    for (name, ty) in &func.var_types {
+    // 1. 強制スタック変数を割り当て（ソート済みキーで決定的に）
+    let mut sorted_var_types: Vec<(&String, &Type)> = func.var_types.iter().collect();
+    sorted_var_types.sort_by_key(|(name, _)| (*name).clone());
+    for (name, ty) in sorted_var_types {
         if static_vars.contains_key(name) {
             continue;
         }

@@ -229,11 +229,13 @@ fn replace_library_functions(program: &mut TackyProgram, ctx: &mut ObfCtx) {
         return;
     }
 
-    // 対象ごとに自前実装を生成
+    // 対象ごとに自前実装を生成（ソート済みで決定的な順序）
     let mut generated: HashMap<String, String> = HashMap::new(); // original -> obf name
     let mut new_functions: Vec<TackyFunction> = Vec::new();
 
-    for name in &needed {
+    let mut needed_sorted: Vec<String> = needed.into_iter().collect();
+    needed_sorted.sort();
+    for name in &needed_sorted {
         match name.as_str() {
             "strlen" => {
                 let obf_name = "_obf_strlen".to_string();
@@ -2122,9 +2124,11 @@ fn build_outlined_function(
         params.push(param_name);
     }
 
-    // 中間変数→新名前のマッピング
+    // 中間変数→新名前のマッピング（ソート済みで決定的な順序）
     let mut intermediate_to_new: HashMap<String, String> = HashMap::new();
-    for name in intermediates {
+    let mut intermediates_sorted: Vec<&String> = intermediates.iter().collect();
+    intermediates_sorted.sort();
+    for name in intermediates_sorted {
         let new_name = ctx.fresh_tmp();
         let ty = caller_var_types.get(name).cloned().unwrap_or(Type::Int);
         var_types.insert(new_name.clone(), ty);
