@@ -1094,9 +1094,22 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 return Ok(first_type);
             }
 
-            // GCC builtins: __builtin_bswap{32,64}, __builtin_object_size
-            // Typecheck args and return first arg's type
-            if name.starts_with("__builtin_") && name != "__builtin_va_arg" {
+            // GCC builtins (whitelist): evaluate args, return first arg's type.
+            // Only builtins with pass-through semantics are supported here.
+            if matches!(
+                name.as_str(),
+                "__builtin_bswap32"
+                    | "__builtin_bswap64"
+                    | "__builtin_object_size"
+                    | "__builtin_ctz"
+                    | "__builtin_ctzl"
+                    | "__builtin_clz"
+                    | "__builtin_clzl"
+                    | "__builtin_popcount"
+                    | "__builtin_popcountl"
+                    | "__builtin_abs"
+                    | "__builtin_labs"
+            ) {
                 for arg in args.iter_mut() {
                     typecheck_expr(arg, symbols)?;
                 }

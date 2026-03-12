@@ -1843,8 +1843,23 @@ impl TackyGenerator {
         instrs: &mut Vec<TackyInstruction>,
         func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
-        // GCC builtins: evaluate args, return first arg value
-        if name.starts_with("__builtin_") {
+        // GCC builtins (whitelist): evaluate args, return first arg value.
+        // __builtin_expect is handled separately in the checker.
+        if matches!(
+            name,
+            "__builtin_expect"
+                | "__builtin_bswap32"
+                | "__builtin_bswap64"
+                | "__builtin_object_size"
+                | "__builtin_ctz"
+                | "__builtin_ctzl"
+                | "__builtin_clz"
+                | "__builtin_clzl"
+                | "__builtin_popcount"
+                | "__builtin_popcountl"
+                | "__builtin_abs"
+                | "__builtin_labs"
+        ) {
             let (val, ty) = self.generate_expr(&args[0], instrs, func_table)?;
             for arg in args.iter().skip(1) {
                 let _ = self.generate_expr(arg, instrs, func_table)?;
