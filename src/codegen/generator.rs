@@ -1015,7 +1015,16 @@ fn generate_instruction(
         }
 
         TackyInstruction::GetAddress { src, dst } => {
-            let src_op = val_to_operand(src, static_vars, stack_vars)?;
+            let src_op = if let TackyVal::Var(name) = src {
+                // If not a local/static variable, treat as global symbol (e.g. function name)
+                if !stack_vars.contains_key(name) && !static_vars.contains_key(name) {
+                    Operand::Data(name.clone())
+                } else {
+                    val_to_operand(src, static_vars, stack_vars)?
+                }
+            } else {
+                val_to_operand(src, static_vars, stack_vars)?
+            };
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
             instrs.push(Instruction::Lea {
                 src: src_op,
@@ -1908,7 +1917,22 @@ fn generate_function_call(
         });
     }
 
-    instrs.push(Instruction::Call(name.to_string()));
+    // Indirect call if name refers to a variable (function pointer)
+    if var_types.contains_key(name) {
+        let fn_ptr_op = val_to_operand(
+            &TackyVal::Var(name.to_string()),
+            static_vars,
+            stack_vars,
+        )?;
+        instrs.push(Instruction::Mov {
+            asm_type: AsmType::Quadword,
+            src: fn_ptr_op,
+            dst: Operand::Register(Reg::R10),
+        });
+        instrs.push(Instruction::CallIndirect(Operand::Register(Reg::R10)));
+    } else {
+        instrs.push(Instruction::Call(name.to_string()));
+    }
 
     let dealloc = stack_count * 8 + padding;
     if dealloc > 0 {

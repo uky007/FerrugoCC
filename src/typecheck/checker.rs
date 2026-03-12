@@ -545,10 +545,14 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     // 配列→ポインタ減衰（Chapter 15）
                     Ok(array_decay(t.clone()))
                 }
-                Some(SymbolType::Function { .. }) => Err(CompileError::TypeError(format!(
-                    "function '{}' used as variable",
-                    name
-                ))),
+                Some(SymbolType::Function { .. }) => {
+                    // Function name used as value → decays to function pointer
+                    Ok(Type::Pointer(Box::new(Type::Void)))
+                }
+                None if name == "__func__" || name == "__FUNCTION__" => {
+                    // C99 predefined identifier: const char[]
+                    Ok(Type::Pointer(Box::new(Type::Char)))
+                }
                 None => Err(CompileError::TypeError(format!(
                     "undeclared variable '{}'",
                     name
@@ -1078,12 +1082,34 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         }
 
         Expr::FunctionCall(name, args) => {
+            // GCC builtin: __builtin_expect(expr, expected) → returns expr type
+            if name == "__builtin_expect" {
+                if args.len() != 2 {
+                    return Err(CompileError::TypeError(
+                        "__builtin_expect requires 2 arguments".to_string(),
+                    ));
+                }
+                let first_type = typecheck_expr(&mut args[0], symbols)?;
+                typecheck_expr(&mut args[1], symbols)?;
+                return Ok(first_type);
+            }
+
             let (return_type, param_types, is_variadic) = match symbols.get(name) {
                 Some(SymbolType::Function {
                     return_type,
                     param_types,
                     is_variadic,
                 }) => (return_type.clone(), param_types.clone(), *is_variadic),
+                Some(SymbolType::Variable(ty)) if ty.is_pointer() => {
+                    // Function pointer call: variable of Pointer(Void) type
+                    // Typecheck args but skip conversion (no param type info)
+                    for arg in args.iter_mut() {
+                        typecheck_expr(arg, symbols)?;
+                    }
+                    // Return Pointer(Void) — compatible with pointer comparisons
+                    // and logical operators (covers both int and pointer return types)
+                    return Ok(Type::Pointer(Box::new(Type::Void)));
+                }
                 _ => {
                     return Err(CompileError::TypeError(format!(
                         "undeclared function '{}'",
@@ -1225,7 +1251,7 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
             let inner_type = typecheck_expr(inner, symbols)?;
             match &inner_type {
                 Type::Struct { members, tag } => match struct_member_offset(members, member_name) {
-                    Some((_, member_type)) => Ok(member_type),
+                    Some((_, member_type)) => Ok(array_decay(member_type)),
                     None => Err(CompileError::TypeError(format!(
                         "struct '{}' has no member '{}'",
                         tag, member_name

@@ -1223,6 +1223,26 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             }
         }
 
+        // Binary: Quadword with large immediate (> 32-bit signed) → via R10
+        Instruction::Binary {
+            asm_type: AsmType::Quadword,
+            op,
+            src: Operand::Imm(v),
+            ref dst,
+        } if v > i32::MAX as i64 || v < i32::MIN as i64 => {
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Imm(v),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Binary {
+                asm_type: AsmType::Quadword,
+                op,
+                src: Operand::Register(Reg::R10),
+                dst: dst.clone(),
+            });
+        }
+
         // Binary: double memory,memory → via XMM15
         Instruction::Binary {
             asm_type,

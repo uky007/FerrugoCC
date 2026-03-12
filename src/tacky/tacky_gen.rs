@@ -426,6 +426,22 @@ impl TackyGenerator {
             instrs.push(TackyInstruction::Return(ret_val));
         }
 
+        let static_var_names: HashSet<String> = self
+            .var_map
+            .iter()
+            .filter_map(|(_name, kind)| match kind {
+                VarKind::Static(label, _) => Some(label.clone()),
+                _ => None,
+            })
+            .chain(
+                // Also include the original names (for resolve_var_name lookups)
+                self.var_map.iter().filter_map(|(name, kind)| match kind {
+                    VarKind::Static(_, _) => Some(name.clone()),
+                    _ => None,
+                }),
+            )
+            .collect();
+
         Ok(TackyFunction {
             name: func.name.clone(),
             global,
@@ -434,6 +450,7 @@ impl TackyGenerator {
             return_type: func.return_type.clone(),
             var_types: self.var_types.clone(),
             is_variadic: func.is_variadic,
+            static_var_names,
         })
     }
 
@@ -1172,7 +1189,34 @@ impl TackyGenerator {
                 }
             }
 
+            Expr::Var(name) if name == "__func__" || name == "__FUNCTION__" => {
+                // C99 predefined identifier — emit as string constant
+                let label = format!(".Lstr_{}", self.string_label_counter);
+                self.string_label_counter += 1;
+                self.string_constants
+                    .push((label.clone(), "?".to_string()));
+                let dst = self.new_temp(Type::Pointer(Box::new(Type::Char)));
+                instrs.push(TackyInstruction::GetAddress {
+                    src: TackyVal::Var(label),
+                    dst: dst.clone(),
+                });
+                Ok((dst, Type::Pointer(Box::new(Type::Char))))
+            }
+
             Expr::Var(name) => {
+                // Function name used as value → get function address
+                if !self.var_map.contains_key(name)
+                    && !self.var_types.contains_key(name)
+                    && func_table.contains_key(name)
+                {
+                    let dst = self.new_temp(Type::Pointer(Box::new(Type::Void)));
+                    instrs.push(TackyInstruction::GetAddress {
+                        src: TackyVal::Var(name.to_string()),
+                        dst: dst.clone(),
+                    });
+                    return Ok((dst, Type::Pointer(Box::new(Type::Void))));
+                }
+
                 let resolved = self.resolve_var_name(name);
                 let ty = self.var_type(name);
                 match &ty {
@@ -1567,48 +1611,16 @@ impl TackyGenerator {
         op: &UnaryOp,
         inner: &Expr,
         instrs: &mut Vec<TackyInstruction>,
-        _func_table: &HashMap<String, FunctionInfo>,
+        func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
+        let is_increment = matches!(op, UnaryOp::PreIncrement);
+
         if let Expr::Var(name) = inner {
             let resolved = self.resolve_var_name(name);
             let ty = self.var_type(name);
-            let increment = if ty.is_pointer() {
-                ty.target_type().unwrap().size() as i64
-            } else {
-                1
-            };
-
             let var_val = TackyVal::Var(resolved.clone());
-            let result = self.new_temp(ty.clone());
 
-            if ty.is_double() {
-                let inc_val = TackyVal::Constant(TackyConst::Double(1.0));
-                let tacky_op = if matches!(op, UnaryOp::PreIncrement) {
-                    TackyBinaryOp::AddDouble
-                } else {
-                    TackyBinaryOp::SubDouble
-                };
-                instrs.push(TackyInstruction::Binary {
-                    op: tacky_op,
-                    left: var_val,
-                    right: inc_val,
-                    dst: result.clone(),
-                });
-            } else {
-                let inc_const = self.make_increment_const(&ty, increment);
-                let tacky_op = if matches!(op, UnaryOp::PreIncrement) {
-                    TackyBinaryOp::Add
-                } else {
-                    TackyBinaryOp::Subtract
-                };
-                instrs.push(TackyInstruction::Binary {
-                    op: tacky_op,
-                    left: var_val,
-                    right: inc_const,
-                    dst: result.clone(),
-                });
-            }
-
+            let result = self.prefix_compute_new(&var_val, &ty, is_increment, instrs);
             instrs.push(TackyInstruction::Copy {
                 src: result.clone(),
                 dst: TackyVal::Var(resolved),
@@ -1616,10 +1628,66 @@ impl TackyGenerator {
 
             Ok((result, ty))
         } else {
-            Err(CompileError::CodegenError(
-                "lvalue required for prefix increment/decrement".to_string(),
-            ))
+            // 一般的な lvalue（構造体メンバ、ポインタ間接参照等）
+            let (addr, ty) = self.generate_lvalue_addr(inner, instrs, func_table)?;
+
+            let old_val = self.new_temp(ty.clone());
+            instrs.push(TackyInstruction::Load {
+                src_ptr: addr.clone(),
+                dst: old_val.clone(),
+            });
+
+            let result = self.prefix_compute_new(&old_val, &ty, is_increment, instrs);
+            instrs.push(TackyInstruction::Store {
+                src: result.clone(),
+                dst_ptr: addr,
+            });
+
+            Ok((result, ty))
         }
+    }
+
+    fn prefix_compute_new(
+        &mut self,
+        old_val: &TackyVal,
+        ty: &Type,
+        is_increment: bool,
+        instrs: &mut Vec<TackyInstruction>,
+    ) -> TackyVal {
+        let result = self.new_temp(ty.clone());
+        if ty.is_double() {
+            let inc_val = TackyVal::Constant(TackyConst::Double(1.0));
+            let tacky_op = if is_increment {
+                TackyBinaryOp::AddDouble
+            } else {
+                TackyBinaryOp::SubDouble
+            };
+            instrs.push(TackyInstruction::Binary {
+                op: tacky_op,
+                left: old_val.clone(),
+                right: inc_val,
+                dst: result.clone(),
+            });
+        } else {
+            let increment = if ty.is_pointer() {
+                ty.target_type().unwrap().size() as i64
+            } else {
+                1
+            };
+            let inc_const = self.make_increment_const(ty, increment);
+            let tacky_op = if is_increment {
+                TackyBinaryOp::Add
+            } else {
+                TackyBinaryOp::Subtract
+            };
+            instrs.push(TackyInstruction::Binary {
+                op: tacky_op,
+                left: old_val.clone(),
+                right: inc_const,
+                dst: result.clone(),
+            });
+        }
+        result
     }
 
     /// 後置インクリメント/デクリメント
@@ -1728,6 +1796,14 @@ impl TackyGenerator {
         instrs: &mut Vec<TackyInstruction>,
         func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
+        // GCC builtin: __builtin_expect(expr, expected) → just evaluate and return expr
+        if name == "__builtin_expect" {
+            let (val, ty) = self.generate_expr(&args[0], instrs, func_table)?;
+            // Evaluate second arg for side effects (though there are none)
+            let _ = self.generate_expr(&args[1], instrs, func_table)?;
+            return Ok((val, ty));
+        }
+
         if let Some(info) = func_table.get(name) {
             if info.is_variadic {
                 if args.len() < info.param_count {
