@@ -790,6 +790,13 @@ impl TackyGenerator {
 
                 instrs.push(TackyInstruction::Label(switch_end));
             }
+            Statement::Goto(label) => {
+                instrs.push(TackyInstruction::Jump(format!(".Luser_{label}")));
+            }
+            Statement::Label { name, body } => {
+                instrs.push(TackyInstruction::Label(format!(".Luser_{name}")));
+                self.generate_statement(body, instrs, loop_labels, func_table)?;
+            }
             Statement::Case { .. } => {
                 return Err(CompileError::CodegenError(
                     "case outside switch".to_string(),
@@ -866,6 +873,9 @@ impl TackyGenerator {
                 self.collect_labels_recursive(body, cases, default_label)?;
             }
             Statement::For { body, .. } => {
+                self.collect_labels_recursive(body, cases, default_label)?;
+            }
+            Statement::Label { body, .. } => {
                 self.collect_labels_recursive(body, cases, default_label)?;
             }
             // ネストした switch には再帰しない

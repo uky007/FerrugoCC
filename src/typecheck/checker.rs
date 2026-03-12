@@ -473,6 +473,8 @@ fn typecheck_statement(
         }
         Statement::Case { body, .. } => typecheck_statement(body, symbols, return_type),
         Statement::Default(body) => typecheck_statement(body, symbols, return_type),
+        Statement::Goto(_) => Ok(()),
+        Statement::Label { body, .. } => typecheck_statement(body, symbols, return_type),
     }
 }
 

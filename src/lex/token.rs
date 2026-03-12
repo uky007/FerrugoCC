@@ -86,6 +86,8 @@ pub enum TokenKind {
     KwCase,
     /// `default` キーワード — switch のデフォルトラベル
     KwDefault,
+    /// `goto` キーワード — ラベルへの無条件ジャンプ
+    KwGoto,
     /// `short` キーワード — 短整数型
     KwShort,
     /// `const` キーワード — 型修飾子（parse-only）

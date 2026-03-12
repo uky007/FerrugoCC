@@ -1479,6 +1479,32 @@ impl<'a> Parser<'a> {
                 let body = Box::new(self.parse_statement()?);
                 Ok(Statement::Default(body))
             }
+            TokenKind::KwGoto => {
+                self.advance()?; // consume 'goto'
+                let label_token = self.advance()?;
+                let label = match &label_token.kind {
+                    TokenKind::Identifier(name) => name.clone(),
+                    other => {
+                        return Err(CompileError::ParseError(format!(
+                            "expected label name after 'goto', got {:?}",
+                            other
+                        )));
+                    }
+                };
+                self.expect(&TokenKind::Semicolon)?;
+                Ok(Statement::Goto(label))
+            }
+            // ラベル: `identifier:` — 先読みで `:` を確認
+            TokenKind::Identifier(name)
+                if self.pos + 1 < self.tokens.len()
+                    && self.tokens[self.pos + 1].kind == TokenKind::Colon =>
+            {
+                let name = name.clone();
+                self.advance()?; // consume identifier
+                self.advance()?; // consume ':'
+                let body = Box::new(self.parse_statement()?);
+                Ok(Statement::Label { name, body })
+            }
             _ => {
                 let expr = self.parse_expr()?;
                 self.expect(&TokenKind::Semicolon)?;

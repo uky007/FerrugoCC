@@ -684,6 +684,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "switch" => TokenKind::KwSwitch,
                 "case" => TokenKind::KwCase,
                 "default" => TokenKind::KwDefault,
+                "goto" => TokenKind::KwGoto,
                 "short" => TokenKind::KwShort,
                 "const" | "__const" | "__const__" => TokenKind::KwConst,
                 "volatile" | "__volatile" | "__volatile__" => TokenKind::KwVolatile,
