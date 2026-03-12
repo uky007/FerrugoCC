@@ -131,19 +131,44 @@ impl TackyGenerator {
     }
 
     /// 静的定数初期値を解決する
-    fn resolve_static_init(init_expr: &Expr) -> std::result::Result<TackyStaticInit, String> {
+    fn resolve_static_init(
+        init_expr: &Expr,
+        string_constants: &mut Vec<(String, String)>,
+        string_label_counter: &mut usize,
+    ) -> std::result::Result<TackyStaticInit, String> {
         match init_expr {
             Expr::Constant(v) => Ok(TackyStaticInit::IntInit(*v)),
             Expr::ConstantLong(v) => Ok(TackyStaticInit::IntInit(*v)),
             Expr::ConstantUInt(v) => Ok(TackyStaticInit::IntInit(*v as i64)),
             Expr::ConstantULong(v) => Ok(TackyStaticInit::IntInit(*v as i64)),
             Expr::ConstantDouble(v) => Ok(TackyStaticInit::DoubleInit(*v)),
+            Expr::StringLiteral(s) => {
+                // String literal → emit string constant and return pointer to it
+                let label = format!(".Lstr_{}", *string_label_counter);
+                *string_label_counter += 1;
+                string_constants.push((label.clone(), s.clone()));
+                Ok(TackyStaticInit::PointerArrayInit(vec![label]))
+            }
             Expr::CompoundInit(inits) => {
                 let init_vals: Vec<TackyStaticInit> = inits
                     .iter()
-                    .map(TackyGenerator::resolve_static_init)
+                    .map(|e| {
+                        TackyGenerator::resolve_static_init(
+                            e,
+                            string_constants,
+                            string_label_counter,
+                        )
+                    })
                     .collect::<std::result::Result<_, _>>()?;
                 Ok(TackyStaticInit::ArrayInit(init_vals))
+            }
+            // NULL pointer: cast of 0 to pointer type
+            Expr::Cast { target_type: _, expr, .. } => {
+                if let Expr::Constant(0) = expr.as_ref() {
+                    Ok(TackyStaticInit::IntInit(0))
+                } else {
+                    TackyGenerator::resolve_static_init(expr, string_constants, string_label_counter)
+                }
             }
             _ => Err("must be initialized with a constant expression".to_string()),
         }
@@ -228,7 +253,7 @@ fn expr_type(
             }
         }
         Expr::CompoundInit(_) => Type::Int,
-        Expr::VaStart(_) | Expr::VaEnd(_) => Type::Void,
+        Expr::VaStart(_) | Expr::VaEnd(_) | Expr::VaCopy(_, _) => Type::Void,
         Expr::VaArg { arg_type, .. } => arg_type.clone(),
     }
 }
@@ -289,7 +314,12 @@ pub fn generate_tacky(program: &Program) -> Result<TackyProgram> {
                 }
 
                 let init_val = if let Some(init_expr) = &var_decl.init {
-                    TackyGenerator::resolve_static_init(init_expr).map_err(|msg| {
+                    TackyGenerator::resolve_static_init(
+                        init_expr,
+                        &mut tgen.string_constants,
+                        &mut tgen.string_label_counter,
+                    )
+                    .map_err(|msg| {
                         CompileError::CodegenError(format!(
                             "file-scope variable '{}' {}",
                             var_decl.name, msg
@@ -503,7 +533,12 @@ impl TackyGenerator {
 
         if sc == Some(StorageClass::Static) {
             let init_val = if let Some(init_expr) = &decl.init {
-                TackyGenerator::resolve_static_init(init_expr).map_err(|msg| {
+                TackyGenerator::resolve_static_init(
+                    init_expr,
+                    &mut self.string_constants,
+                    &mut self.string_label_counter,
+                )
+                .map_err(|msg| {
                     CompileError::CodegenError(format!("static variable '{}' {}", decl.name, msg))
                 })?
             } else if decl.var_type.is_array() || is_struct {
@@ -1541,6 +1576,18 @@ impl TackyGenerator {
                 instrs.push(TackyInstruction::VaEnd);
                 Ok((TackyVal::Constant(TackyConst::Int(0)), Type::Void))
             }
+
+            Expr::VaCopy(dst, src) => {
+                let (dst_val, _) = self.generate_expr(dst, instrs, func_table)?;
+                let (src_val, _) = self.generate_expr(src, instrs, func_table)?;
+                // va_list is a 24-byte struct on x86-64 SysV ABI
+                instrs.push(TackyInstruction::CopyStruct {
+                    src: src_val,
+                    dst: dst_val,
+                    size: 24,
+                });
+                Ok((TackyVal::Constant(TackyConst::Int(0)), Type::Void))
+            }
         }
     }
 
@@ -1796,11 +1843,12 @@ impl TackyGenerator {
         instrs: &mut Vec<TackyInstruction>,
         func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
-        // GCC builtin: __builtin_expect(expr, expected) → just evaluate and return expr
-        if name == "__builtin_expect" {
+        // GCC builtins: evaluate args, return first arg value
+        if name.starts_with("__builtin_") {
             let (val, ty) = self.generate_expr(&args[0], instrs, func_table)?;
-            // Evaluate second arg for side effects (though there are none)
-            let _ = self.generate_expr(&args[1], instrs, func_table)?;
+            for arg in args.iter().skip(1) {
+                let _ = self.generate_expr(arg, instrs, func_table)?;
+            }
             return Ok((val, ty));
         }
 
@@ -2283,9 +2331,77 @@ impl TackyGenerator {
 
             Ok((dst, var_type))
         } else {
-            Err(CompileError::CodegenError(
-                "unsupported lvalue in compound assignment".to_string(),
-            ))
+            // General lvalue: use generate_lvalue_addr + Load/Store
+            let (addr, var_type) = self.generate_lvalue_addr(lhs, instrs, func_table)?;
+
+            let old_val = self.new_temp(var_type.clone());
+            instrs.push(TackyInstruction::Load {
+                src_ptr: addr.clone(),
+                dst: old_val.clone(),
+            });
+
+            let (rhs_val, _) = self.generate_expr(rhs, instrs, func_table)?;
+            let dst = self.new_temp(var_type.clone());
+
+            let tacky_op = if var_type.is_double() {
+                match op {
+                    BinaryOp::Add => TackyBinaryOp::AddDouble,
+                    BinaryOp::Subtract => TackyBinaryOp::SubDouble,
+                    BinaryOp::Multiply => TackyBinaryOp::MulDouble,
+                    BinaryOp::Divide => TackyBinaryOp::DivDouble,
+                    _ => {
+                        return Err(CompileError::CodegenError(format!(
+                            "unsupported compound assignment operator: {:?}",
+                            op
+                        )));
+                    }
+                }
+            } else if var_type.is_pointer() && matches!(op, BinaryOp::Add) {
+                let elem_size = var_type.target_type().unwrap().size();
+                instrs.push(TackyInstruction::AddPtr {
+                    ptr: old_val.clone(),
+                    index: rhs_val,
+                    scale: elem_size,
+                    dst: dst.clone(),
+                });
+                instrs.push(TackyInstruction::Store {
+                    src: dst.clone(),
+                    dst_ptr: addr,
+                });
+                return Ok((dst, var_type));
+            } else {
+                match op {
+                    BinaryOp::Add => TackyBinaryOp::Add,
+                    BinaryOp::Subtract => TackyBinaryOp::Subtract,
+                    BinaryOp::Multiply => TackyBinaryOp::Multiply,
+                    BinaryOp::Divide => TackyBinaryOp::Divide,
+                    BinaryOp::Remainder => TackyBinaryOp::Remainder,
+                    BinaryOp::BitwiseAnd => TackyBinaryOp::BitwiseAnd,
+                    BinaryOp::BitwiseOr => TackyBinaryOp::BitwiseOr,
+                    BinaryOp::BitwiseXor => TackyBinaryOp::BitwiseXor,
+                    BinaryOp::ShiftLeft => TackyBinaryOp::ShiftLeft,
+                    BinaryOp::ShiftRight => TackyBinaryOp::ShiftRight,
+                    _ => {
+                        return Err(CompileError::CodegenError(format!(
+                            "unsupported compound assignment operator: {:?}",
+                            op
+                        )));
+                    }
+                }
+            };
+
+            instrs.push(TackyInstruction::Binary {
+                op: tacky_op,
+                left: old_val,
+                right: rhs_val,
+                dst: dst.clone(),
+            });
+            instrs.push(TackyInstruction::Store {
+                src: dst.clone(),
+                dst_ptr: addr,
+            });
+
+            Ok((dst, var_type))
         }
     }
 

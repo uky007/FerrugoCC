@@ -1094,6 +1094,18 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 return Ok(first_type);
             }
 
+            // GCC builtins: __builtin_bswap{32,64}, __builtin_object_size
+            // Typecheck args and return first arg's type
+            if name.starts_with("__builtin_") && name != "__builtin_va_arg" {
+                for arg in args.iter_mut() {
+                    typecheck_expr(arg, symbols)?;
+                }
+                if !args.is_empty() {
+                    return typecheck_expr(&mut args[0], symbols);
+                }
+                return Ok(Type::Int);
+            }
+
             let (return_type, param_types, is_variadic) = match symbols.get(name) {
                 Some(SymbolType::Function {
                     return_type,
@@ -1295,6 +1307,12 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     "va_end requires va_list argument".into(),
                 ));
             }
+            Ok(Type::Void)
+        }
+
+        Expr::VaCopy(dst, src) => {
+            typecheck_expr(dst, symbols)?;
+            typecheck_expr(src, symbols)?;
             Ok(Type::Void)
         }
     }

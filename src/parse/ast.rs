@@ -456,6 +456,8 @@ pub enum Expr {
     VaArg { ap: Box<Expr>, arg_type: Type },
     /// `va_end(ap)` — va_list の終了処理（no-op）
     VaEnd(Box<Expr>),
+    /// `va_copy(dst, src)` — va_list のコピー
+    VaCopy(Box<Expr>, Box<Expr>),
 }
 
 /// 単項演算子の種類（Chapter 2）。

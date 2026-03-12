@@ -2125,8 +2125,8 @@ impl<'a> Parser<'a> {
                 if let TokenKind::Identifier(name) = &token.kind {
                     let name = name.clone();
 
-                    // va_start(ap, last_named_param)
-                    if name == "va_start" {
+                    // va_start(ap, last_named_param) — also __builtin_va_start
+                    if name == "va_start" || name == "__builtin_va_start" {
                         self.expect(&TokenKind::OpenParen)?;
                         let ap = self.parse_assignment()?;
                         // 第2引数（最後の名前付きパラメータ）は無視（ABI で不要）
@@ -2138,8 +2138,8 @@ impl<'a> Parser<'a> {
                         return Ok(Expr::VaStart(Box::new(ap)));
                     }
 
-                    // va_arg(ap, type)
-                    if name == "va_arg" {
+                    // va_arg(ap, type) — also __builtin_va_arg after preprocessing
+                    if name == "va_arg" || name == "__builtin_va_arg" {
                         self.expect(&TokenKind::OpenParen)?;
                         let ap = self.parse_assignment()?;
                         self.expect(&TokenKind::Comma)?;
@@ -2152,12 +2152,22 @@ impl<'a> Parser<'a> {
                         });
                     }
 
-                    // va_end(ap)
-                    if name == "va_end" {
+                    // va_end(ap) — also __builtin_va_end
+                    if name == "va_end" || name == "__builtin_va_end" {
                         self.expect(&TokenKind::OpenParen)?;
                         let ap = self.parse_assignment()?;
                         self.expect(&TokenKind::CloseParen)?;
                         return Ok(Expr::VaEnd(Box::new(ap)));
+                    }
+
+                    // __builtin_va_copy(dst, src) → copy va_list struct
+                    if name == "__builtin_va_copy" || name == "va_copy" {
+                        self.expect(&TokenKind::OpenParen)?;
+                        let dst = self.parse_assignment()?;
+                        self.expect(&TokenKind::Comma)?;
+                        let src = self.parse_assignment()?;
+                        self.expect(&TokenKind::CloseParen)?;
+                        return Ok(Expr::VaCopy(Box::new(dst), Box::new(src)));
                     }
 
                     // enum 定数解決: 定数名 → Expr::Constant(value)

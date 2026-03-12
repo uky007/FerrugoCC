@@ -437,8 +437,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             let digit_end = pos;
             let mut has_u = false;
             let mut has_l = false;
-            // 最大2文字のサフィックスを消費（U/u, L/l の組み合わせ）
-            for _ in 0..2 {
+            // サフィックスを消費（U/u, L/l, LL/ll の組み合わせ）
+            for _ in 0..3 {
                 if pos < bytes.len() && (bytes[pos] == b'U' || bytes[pos] == b'u') && !has_u {
                     has_u = true;
                     pos += 1;
@@ -448,6 +448,11 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                     has_l = true;
                     pos += 1;
                     column += 1;
+                    // LL/ll: consume second L (long long → Long)
+                    if pos < bytes.len() && (bytes[pos] == b'L' || bytes[pos] == b'l') {
+                        pos += 1;
+                        column += 1;
+                    }
                 } else {
                     break;
                 }

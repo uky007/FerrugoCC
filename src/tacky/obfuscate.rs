@@ -1615,7 +1615,11 @@ fn is_inline_eligible(
     if matches!(dst_type, Type::Struct { .. }) {
         return false;
     }
-    // 5. 直接再帰でない
+    // 5. 可変長引数関数でない（VaStart/VaArg は呼び出し元にインライン化できない）
+    if callee.is_variadic {
+        return false;
+    }
+    // 6. 直接再帰でない
     if is_directly_recursive(callee) {
         return false;
     }

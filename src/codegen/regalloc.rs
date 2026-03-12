@@ -1306,6 +1306,24 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             });
         }
 
+        // Cmp: dst is immediate → load dst into R10
+        Instruction::Cmp {
+            asm_type,
+            ref src,
+            dst: Operand::Imm(v),
+        } => {
+            out.push(Instruction::Mov {
+                asm_type,
+                src: Operand::Imm(v),
+                dst: Operand::Register(Reg::R10),
+            });
+            out.push(Instruction::Cmp {
+                asm_type,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R10),
+            });
+        }
+
         // Cmp: large immediate → via R10
         Instruction::Cmp {
             asm_type,
