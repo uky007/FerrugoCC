@@ -203,6 +203,10 @@ struct Cli {
     #[arg(short = 'D', value_name = "MACRO")]
     defines: Vec<String>,
 
+    /// Preprocessor undefines (-U NAME)
+    #[arg(short = 'U', value_name = "MACRO")]
+    undefs: Vec<String>,
+
     /// Input C source file
     source: PathBuf,
 }
@@ -326,6 +330,7 @@ fn main() {
         obf_config,
         driver::PreprocessMode::External,
         &cli.defines,
+        &cli.undefs,
     ) {
         eprintln!("ferrugocc: {e}");
         process::exit(1);

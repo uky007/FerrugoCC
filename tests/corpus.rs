@@ -170,7 +170,17 @@ fn fixup_asm_for_macos(asm: &str) -> String {
     result.join("\n") + "\n"
 }
 
-/// jsmn (JSON parser) をコンパイル・リンク・実行して正しい結果を返すことを確認。
+/// Linux glibc 環境で FORTIFY_SOURCE inline wrapper を抑制するための undefs。
+/// macOS では不要（ヘッダ構成が異なる）。
+fn platform_undefs() -> Vec<&'static str> {
+    if cfg!(target_os = "linux") {
+        vec!["_FORTIFY_SOURCE"]
+    } else {
+        vec![]
+    }
+}
+
+/// corpus テストの共通ヘルパー: コンパイル → リンク → 実行 → exit code を返す。
 fn compile_and_run_corpus(source_path: &str, obfuscate: bool) -> i32 {
     let dir = TempDir::new().unwrap();
     let asm_path = dir.path().join("test.s");
@@ -179,6 +189,9 @@ fn compile_and_run_corpus(source_path: &str, obfuscate: bool) -> i32 {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrugocc"));
     if obfuscate {
         cmd.arg("--fobfuscate");
+    }
+    for undef in platform_undefs() {
+        cmd.arg(format!("-U{undef}"));
     }
     cmd.arg("-S").arg(source_path);
     // Override output path
@@ -246,7 +259,7 @@ fn compile_and_run_corpus(source_path: &str, obfuscate: bool) -> i32 {
     run_output.status.code().unwrap_or(-1)
 }
 
-/// kilo 用: -D フラグ対応版コンパイル → リンク → 実行 (exit code + stderr)
+/// 拡張版ヘルパー: -D/-U フラグ + 実行引数対応。exit code, stdout, stderr を返す。
 fn compile_and_run_corpus_ex(
     source_path: &str,
     obfuscate: bool,
@@ -260,6 +273,9 @@ fn compile_and_run_corpus_ex(
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrugocc"));
     if obfuscate {
         cmd.arg("--fobfuscate");
+    }
+    for undef in platform_undefs() {
+        cmd.arg(format!("-U{undef}"));
     }
     for def in defines {
         cmd.arg(format!("-D{def}"));
@@ -339,7 +355,6 @@ fn compile_and_run_corpus_ex(
 
 /// kilo smoke test: コンパイル → リンク → 引数なし実行 → "Usage:" 出力確認
 #[test]
-#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS system headers")]
 fn kilo_compile_link_smoke() {
     if !can_run_x86_64() {
         return;
@@ -363,7 +378,6 @@ fn kilo_compile_link_smoke() {
 // ── inih (Tier 1) ──
 
 #[test]
-#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS system headers")]
 fn inih_compile_and_run() {
     if !can_run_x86_64() {
         return;
@@ -372,7 +386,6 @@ fn inih_compile_and_run() {
 }
 
 #[test]
-#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS system headers")]
 fn inih_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;
@@ -383,7 +396,6 @@ fn inih_compile_and_run_obfuscated() {
 // ── sds (Tier 1) ──
 
 #[test]
-#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS system headers")]
 fn sds_compile_and_run() {
     if !can_run_x86_64() {
         return;
@@ -392,7 +404,6 @@ fn sds_compile_and_run() {
 }
 
 #[test]
-#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS system headers")]
 fn sds_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;
