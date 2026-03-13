@@ -98,32 +98,31 @@ pub fn typecheck(program: &mut Program) -> Result<()> {
 /// `char s[] = "hello"` / `char s[10] = "hello"` — 文字列リテラルを char 配列初期化子に変換。
 /// サイズ 0 の場合は文字列長+1（null終端含む）から推論する。
 fn convert_string_to_char_array(decl: &mut Declaration) -> Result<()> {
-    if let Some(Expr::StringLiteral(s)) = &decl.init {
-        if let Type::Array(ref elem_type, count) = decl.var_type {
-            if matches!(**elem_type, Type::Char | Type::UChar) {
-                let bytes: Vec<u8> = s.bytes().collect();
-                let str_len = bytes.len() + 1; // null terminator 含む
-                let array_size = if count == 0 { str_len } else { count };
-                if count > 0 && bytes.len() > count {
-                    return Err(CompileError::TypeError(format!(
-                        "initializer-string for '{}' is too long ({} chars for array of {})",
-                        decl.name,
-                        bytes.len(),
-                        count
-                    )));
-                }
-                decl.var_type = Type::Array(elem_type.clone(), array_size);
-                let mut chars: Vec<Expr> = bytes
-                    .iter()
-                    .take(array_size)
-                    .map(|&b| Expr::Constant(b as i64))
-                    .collect();
-                while chars.len() < array_size {
-                    chars.push(Expr::Constant(0));
-                }
-                decl.init = Some(Expr::CompoundInit(chars));
-            }
+    if let Some(Expr::StringLiteral(s)) = &decl.init
+        && let Type::Array(ref elem_type, count) = decl.var_type
+        && matches!(**elem_type, Type::Char | Type::UChar)
+    {
+        let bytes: Vec<u8> = s.bytes().collect();
+        let str_len = bytes.len() + 1; // null terminator 含む
+        let array_size = if count == 0 { str_len } else { count };
+        if count > 0 && bytes.len() > count {
+            return Err(CompileError::TypeError(format!(
+                "initializer-string for '{}' is too long ({} chars for array of {})",
+                decl.name,
+                bytes.len(),
+                count
+            )));
         }
+        decl.var_type = Type::Array(elem_type.clone(), array_size);
+        let mut chars: Vec<Expr> = bytes
+            .iter()
+            .take(array_size)
+            .map(|&b| Expr::Constant(b as i64))
+            .collect();
+        while chars.len() < array_size {
+            chars.push(Expr::Constant(0));
+        }
+        decl.init = Some(Expr::CompoundInit(chars));
     }
     Ok(())
 }
@@ -1004,9 +1003,7 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 }
 
                 // ビット演算 (& | ^): ポインタ禁止、void 禁止、double 禁止
-                BinaryOp::BitwiseAnd
-                | BinaryOp::BitwiseOr
-                | BinaryOp::BitwiseXor => {
+                BinaryOp::BitwiseAnd | BinaryOp::BitwiseOr | BinaryOp::BitwiseXor => {
                     if left_type.is_void() || right_type.is_void() {
                         return Err(CompileError::TypeError(
                             "void expression used as operand of bitwise operation".to_string(),

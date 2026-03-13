@@ -140,7 +140,12 @@ impl TackyGenerator {
         // 構造体型のコンパウンド初期化子: フィールドごとにレイアウトを生成
         if let Expr::CompoundInit(inits) = init_expr {
             if let Some(Type::Struct { members, .. }) = var_type {
-                return Self::resolve_struct_init(inits, members, string_constants, string_label_counter);
+                return Self::resolve_struct_init(
+                    inits,
+                    members,
+                    string_constants,
+                    string_label_counter,
+                );
             }
             if let Some(Type::Array(elem_type, _)) = var_type {
                 let init_vals: Vec<TackyStaticInit> = inits
@@ -159,33 +164,26 @@ impl TackyGenerator {
             // Fallback: untyped compound init
             let init_vals: Vec<TackyStaticInit> = inits
                 .iter()
-                .map(|e| {
-                    Self::resolve_static_init(
-                        e,
-                        string_constants,
-                        string_label_counter,
-                        None,
-                    )
-                })
+                .map(|e| Self::resolve_static_init(e, string_constants, string_label_counter, None))
                 .collect::<std::result::Result<_, _>>()?;
             return Ok(TackyStaticInit::ArrayInit(init_vals));
         }
 
         // 文字列リテラル → char 配列フィールドならインラインバイト列
         if let Expr::StringLiteral(s) = init_expr {
-            if let Some(Type::Array(elem, count)) = var_type {
-                if matches!(**elem, Type::Char | Type::UChar) {
-                    let bytes: Vec<u8> = s.bytes().collect();
-                    let mut data = Vec::with_capacity(*count);
-                    for i in 0..*count {
-                        if i < bytes.len() {
-                            data.push(bytes[i]);
-                        } else {
-                            data.push(0);
-                        }
+            if let Some(Type::Array(elem, count)) = var_type
+                && matches!(**elem, Type::Char | Type::UChar)
+            {
+                let bytes: Vec<u8> = s.bytes().collect();
+                let mut data = Vec::with_capacity(*count);
+                for i in 0..*count {
+                    if i < bytes.len() {
+                        data.push(bytes[i]);
+                    } else {
+                        data.push(0);
                     }
-                    return Ok(TackyStaticInit::ByteArrayInit(data));
                 }
+                return Ok(TackyStaticInit::ByteArrayInit(data));
             }
             // Default: string literal → pointer to string constant
             let label = format!(".Lstr_{}", *string_label_counter);
@@ -201,17 +199,24 @@ impl TackyGenerator {
             Expr::ConstantULong(v) => Ok(TackyStaticInit::IntInit(*v as i64)),
             Expr::ConstantDouble(v) => Ok(TackyStaticInit::DoubleInit(*v)),
             // NULL pointer: cast of 0 to pointer type
-            Expr::Cast { target_type: _, expr, .. } => {
+            Expr::Cast {
+                target_type: _,
+                expr,
+                ..
+            } => {
                 if let Expr::Constant(0) = expr.as_ref() {
                     Ok(TackyStaticInit::IntInit(0))
                 } else {
-                    Self::resolve_static_init(expr, string_constants, string_label_counter, var_type)
+                    Self::resolve_static_init(
+                        expr,
+                        string_constants,
+                        string_label_counter,
+                        var_type,
+                    )
                 }
             }
             // Variable reference (e.g. array name decaying to pointer)
-            Expr::Var(name) => {
-                Ok(TackyStaticInit::PointerArrayInit(vec![name.clone()]))
-            }
+            Expr::Var(name) => Ok(TackyStaticInit::PointerArrayInit(vec![name.clone()])),
             // Constant binary/unary expressions at file scope
             Expr::Binary(..) | Expr::Unary(..) => {
                 if let Some(v) = Self::try_eval_static_const(init_expr) {
@@ -237,7 +242,7 @@ impl TackyGenerator {
         for (i, member) in members.iter().enumerate() {
             let align = member.member_type.alignment();
             // パディング挿入
-            if offset % align != 0 {
+            if !offset.is_multiple_of(align) {
                 let pad = align - (offset % align);
                 result.push(TackyStaticInit::ZeroInit(pad));
                 offset += pad;
@@ -257,7 +262,7 @@ impl TackyGenerator {
                         let bytes = match field_size {
                             1 => vec![*v as u8],
                             4 => (*v as i32).to_le_bytes().to_vec(),
-                            _ => (*v as i64).to_le_bytes()[..field_size].to_vec(),
+                            _ => { *v }.to_le_bytes()[..field_size].to_vec(),
                         };
                         result.push(TackyStaticInit::ByteArrayInit(bytes));
                     }
@@ -275,7 +280,7 @@ impl TackyGenerator {
 
         // 末尾パディング
         let struct_align = crate::parse::ast::struct_alignment(members);
-        if offset % struct_align != 0 {
+        if !offset.is_multiple_of(struct_align) {
             let pad = struct_align - (offset % struct_align);
             result.push(TackyStaticInit::ZeroInit(pad));
         }
@@ -312,7 +317,13 @@ impl TackyGenerator {
                 Some(match op {
                     UnaryOp::Negate => v.wrapping_neg(),
                     UnaryOp::Complement => !v,
-                    UnaryOp::Not => if v == 0 { 1 } else { 0 },
+                    UnaryOp::Not => {
+                        if v == 0 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
                     _ => return None,
                 })
             }
@@ -606,7 +617,9 @@ impl TackyGenerator {
         // グローバル/extern 変数の型も var_types に追加
         for (name, kind) in &self.var_map {
             if let VarKind::Static(_, var_type) = kind {
-                self.var_types.entry(name.clone()).or_insert_with(|| var_type.clone());
+                self.var_types
+                    .entry(name.clone())
+                    .or_insert_with(|| var_type.clone());
             }
         }
 
@@ -1383,8 +1396,7 @@ impl TackyGenerator {
                 // C99 predefined identifier — emit as string constant
                 let label = format!(".Lstr_{}", self.string_label_counter);
                 self.string_label_counter += 1;
-                self.string_constants
-                    .push((label.clone(), "?".to_string()));
+                self.string_constants.push((label.clone(), "?".to_string()));
                 let dst = self.new_temp(Type::Pointer(Box::new(Type::Char)));
                 instrs.push(TackyInstruction::GetAddress {
                     src: TackyVal::Var(label),

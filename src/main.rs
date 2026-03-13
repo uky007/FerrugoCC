@@ -320,7 +320,13 @@ fn main() {
         None
     };
 
-    if let Err(e) = driver::run(&cli.source, stage, obf_config, driver::PreprocessMode::External, &cli.defines) {
+    if let Err(e) = driver::run(
+        &cli.source,
+        stage,
+        obf_config,
+        driver::PreprocessMode::External,
+        &cli.defines,
+    ) {
         eprintln!("ferrugocc: {e}");
         process::exit(1);
     }

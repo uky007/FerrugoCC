@@ -67,20 +67,13 @@ pub enum Stage {
 fn preprocess_external(source_path: &Path, pp_defines: &[String]) -> Result<String> {
     let source_dir = source_path.parent().unwrap_or(Path::new("."));
     let mut cmd = Command::new("gcc");
-    cmd.arg("-E")
-        .arg("-P")
-        .arg("-I")
-        .arg(source_dir);
+    cmd.arg("-E").arg("-P").arg("-I").arg(source_dir);
     for def in pp_defines {
         cmd.arg(format!("-D{def}"));
     }
-    let output = cmd.arg(source_path)
-        .output()
-        .map_err(|e| {
-            CompileError::ExternalToolError(format!(
-                "failed to run preprocessor (gcc -E): {e}"
-            ))
-        })?;
+    let output = cmd.arg(source_path).output().map_err(|e| {
+        CompileError::ExternalToolError(format!("failed to run preprocessor (gcc -E): {e}"))
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -90,9 +83,7 @@ fn preprocess_external(source_path: &Path, pp_defines: &[String]) -> Result<Stri
     }
 
     String::from_utf8(output.stdout).map_err(|e| {
-        CompileError::ExternalToolError(format!(
-            "preprocessor output is not valid UTF-8: {e}"
-        ))
+        CompileError::ExternalToolError(format!("preprocessor output is not valid UTF-8: {e}"))
     })
 }
 

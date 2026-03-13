@@ -365,10 +365,7 @@ pub enum Statement {
     /// `goto label;` — ラベルへの無条件ジャンプ
     Goto(String),
     /// `label: stmt` — ラベル付き文
-    Label {
-        name: String,
-        body: Box<Statement>,
-    },
+    Label { name: String, body: Box<Statement> },
 }
 
 /// forループの初期化部（Chapter 8）。

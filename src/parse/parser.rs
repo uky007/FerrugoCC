@@ -730,17 +730,20 @@ impl<'a> Parser<'a> {
         if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
             // `(` の後に `*` があれば関数ポインタ宣言子
             if self.pos + 1 < self.tokens.len()
-                && matches!(self.tokens[self.pos + 1].kind, TokenKind::Star | TokenKind::Caret)
+                && matches!(
+                    self.tokens[self.pos + 1].kind,
+                    TokenKind::Star | TokenKind::Caret
+                )
             {
                 self.advance()?; // consume '('
                 self.advance()?; // consume '*' or '^'
                 // Clang nullability attributes: _Nullable, _Nonnull, _Null_unspecified
                 while self.pos < self.tokens.len() {
-                    if let TokenKind::Identifier(attr) = &self.peek()?.kind {
-                        if attr.starts_with("_N") || attr.starts_with("_null") {
-                            self.advance()?;
-                            continue;
-                        }
+                    if let TokenKind::Identifier(attr) = &self.peek()?.kind
+                        && (attr.starts_with("_N") || attr.starts_with("_null"))
+                    {
+                        self.advance()?;
+                        continue;
                     }
                     break;
                 }
@@ -833,52 +836,54 @@ impl<'a> Parser<'a> {
         }
 
         // 関数ポインタ: `(*name)(params)` or `(* _Nonnull)(...)` — parse-only
-        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
-            if self.pos + 1 < self.tokens.len()
-                && matches!(self.tokens[self.pos + 1].kind, TokenKind::Star | TokenKind::Caret)
-            {
-                self.advance()?; // consume '('
-                self.advance()?; // consume '*' or '^'
-                // Clang nullability attributes: _Nullable, _Nonnull, _Null_unspecified
-                while self.pos < self.tokens.len() {
-                    if let TokenKind::Identifier(attr) = &self.peek()?.kind {
-                        if attr.starts_with("_N") || attr.starts_with("_null") {
-                            self.advance()?;
-                            continue;
-                        }
-                    }
-                    break;
+        if self.pos < self.tokens.len()
+            && self.peek()?.kind == TokenKind::OpenParen
+            && self.pos + 1 < self.tokens.len()
+            && matches!(
+                self.tokens[self.pos + 1].kind,
+                TokenKind::Star | TokenKind::Caret
+            )
+        {
+            self.advance()?; // consume '('
+            self.advance()?; // consume '*' or '^'
+            // Clang nullability attributes: _Nullable, _Nonnull, _Null_unspecified
+            while self.pos < self.tokens.len() {
+                if let TokenKind::Identifier(attr) = &self.peek()?.kind
+                    && (attr.starts_with("_N") || attr.starts_with("_null"))
+                {
+                    self.advance()?;
+                    continue;
                 }
-                // 名前があれば取得、なければ匿名（`(*)(...)`）
-                let name =
-                    if let TokenKind::Identifier(name) = &self.peek()?.kind {
-                        let name = name.clone();
-                        self.advance()?;
-                        name
-                    } else {
-                        String::new()
-                    };
-                self.expect(&TokenKind::CloseParen)?;
-                // パラメータリストをスキップ
-                if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
-                    let mut depth = 0;
-                    loop {
-                        let tok = self.advance()?;
-                        match tok.kind {
-                            TokenKind::OpenParen => depth += 1,
-                            TokenKind::CloseParen => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                let ty = Type::Pointer(Box::new(Type::Void));
-                return Ok((ty, name));
+                break;
             }
+            // 名前があれば取得、なければ匿名（`(*)(...)`）
+            let name = if let TokenKind::Identifier(name) = &self.peek()?.kind {
+                let name = name.clone();
+                self.advance()?;
+                name
+            } else {
+                String::new()
+            };
+            self.expect(&TokenKind::CloseParen)?;
+            // パラメータリストをスキップ
+            if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
+                let mut depth = 0;
+                loop {
+                    let tok = self.advance()?;
+                    match tok.kind {
+                        TokenKind::OpenParen => depth += 1,
+                        TokenKind::CloseParen => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let ty = Type::Pointer(Box::new(Type::Void));
+            return Ok((ty, name));
         }
 
         // 次のトークンが識別子なら名前付きパラメータ
@@ -1087,8 +1092,7 @@ impl<'a> Parser<'a> {
                             break;
                         }
                     }
-                    while self.pos < self.tokens.len()
-                        && self.peek()?.kind != TokenKind::Semicolon
+                    while self.pos < self.tokens.len() && self.peek()?.kind != TokenKind::Semicolon
                     {
                         self.advance()?;
                     }
@@ -2292,10 +2296,18 @@ impl<'a> Parser<'a> {
                     BinaryOp::Subtract => l - r,
                     BinaryOp::Multiply => l * r,
                     BinaryOp::Divide => {
-                        if r == 0 { 0 } else { l / r }
+                        if r == 0 {
+                            0
+                        } else {
+                            l / r
+                        }
                     }
                     BinaryOp::Remainder => {
-                        if r == 0 { 0 } else { l % r }
+                        if r == 0 {
+                            0
+                        } else {
+                            l % r
+                        }
                     }
                     BinaryOp::Equal => (l == r) as i64,
                     BinaryOp::NotEqual => (l != r) as i64,

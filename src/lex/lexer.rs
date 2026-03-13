@@ -272,9 +272,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 pos += 2; // consume "0x"
                 column += 2;
                 let hex_start = pos;
-                while pos < bytes.len()
-                    && (bytes[pos].is_ascii_hexdigit())
-                {
+                while pos < bytes.len() && (bytes[pos].is_ascii_hexdigit()) {
                     pos += 1;
                     column += 1;
                 }
@@ -305,9 +303,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                         break;
                     }
                 }
-                if pos < bytes.len()
-                    && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
-                {
+                if pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
                     return Err(CompileError::LexError(format!(
                         "invalid token at line {line}, column {start_col}: \
                          invalid suffix on hexadecimal literal"

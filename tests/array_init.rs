@@ -288,7 +288,9 @@ int main(void) {
 /// char s[] = "hello": サイズ推論 + null 終端
 #[test]
 fn char_array_from_string_basic() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     char s[] = "hello";
@@ -304,7 +306,9 @@ int main(void) {
 /// char s[10] = "hi": 明示サイズ + ゼロ埋め
 #[test]
 fn char_array_from_string_explicit_size() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     char s[10] = "hi";
@@ -321,7 +325,9 @@ int main(void) {
 /// グローバル char[] = "hello"
 #[test]
 fn char_array_from_string_global() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 char greeting[] = "world";
 int main(void) {
@@ -337,7 +343,9 @@ int main(void) {
 /// static ローカル char[] = "abc"
 #[test]
 fn char_array_from_string_static() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let source = r#"
 int main(void) {
     static char s[] = "abc";

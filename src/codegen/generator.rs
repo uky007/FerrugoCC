@@ -105,7 +105,9 @@ pub fn generate(
     // extern 変数（__stderrp 等）も static_vars_set に追加
     for func in &program.functions {
         for name in &func.static_var_names {
-            static_vars_set.entry(name.clone()).or_insert_with(|| name.clone());
+            static_vars_set
+                .entry(name.clone())
+                .or_insert_with(|| name.clone());
         }
     }
 
@@ -123,8 +125,8 @@ pub fn generate(
         .iter()
         .map(|sv| {
             let elem_type = sv.var_type.target_type();
-            let is_struct_array = sv.var_type.is_array()
-                && elem_type.map_or(false, |t| t.is_struct());
+            let is_struct_array =
+                sv.var_type.is_array() && elem_type.is_some_and(|t| t.is_struct());
             let asm_type = if sv.var_type.is_struct() || is_struct_array {
                 AsmType::Quadword
             } else if sv.var_type.is_array() {
@@ -1941,11 +1943,7 @@ fn generate_function_call(
 
     // Indirect call if name refers to a variable (function pointer)
     if var_types.contains_key(name) {
-        let fn_ptr_op = val_to_operand(
-            &TackyVal::Var(name.to_string()),
-            static_vars,
-            stack_vars,
-        )?;
+        let fn_ptr_op = val_to_operand(&TackyVal::Var(name.to_string()), static_vars, stack_vars)?;
         instrs.push(Instruction::Mov {
             asm_type: AsmType::Quadword,
             src: fn_ptr_op,

@@ -184,7 +184,7 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
         // ポインタ配列は .data に配置
         StaticInit::PointerArrayInit(_) => false,
         // 配列初期化子リスト: 全要素がゼロなら .bss に配置
-        StaticInit::ArrayInit(elems) => elems.iter().all(|e| is_static_init_zero(e)),
+        StaticInit::ArrayInit(elems) => elems.iter().all(is_static_init_zero),
     };
 
     if !is_zero {
@@ -263,7 +263,8 @@ fn emit_array_init_data(out: &mut String, elems: &[StaticInit], asm_type: &AsmTy
             }
             StaticInit::ByteArrayInit(bytes) => {
                 if !bytes.is_empty() {
-                    let byte_strs: Vec<String> = bytes.iter().map(|b| format!("0x{b:02x}")).collect();
+                    let byte_strs: Vec<String> =
+                        bytes.iter().map(|b| format!("0x{b:02x}")).collect();
                     writeln!(out, "    .byte {}", byte_strs.join(", "))
                         .map_err(|e| CompileError::EmitError(e.to_string()))?;
                 }

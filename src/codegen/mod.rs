@@ -278,10 +278,7 @@ fn insert_anti_disassembly(functions: &mut [AsmFunction]) {
 /// 関数呼び出しの間接化: `call func` を `lea func(%rip), %r10; call *%r10` に変換する。
 ///
 /// R10 は caller-saved の scratch レジスタで、Call 直前に使っても安全。
-fn indirect_calls(
-    functions: &mut [AsmFunction],
-    local_names: &std::collections::HashSet<String>,
-) {
+fn indirect_calls(functions: &mut [AsmFunction], local_names: &std::collections::HashSet<String>) {
     for func in functions {
         let mut new_instrs = Vec::new();
         for instr in &func.instructions {

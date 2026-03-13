@@ -2144,14 +2144,12 @@ fn build_outlined_function(
     // output_name を input_to_param から除外し、関数本体先頭で
     // Copy { param → output_new } を挿入して初期値を渡す。
     let output_init_copy: Option<TackyInstruction> =
-        if let Some(param_for_output) = input_to_param.remove(output_name) {
-            Some(TackyInstruction::Copy {
+        input_to_param
+            .remove(output_name)
+            .map(|param_for_output| TackyInstruction::Copy {
                 src: TackyVal::Var(param_for_output),
                 dst: TackyVal::Var(output_new.clone()),
-            })
-        } else {
-            None
-        };
+            });
 
     // 命令のリネーム
     let rename = |val: &TackyVal| -> TackyVal {

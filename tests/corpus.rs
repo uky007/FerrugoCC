@@ -65,10 +65,7 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                 if let Some(idx) = new_line.find(prefix) {
                     let after = &new_line[idx + prefix.len()..];
                     let sym = after.split_whitespace().next().unwrap_or("");
-                    if !sym.is_empty()
-                        && !sym.starts_with('.')
-                        && !sym.starts_with('*')
-                    {
+                    if !sym.is_empty() && !sym.starts_with('.') && !sym.starts_with('*') {
                         new_line = new_line.replacen(
                             &format!("{prefix}{sym}"),
                             &format!("{prefix}_{sym}"),
@@ -84,7 +81,10 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                     let sym = after.split_whitespace().next().unwrap_or("");
                     if !sym.is_empty()
                         && !sym.starts_with('.')
-                        && sym.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                        && sym
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphabetic() || c == '_')
                     {
                         new_line = new_line.replacen(
                             &format!("{directive}{sym}"),
@@ -116,7 +116,9 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                         let replacement = format!("movq _{sym}@GOTPCREL(%rip)");
                         new_line = new_line.replacen(&original, &replacement, 1);
                         search_from = sym_start + replacement.len();
-                    } else if is_external && (trimmed_line.starts_with("movq ") || trimmed_line.starts_with("movl ")) {
+                    } else if is_external
+                        && (trimmed_line.starts_with("movq ") || trimmed_line.starts_with("movl "))
+                    {
                         // movq/movl external(%rip), %reg → GOT load + deref
                         let is_quad = trimmed_line.starts_with("movq ");
                         // Extract destination register
@@ -124,14 +126,23 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                         let dst_part = after_rip.trim().trim_start_matches(',').trim();
                         let dst_reg = dst_part.split_whitespace().next().unwrap_or("").to_string();
                         // Use the 64-bit version of the register for GOT load
-                        let got_reg = if dst_reg.starts_with('%') {
+                        let got_reg = if let Some(r) = dst_reg.strip_prefix('%') {
                             // Convert 32-bit reg to 64-bit for GOT load
-                            let r = &dst_reg[1..];
                             let r64 = match r {
-                                "eax" => "rax", "ebx" => "rbx", "ecx" => "rcx", "edx" => "rdx",
-                                "esi" => "rsi", "edi" => "rdi", "r8d" => "r8", "r9d" => "r9",
-                                "r10d" => "r10", "r11d" => "r11", "r12d" => "r12", "r13d" => "r13",
-                                "r14d" => "r14", "r15d" => "r15",
+                                "eax" => "rax",
+                                "ebx" => "rbx",
+                                "ecx" => "rcx",
+                                "edx" => "rdx",
+                                "esi" => "rsi",
+                                "edi" => "rdi",
+                                "r8d" => "r8",
+                                "r9d" => "r9",
+                                "r10d" => "r10",
+                                "r11d" => "r11",
+                                "r12d" => "r12",
+                                "r13d" => "r13",
+                                "r14d" => "r14",
+                                "r15d" => "r15",
                                 other => other,
                             };
                             format!("%{r64}")
@@ -338,7 +349,10 @@ fn kilo_compile_link_smoke() {
         &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
         &[], // no args → usage message
     );
-    assert_eq!(code, 1, "kilo with no args should exit with 1, stderr: {stderr}");
+    assert_eq!(
+        code, 1,
+        "kilo with no args should exit with 1, stderr: {stderr}"
+    );
     assert!(
         stderr.contains("Usage:"),
         "kilo stderr should contain 'Usage:', got: {stderr}"
@@ -352,10 +366,7 @@ fn inih_compile_and_run() {
     if !can_run_x86_64() {
         return;
     }
-    assert_eq!(
-        compile_and_run_corpus("corpus/inih/test_inih.c", false),
-        42
-    );
+    assert_eq!(compile_and_run_corpus("corpus/inih/test_inih.c", false), 42);
 }
 
 #[test]
@@ -363,10 +374,7 @@ fn inih_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;
     }
-    assert_eq!(
-        compile_and_run_corpus("corpus/inih/test_inih.c", true),
-        42
-    );
+    assert_eq!(compile_and_run_corpus("corpus/inih/test_inih.c", true), 42);
 }
 
 // ── sds (Tier 1) ──
@@ -376,10 +384,7 @@ fn sds_compile_and_run() {
     if !can_run_x86_64() {
         return;
     }
-    assert_eq!(
-        compile_and_run_corpus("corpus/sds/test_sds.c", false),
-        42
-    );
+    assert_eq!(compile_and_run_corpus("corpus/sds/test_sds.c", false), 42);
 }
 
 #[test]
@@ -387,10 +392,7 @@ fn sds_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;
     }
-    assert_eq!(
-        compile_and_run_corpus("corpus/sds/test_sds.c", true),
-        42
-    );
+    assert_eq!(compile_and_run_corpus("corpus/sds/test_sds.c", true), 42);
 }
 
 // ── jsmn (Tier 1) ──

@@ -117,14 +117,8 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                 if new_line.contains(&format!("call {sym}"))
                     || new_line.contains(&format!("call\t{sym}"))
                 {
-                    new_line = new_line.replace(
-                        &format!("call {sym}"),
-                        &format!("call _{sym}"),
-                    );
-                    new_line = new_line.replace(
-                        &format!("call\t{sym}"),
-                        &format!("call\t_{sym}"),
-                    );
+                    new_line = new_line.replace(&format!("call {sym}"), &format!("call _{sym}"));
+                    new_line = new_line.replace(&format!("call\t{sym}"), &format!("call\t_{sym}"));
                 }
             }
         }
@@ -137,7 +131,9 @@ fn fixup_asm_for_macos(asm: &str) -> String {
 
 #[test]
 fn preprocess_define_constant() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 #define ANSWER 42
 int main(void) {
@@ -149,7 +145,9 @@ int main(void) {
 
 #[test]
 fn preprocess_define_expression() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 #define A 10
 #define B 20
@@ -163,7 +161,9 @@ int main(void) {
 
 #[test]
 fn preprocess_define_function_macro() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 int main(void) {
@@ -177,7 +177,9 @@ int main(void) {
 
 #[test]
 fn preprocess_include_local() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let dir = TempDir::new().unwrap();
 
     // ヘッダファイル
@@ -261,7 +263,9 @@ int main(void) {
 
 #[test]
 fn preprocess_ifdef() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 #define USE_FAST 1
 
@@ -280,7 +284,9 @@ int main(void) {
 
 #[test]
 fn preprocess_const_with_define() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 #define TABLE_SIZE 4
 
@@ -301,7 +307,9 @@ int main(void) {
 
 #[test]
 fn mirai_style_fragment() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 #define TABLE_KEY 0x5A
 #define TABLE_SIZE 4

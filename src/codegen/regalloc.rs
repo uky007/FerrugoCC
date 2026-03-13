@@ -1941,7 +1941,10 @@ mod tests {
         // 前提確認
         assert!(graph.adj.get(&tmp).unwrap().contains(&x));
         assert!(graph.adj.get(&x).unwrap().contains(&tmp));
-        assert!(graph.adj.get(&di).is_none(), "DI should have no adj entry before merge");
+        assert!(
+            !graph.adj.contains_key(&di),
+            "DI should have no adj entry before merge"
+        );
 
         // x → DI にマージ
         merge_nodes(&mut graph, &x, &di);
@@ -1958,7 +1961,7 @@ mod tests {
 
         // x の旧エントリは削除されていること
         assert!(
-            graph.adj.get(&x).is_none(),
+            !graph.adj.contains_key(&x),
             "adj[x] should be removed after merge"
         );
         // tmp の旧辺 (tmp→x) は消えていること

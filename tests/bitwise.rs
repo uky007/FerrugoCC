@@ -116,14 +116,8 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                 if new_line.contains(&format!("call {sym}"))
                     || new_line.contains(&format!("call\t{sym}"))
                 {
-                    new_line = new_line.replace(
-                        &format!("call {sym}"),
-                        &format!("call _{sym}"),
-                    );
-                    new_line = new_line.replace(
-                        &format!("call\t{sym}"),
-                        &format!("call\t_{sym}"),
-                    );
+                    new_line = new_line.replace(&format!("call {sym}"), &format!("call _{sym}"));
+                    new_line = new_line.replace(&format!("call\t{sym}"), &format!("call\t_{sym}"));
                 }
             }
         }
@@ -136,7 +130,9 @@ fn fixup_asm_for_macos(asm: &str) -> String {
 
 #[test]
 fn bitwise_and() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int a = 0xFF;
@@ -149,7 +145,9 @@ int main(void) {
 
 #[test]
 fn bitwise_or() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int a = 0xF0;
@@ -162,7 +160,9 @@ int main(void) {
 
 #[test]
 fn bitwise_xor() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int a = 0xFF;
@@ -175,7 +175,9 @@ int main(void) {
 
 #[test]
 fn shift_left() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int a = 1;
@@ -187,7 +189,9 @@ int main(void) {
 
 #[test]
 fn shift_right_signed() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int a = 128;
@@ -199,7 +203,9 @@ int main(void) {
 
 #[test]
 fn shift_right_unsigned() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     unsigned int a = 256u;
@@ -213,7 +219,9 @@ int main(void) {
 
 #[test]
 fn bitwise_compound_assign() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int x = 0xFF;
@@ -228,7 +236,9 @@ int main(void) {
 
 #[test]
 fn shift_compound_assign() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int x = 1;
@@ -244,7 +254,9 @@ int main(void) {
 
 #[test]
 fn xor_swap() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int a = 42;
@@ -263,7 +275,9 @@ int main(void) {
 
 #[test]
 fn xor_encrypt_decrypt() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int data = 42;
@@ -280,7 +294,9 @@ int main(void) {
 
 #[test]
 fn bit_mask_and_shift() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     // Pack: (10 << 24) | (0 << 16) | (0 << 8) | 1  = 0x0A000001
@@ -297,7 +313,9 @@ int main(void) {
 
 #[test]
 fn xorshift32() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     unsigned int state = 12345u;
@@ -316,7 +334,9 @@ int main(void) {
 
 #[test]
 fn const_qualifier_parse() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     const int x = 42;
@@ -329,7 +349,9 @@ int main(void) {
 
 #[test]
 fn const_pointer_parse() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int x = 42;
@@ -344,7 +366,9 @@ int main(void) {
 
 #[test]
 fn bitwise_obfuscated() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int a = 0xFF;
@@ -367,7 +391,9 @@ int main(void) {
 
 #[test]
 fn pointer_subtract_assign_deref() {
-    if !can_run_x86_64() { return; }
+    if !can_run_x86_64() {
+        return;
+    }
     let src = r#"
 int main(void) {
     int arr[5];
