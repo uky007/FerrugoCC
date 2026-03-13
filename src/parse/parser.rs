@@ -446,8 +446,8 @@ impl<'a> Parser<'a> {
         if count == 0 {
             let token = self.advance()?;
             return Err(CompileError::ParseError(format!(
-                "expected type specifier, got {:?}",
-                token.kind
+                "expected type specifier, got {:?} at line {}:{}",
+                token.kind, token.span.line, token.span.column
             )));
         }
 
@@ -1018,6 +1018,14 @@ impl<'a> Parser<'a> {
     /// `[static|extern]? int <id>` の後に `(` → 関数、`=` or `;` → 変数。
     /// カンマ区切り変数宣言をサポート: `int a = 1, b = 2;` → 複数の TopLevelDecl。
     fn parse_top_level_decl(&mut self) -> Result<Vec<TopLevelDecl>> {
+        // ファイルスコープの空文 `;` をスキップ（前処理出力に出現する）
+        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Semicolon {
+            self.advance()?;
+        }
+        if self.pos >= self.tokens.len() {
+            return Ok(vec![]);
+        }
+
         // typedef 宣言のチェック
         if self.peek()?.kind == TokenKind::KwTypedef {
             let results = self.parse_typedef()?;
@@ -1327,7 +1335,12 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::OpenBrace)?;
         let mut inits = Vec::new();
         while self.peek()?.kind != TokenKind::CloseBrace {
-            inits.push(self.parse_assignment()?);
+            if self.peek()?.kind == TokenKind::OpenBrace {
+                // ネスト初期化子: `{ { ... }, { ... } }`
+                inits.push(self.parse_compound_init()?);
+            } else {
+                inits.push(self.parse_assignment()?);
+            }
             if self.peek()?.kind == TokenKind::Comma {
                 self.advance()?; // consume ','
             } else {

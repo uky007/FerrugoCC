@@ -541,6 +541,29 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                     b'f' => 12,
                     b'v' => 11,
                     b'?' => 63,
+                    b'x' => {
+                        // \xNN hex escape
+                        let mut val: u8 = 0;
+                        let mut digits = 0;
+                        while pos < bytes.len() && bytes[pos].is_ascii_hexdigit() {
+                            let d = match bytes[pos] {
+                                b'0'..=b'9' => bytes[pos] - b'0',
+                                b'a'..=b'f' => bytes[pos] - b'a' + 10,
+                                b'A'..=b'F' => bytes[pos] - b'A' + 10,
+                                _ => unreachable!(),
+                            };
+                            val = val.wrapping_mul(16).wrapping_add(d);
+                            pos += 1;
+                            column += 1;
+                            digits += 1;
+                        }
+                        if digits == 0 {
+                            return Err(CompileError::LexError(format!(
+                                "\\x used with no following hex digits at line {line}, column {start_col}"
+                            )));
+                        }
+                        val as i8
+                    }
                     _ => {
                         return Err(CompileError::LexError(format!(
                             "unknown escape sequence '\\{}' at line {line}, column {start_col}",
@@ -619,6 +642,30 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                         b'f' => '\x0C',
                         b'v' => '\x0B',
                         b'?' => '?',
+                        b'x' => {
+                            // \xNN hex escape
+                            let mut val: u8 = 0;
+                            let mut digits = 0;
+                            while pos < bytes.len() && bytes[pos].is_ascii_hexdigit() {
+                                let d = match bytes[pos] {
+                                    b'0'..=b'9' => bytes[pos] - b'0',
+                                    b'a'..=b'f' => bytes[pos] - b'a' + 10,
+                                    b'A'..=b'F' => bytes[pos] - b'A' + 10,
+                                    _ => unreachable!(),
+                                };
+                                val = val.wrapping_mul(16).wrapping_add(d);
+                                pos += 1;
+                                column += 1;
+                                digits += 1;
+                            }
+                            if digits == 0 {
+                                return Err(CompileError::LexError(format!(
+                                    "\\x used with no following hex digits in string literal at line {line}, column {start_col}"
+                                )));
+                            }
+                            content.push(val as char);
+                            continue;
+                        }
                         _ => {
                             return Err(CompileError::LexError(format!(
                                 "unknown escape sequence '\\{}' in string literal at line {line}, column {start_col}",
