@@ -95,6 +95,7 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                 }
             }
             // Prefix _ on sym(%rip) references (data/function addresses)
+            // External symbols need @GOTPCREL for leaq on macOS
             let mut search_from = 0;
             while let Some(rel_idx) = new_line[search_from..].find("(%rip)") {
                 let rip_idx = search_from + rel_idx;
@@ -107,11 +108,47 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                     .unwrap_or(0);
                 let sym = &new_line[sym_start..rip_idx];
                 if !sym.is_empty() && !sym.starts_with('.') {
-                    let replacement = format!("_{sym}(%rip)");
-                    let original = format!("{sym}(%rip)");
-                    new_line = new_line.replacen(&original, &replacement, 1);
-                    // Skip past the replacement to avoid infinite loop
-                    search_from = sym_start + replacement.len();
+                    let is_external = !all_symbols.contains(sym);
+                    let trimmed_line = new_line.trim_start();
+                    if is_external && trimmed_line.starts_with("leaq ") {
+                        // leaq external(%rip), %reg → movq _external@GOTPCREL(%rip), %reg
+                        let original = format!("leaq {sym}(%rip)");
+                        let replacement = format!("movq _{sym}@GOTPCREL(%rip)");
+                        new_line = new_line.replacen(&original, &replacement, 1);
+                        search_from = sym_start + replacement.len();
+                    } else if is_external && (trimmed_line.starts_with("movq ") || trimmed_line.starts_with("movl ")) {
+                        // movq/movl external(%rip), %reg → GOT load + deref
+                        let is_quad = trimmed_line.starts_with("movq ");
+                        // Extract destination register
+                        let after_rip = &new_line[rip_idx + 6..]; // after "(%rip)"
+                        let dst_part = after_rip.trim().trim_start_matches(',').trim();
+                        let dst_reg = dst_part.split_whitespace().next().unwrap_or("").to_string();
+                        // Use the 64-bit version of the register for GOT load
+                        let got_reg = if dst_reg.starts_with('%') {
+                            // Convert 32-bit reg to 64-bit for GOT load
+                            let r = &dst_reg[1..];
+                            let r64 = match r {
+                                "eax" => "rax", "ebx" => "rbx", "ecx" => "rcx", "edx" => "rdx",
+                                "esi" => "rsi", "edi" => "rdi", "r8d" => "r8", "r9d" => "r9",
+                                "r10d" => "r10", "r11d" => "r11", "r12d" => "r12", "r13d" => "r13",
+                                "r14d" => "r14", "r15d" => "r15",
+                                other => other,
+                            };
+                            format!("%{r64}")
+                        } else {
+                            dst_reg.clone()
+                        };
+                        let deref_instr = if is_quad { "movq" } else { "movl" };
+                        new_line = format!(
+                            "    movq _{sym}@GOTPCREL(%rip), {got_reg}\n    {deref_instr} ({got_reg}), {dst_reg}"
+                        );
+                        search_from = new_line.len();
+                    } else {
+                        let replacement = format!("_{sym}(%rip)");
+                        let original = format!("{sym}(%rip)");
+                        new_line = new_line.replacen(&original, &replacement, 1);
+                        search_from = sym_start + replacement.len();
+                    }
                 } else {
                     search_from = rip_idx + 6; // skip past "(%rip)"
                 }
@@ -196,6 +233,116 @@ fn compile_and_run_corpus(source_path: &str, obfuscate: bool) -> i32 {
     };
 
     run_output.status.code().unwrap_or(-1)
+}
+
+/// kilo 用: -D フラグ対応版コンパイル → リンク → 実行 (exit code + stderr)
+fn compile_and_run_corpus_ex(
+    source_path: &str,
+    obfuscate: bool,
+    defines: &[&str],
+    run_args: &[&str],
+) -> (i32, String, String) {
+    let dir = TempDir::new().unwrap();
+    let asm_path = dir.path().join("test.s");
+    let bin_path = dir.path().join("test");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrugocc"));
+    if obfuscate {
+        cmd.arg("--fobfuscate");
+    }
+    for def in defines {
+        cmd.arg(format!("-D{def}"));
+    }
+    cmd.arg("-S").arg(source_path);
+    cmd.env("FERRUGOCC_ASM_OUTPUT", asm_path.to_str().unwrap());
+
+    let output = cmd.output().expect("failed to run compiler");
+
+    let source = std::path::Path::new(source_path);
+    let default_asm = source.with_extension("s");
+    if default_asm.exists() {
+        std::fs::copy(&default_asm, &asm_path).unwrap();
+        let _ = std::fs::remove_file(&default_asm);
+    }
+
+    assert!(
+        output.status.success(),
+        "compilation failed (obfuscate={obfuscate}):\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(asm_path.exists(), "assembly file not generated");
+
+    if cfg!(target_os = "macos") {
+        let asm = std::fs::read_to_string(&asm_path).unwrap();
+        let asm = fixup_asm_for_macos(&asm);
+        std::fs::write(&asm_path, asm).unwrap();
+    }
+
+    let gcc_output = if cfg!(target_arch = "x86_64") {
+        let mut cmd = Command::new("gcc");
+        cmd.arg(&asm_path).arg("-o").arg(&bin_path);
+        if cfg!(target_os = "macos") {
+            // macOS: 未使用のプラットフォームインライン関数が弱シンボルを参照するため
+            cmd.arg("-Wl,-undefined,dynamic_lookup");
+        }
+        cmd.output().expect("failed to run gcc")
+    } else {
+        let mut cmd = Command::new("arch");
+        cmd.args(["-x86_64", "gcc"])
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path);
+        if cfg!(target_os = "macos") {
+            cmd.arg("-Wl,-undefined,dynamic_lookup");
+        }
+        cmd.output().expect("failed to run arch -x86_64 gcc")
+    };
+
+    assert!(
+        gcc_output.status.success(),
+        "gcc link failed (obfuscate={obfuscate}):\nstderr: {}",
+        String::from_utf8_lossy(&gcc_output.stderr),
+    );
+
+    let run_output = if cfg!(target_arch = "x86_64") {
+        Command::new(&bin_path)
+            .args(run_args)
+            .output()
+            .expect("failed to run binary")
+    } else {
+        Command::new("arch")
+            .arg("-x86_64")
+            .arg(&bin_path)
+            .args(run_args)
+            .output()
+            .expect("failed to run binary via arch -x86_64")
+    };
+
+    let code = run_output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
+    (code, stdout, stderr)
+}
+
+// ── kilo (Tier 2) ──
+
+/// kilo smoke test: コンパイル → リンク → 引数なし実行 → "Usage:" 出力確認
+#[test]
+fn kilo_compile_link_smoke() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, stderr) = compile_and_run_corpus_ex(
+        "corpus/kilo/kilo.c",
+        false,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[], // no args → usage message
+    );
+    assert_eq!(code, 1, "kilo with no args should exit with 1, stderr: {stderr}");
+    assert!(
+        stderr.contains("Usage:"),
+        "kilo stderr should contain 'Usage:', got: {stderr}"
+    );
 }
 
 // ── inih (Tier 1) ──

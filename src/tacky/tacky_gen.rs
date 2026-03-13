@@ -603,6 +603,13 @@ impl TackyGenerator {
             instrs.push(TackyInstruction::Return(ret_val));
         }
 
+        // グローバル/extern 変数の型も var_types に追加
+        for (name, kind) in &self.var_map {
+            if let VarKind::Static(_, var_type) = kind {
+                self.var_types.entry(name.clone()).or_insert_with(|| var_type.clone());
+            }
+        }
+
         let static_var_names: HashSet<String> = self
             .var_map
             .iter()

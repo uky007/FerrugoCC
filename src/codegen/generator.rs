@@ -102,6 +102,13 @@ pub fn generate(
         }
     }
 
+    // extern 変数（__stderrp 等）も static_vars_set に追加
+    for func in &program.functions {
+        for name in &func.static_var_names {
+            static_vars_set.entry(name.clone()).or_insert_with(|| name.clone());
+        }
+    }
+
     for func in &program.functions {
         results.push(generate_function(
             func,
