@@ -1,5 +1,10 @@
 # FerrugoCC
 
+[![CI](https://github.com/uky007/FerrugoCC/actions/workflows/ci.yml/badge.svg)](https://github.com/uky007/FerrugoCC/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/ferrugocc.svg)](https://crates.io/crates/ferrugocc)
+[![docs.rs](https://docs.rs/ferrugocc/badge.svg)](https://docs.rs/ferrugocc)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 An experimental C compiler and obfuscating compiler written in Rust.
 
 Compiles a practical subset of C to x86_64 assembly (System V ABI), with an optional 16-pass obfuscation pipeline. Developed following [Writing a C Compiler](https://nostarch.com/writing-c-compiler) by Nora Sandler, then extended with real-world corpus support and obfuscation.
