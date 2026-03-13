@@ -284,10 +284,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 }
                 let hex_text = &source[hex_start..pos];
 
-                // サフィックス解析（U/u, L/l）
+                // サフィックス解析（U/u, L/l, LL/ll, ULL/ull）
                 let mut has_u = false;
                 let mut has_l = false;
-                for _ in 0..2 {
+                for _ in 0..3 {
                     if pos < bytes.len() && (bytes[pos] == b'U' || bytes[pos] == b'u') && !has_u {
                         has_u = true;
                         pos += 1;
@@ -299,6 +299,11 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                         has_l = true;
                         pos += 1;
                         column += 1;
+                        // LL / ll
+                        if pos < bytes.len() && (bytes[pos] == b'L' || bytes[pos] == b'l') {
+                            pos += 1;
+                            column += 1;
+                        }
                     } else {
                         break;
                     }

@@ -563,17 +563,93 @@ impl<'a> Parser<'a> {
     /// 対応パターン: リテラル、`-lit`、`lit << lit`、`lit | lit`、
     /// `(expr)`、既存 enum 定数名。
     fn parse_enum_const_expr(&mut self) -> Result<i64> {
-        let val = self.parse_enum_const_bitor()?;
-        Ok(val)
+        self.parse_enum_const_ternary()
+    }
+
+    /// enum 定数式: 三項演算子 (`?:`)
+    fn parse_enum_const_ternary(&mut self) -> Result<i64> {
+        let cond = self.parse_enum_const_bitor()?;
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Question {
+            self.advance()?; // consume '?'
+            let then_val = self.parse_enum_const_expr()?;
+            self.expect(&TokenKind::Colon)?;
+            let else_val = self.parse_enum_const_ternary()?;
+            Ok(if cond != 0 { then_val } else { else_val })
+        } else {
+            Ok(cond)
+        }
     }
 
     /// enum 定数式: ビット OR (`|`)
     fn parse_enum_const_bitor(&mut self) -> Result<i64> {
-        let mut val = self.parse_enum_const_shift()?;
+        let mut val = self.parse_enum_const_bitand()?;
         while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Pipe {
             self.advance()?;
-            let rhs = self.parse_enum_const_shift()?;
+            let rhs = self.parse_enum_const_bitand()?;
             val |= rhs;
+        }
+        Ok(val)
+    }
+
+    /// enum 定数式: ビット AND (`&`)
+    fn parse_enum_const_bitand(&mut self) -> Result<i64> {
+        let mut val = self.parse_enum_const_relational()?;
+        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Ampersand {
+            self.advance()?;
+            let rhs = self.parse_enum_const_relational()?;
+            val &= rhs;
+        }
+        Ok(val)
+    }
+
+    /// enum 定数式: 比較 (`<`, `>`, `<=`, `>=`)
+    fn parse_enum_const_relational(&mut self) -> Result<i64> {
+        let mut val = self.parse_enum_const_additive()?;
+        while self.pos < self.tokens.len() {
+            match self.peek()?.kind {
+                TokenKind::Less => {
+                    self.advance()?;
+                    let rhs = self.parse_enum_const_additive()?;
+                    val = if val < rhs { 1 } else { 0 };
+                }
+                TokenKind::Greater => {
+                    self.advance()?;
+                    let rhs = self.parse_enum_const_additive()?;
+                    val = if val > rhs { 1 } else { 0 };
+                }
+                TokenKind::LessEqual => {
+                    self.advance()?;
+                    let rhs = self.parse_enum_const_additive()?;
+                    val = if val <= rhs { 1 } else { 0 };
+                }
+                TokenKind::GreaterEqual => {
+                    self.advance()?;
+                    let rhs = self.parse_enum_const_additive()?;
+                    val = if val >= rhs { 1 } else { 0 };
+                }
+                _ => break,
+            }
+        }
+        Ok(val)
+    }
+
+    /// enum 定数式: 加減算 (`+`, `-`)
+    fn parse_enum_const_additive(&mut self) -> Result<i64> {
+        let mut val = self.parse_enum_const_shift()?;
+        while self.pos < self.tokens.len() {
+            match self.peek()?.kind {
+                TokenKind::Plus => {
+                    self.advance()?;
+                    let rhs = self.parse_enum_const_shift()?;
+                    val += rhs;
+                }
+                TokenKind::Minus => {
+                    self.advance()?;
+                    let rhs = self.parse_enum_const_shift()?;
+                    val -= rhs;
+                }
+                _ => break,
+            }
         }
         Ok(val)
     }
@@ -988,6 +1064,25 @@ impl<'a> Parser<'a> {
         let mut results = Vec::new();
 
         let (resolved_type, name) = self.parse_declarator(base_type.clone())?;
+
+        // typedef T name(params); — 関数型 typedef（関数ポインタへ decay）
+        let resolved_type =
+            if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
+                self.advance()?; // consume '('
+                let mut depth = 1;
+                while depth > 0 && self.pos < self.tokens.len() {
+                    let t = self.advance()?;
+                    match t.kind {
+                        TokenKind::OpenParen => depth += 1,
+                        TokenKind::CloseParen => depth -= 1,
+                        _ => {}
+                    }
+                }
+                Type::Pointer(Box::new(Type::Void))
+            } else {
+                resolved_type
+            };
+
         self.typedef_names
             .insert(name.clone(), resolved_type.clone());
         results.push((name, resolved_type));
