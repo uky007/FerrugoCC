@@ -12,6 +12,7 @@ int isspace(int c) {
 }
 
 /* Disable assert and ctype.h */
+#define NDEBUG
 #define _CTYPE_H_
 #define assert(x) ((void)0)
 

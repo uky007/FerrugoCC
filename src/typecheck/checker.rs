@@ -1134,7 +1134,8 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
             // Only builtins with pass-through semantics are supported here.
             if matches!(
                 name.as_str(),
-                "__builtin_bswap32"
+                "__builtin_bswap16"
+                    | "__builtin_bswap32"
                     | "__builtin_bswap64"
                     | "__builtin_object_size"
                     | "__builtin_ctz"
