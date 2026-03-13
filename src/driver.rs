@@ -17,7 +17,7 @@
 //! `--lex`, `--parse`, `--validate`, `--tacky`, `--codegen`, `-S` フラグで途中のステージで停止できる。
 //! これは本のテストスイートとの互換性のために必要。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::codegen;
@@ -87,6 +87,12 @@ fn preprocess_external(source_path: &Path, pp_defines: &[String]) -> Result<Stri
     })
 }
 
+fn asm_output_path(source_path: &Path) -> PathBuf {
+    std::env::var_os("FERRUGOCC_ASM_OUTPUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| source_path.with_extension("s"))
+}
+
 /// コンパイルパイプラインを実行する。
 ///
 /// `source_path` のCソースファイルを読み込み、`stage` で指定された
@@ -146,7 +152,7 @@ pub fn run(
 
     // ── Stage 5: アセンブリ出力 ──
     let asm_text = emit::emit(&asm_program)?;
-    let asm_path = source_path.with_extension("s");
+    let asm_path = asm_output_path(source_path);
     std::fs::write(&asm_path, &asm_text)?;
 
     if stage == Stage::EmitAsm {
