@@ -2015,6 +2015,7 @@ impl TackyGenerator {
         if matches!(
             name,
             "__builtin_expect"
+                | "__builtin_bswap16"
                 | "__builtin_bswap32"
                 | "__builtin_bswap64"
                 | "__builtin_object_size"

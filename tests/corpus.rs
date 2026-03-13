@@ -180,6 +180,16 @@ fn platform_undefs() -> Vec<&'static str> {
     }
 }
 
+/// Linux glibc 環境で必要な追加 defines。
+/// ctype.h のインクルードガードを事前定義して inline/macro 版 isspace 等を抑制。
+fn platform_defines() -> Vec<&'static str> {
+    if cfg!(target_os = "linux") {
+        vec!["_CTYPE_H=1"]
+    } else {
+        vec![]
+    }
+}
+
 /// コンパイラ stderr からエラー行番号を抽出する。
 fn extract_error_line(stderr: &str) -> Option<usize> {
     // "at line 274, column 42" or "at line 1460, column 24"
@@ -205,6 +215,9 @@ fn compile_and_run_corpus(source_path: &str, obfuscate: bool) -> i32 {
     }
     for undef in platform_undefs() {
         cmd.arg(format!("-U{undef}"));
+    }
+    for def in platform_defines() {
+        cmd.arg(format!("-D{def}"));
     }
     cmd.arg("-S").arg(source_path);
     // Override output path
@@ -291,6 +304,9 @@ fn compile_and_run_corpus_ex(
     }
     for undef in platform_undefs() {
         cmd.arg(format!("-U{undef}"));
+    }
+    for def in platform_defines() {
+        cmd.arg(format!("-D{def}"));
     }
     for def in defines {
         cmd.arg(format!("-D{def}"));
@@ -379,6 +395,9 @@ fn dump_preprocessed_context(source_path: &str, error_line: usize) -> String {
     cmd.arg("-E").arg("-P").arg("-I").arg(source_dir);
     for undef in platform_undefs() {
         cmd.arg(format!("-U{undef}"));
+    }
+    for def in platform_defines() {
+        cmd.arg(format!("-D{def}"));
     }
     cmd.arg(source_path);
     let output = match cmd.output() {
