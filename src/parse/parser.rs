@@ -794,21 +794,17 @@ impl<'a> Parser<'a> {
             ty = Type::Pointer(Box::new(ty));
         }
 
-        // Chapter 15: 配列サフィックス `[N]`（多次元対応、厳格モード）
-        // ユーザコード用: IntLiteral のみ受理。複雑な定数式は未サポート。
+        // Chapter 15: 配列サフィックス `[N]`（多次元対応）
+        // 定数式を受理: リテラル、sizeof、算術演算、三項演算子。
         while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
             self.advance()?; // consume '['
-            if let TokenKind::IntLiteral(n) = &self.peek()?.kind {
-                let n = *n as usize;
-                self.advance()?;
-                ty = Type::Array(Box::new(ty), n);
-            } else if self.peek()?.kind == TokenKind::CloseBracket {
+            if self.peek()?.kind == TokenKind::CloseBracket {
                 // パラメータ用: `int arr[]` → Array(ty, 0)
                 ty = Type::Array(Box::new(ty), 0);
             } else {
-                return Err(CompileError::ParseError(
-                    "expected array size or ']' in declarator".to_string(),
-                ));
+                let size_expr = self.parse_conditional()?;
+                let n = Self::eval_const_expr(&size_expr)?;
+                ty = Type::Array(Box::new(ty), n as usize);
             }
             self.expect(&TokenKind::CloseBracket)?;
         }
@@ -2222,6 +2218,79 @@ impl<'a> Parser<'a> {
                     token.kind, token.span.line, token.span.column
                 )))
             }
+        }
+    }
+
+    /// 定数式を評価する（配列サイズ等のコンパイル時定数）。
+    /// sizeof(type)、リテラル、算術演算、三項演算子を対応。
+    fn eval_const_expr(expr: &Expr) -> Result<i64> {
+        match expr {
+            Expr::Constant(v) => Ok(*v),
+            Expr::ConstantLong(v) => Ok(*v),
+            Expr::ConstantUInt(v) => Ok(*v as i64),
+            Expr::ConstantULong(v) => Ok(*v as i64),
+            Expr::SizeOfType(ty) => Ok(ty.size() as i64),
+            Expr::SizeOfExpr(inner) => {
+                // sizeof(expr) — try to evaluate the inner expression
+                Self::eval_const_expr(inner)
+            }
+            Expr::Unary(op, inner) => {
+                let v = Self::eval_const_expr(inner)?;
+                match op {
+                    UnaryOp::Negate => Ok(-v),
+                    UnaryOp::Complement => Ok(!v),
+                    UnaryOp::Not => Ok(if v == 0 { 1 } else { 0 }),
+                    _ => Err(CompileError::ParseError(
+                        "unsupported unary operator in constant expression".to_string(),
+                    )),
+                }
+            }
+            Expr::Binary(op, left, right) => {
+                let l = Self::eval_const_expr(left)?;
+                let r = Self::eval_const_expr(right)?;
+                Ok(match op {
+                    BinaryOp::Add => l + r,
+                    BinaryOp::Subtract => l - r,
+                    BinaryOp::Multiply => l * r,
+                    BinaryOp::Divide => {
+                        if r == 0 { 0 } else { l / r }
+                    }
+                    BinaryOp::Remainder => {
+                        if r == 0 { 0 } else { l % r }
+                    }
+                    BinaryOp::Equal => (l == r) as i64,
+                    BinaryOp::NotEqual => (l != r) as i64,
+                    BinaryOp::LessThan => (l < r) as i64,
+                    BinaryOp::LessEqual => (l <= r) as i64,
+                    BinaryOp::GreaterThan => (l > r) as i64,
+                    BinaryOp::GreaterEqual => (l >= r) as i64,
+                    BinaryOp::LogicalAnd => ((l != 0) && (r != 0)) as i64,
+                    BinaryOp::LogicalOr => ((l != 0) || (r != 0)) as i64,
+                    BinaryOp::BitwiseAnd => l & r,
+                    BinaryOp::BitwiseOr => l | r,
+                    BinaryOp::BitwiseXor => l ^ r,
+                    BinaryOp::ShiftLeft => l << r,
+                    BinaryOp::ShiftRight => l >> r,
+                    BinaryOp::Comma => r, // comma operator: evaluate both, return right
+                })
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let c = Self::eval_const_expr(condition)?;
+                if c != 0 {
+                    Self::eval_const_expr(then_expr)
+                } else {
+                    Self::eval_const_expr(else_expr)
+                }
+            }
+            Expr::Cast { expr, .. } => Self::eval_const_expr(expr),
+            _ => Err(CompileError::ParseError(format!(
+                "unsupported expression in array size: {:?}",
+                expr
+            ))),
         }
     }
 }
