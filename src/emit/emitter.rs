@@ -123,6 +123,18 @@ fn static_init_size(init: &StaticInit, asm_type: &AsmType) -> usize {
     }
 }
 
+/// 静的初期化子が全ゼロかどうかを再帰的に判定する
+fn is_static_init_zero(init: &StaticInit) -> bool {
+    match init {
+        StaticInit::IntInit(v) => *v == 0,
+        StaticInit::DoubleInit(_) => false,
+        StaticInit::ZeroInit(_) => true,
+        StaticInit::ByteArrayInit(bytes) => bytes.iter().all(|&b| b == 0),
+        StaticInit::ArrayInit(elems) => elems.iter().all(is_static_init_zero),
+        _ => false,
+    }
+}
+
 /// 静的変数のアセンブリ出力（Chapter 10, 11, 15: 型サイズ対応、配列ゼロ初期化）。
 ///
 /// 初期値が 0 の場合は `.bss` セクション、非0 の場合は `.data` セクションに配置する。
@@ -132,16 +144,21 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
         StaticInit::ZeroInit(n) => (16, n), // 配列は16バイトアラインメント
         StaticInit::PointerArrayInit(ref labels) => (8, labels.len() * 8),
         StaticInit::ArrayInit(ref elems) => {
-            let total_size: usize = elems
-                .iter()
-                .map(|e| static_init_size(e, &var.asm_type))
-                .sum();
-            let elem_align = match var.asm_type {
-                AsmType::Byte => 1,
-                AsmType::Longword => 4,
-                AsmType::Quadword | AsmType::Double => 8,
-            };
-            (std::cmp::max(elem_align, 16), total_size)
+            if let Some(ref vt) = var.var_type {
+                // 構造体型: 型情報からサイズとアラインメントを取得
+                (vt.alignment().max(16), vt.size())
+            } else {
+                let total_size: usize = elems
+                    .iter()
+                    .map(|e| static_init_size(e, &var.asm_type))
+                    .sum();
+                let elem_align = match var.asm_type {
+                    AsmType::Byte => 1,
+                    AsmType::Longword => 4,
+                    AsmType::Quadword | AsmType::Double => 8,
+                };
+                (std::cmp::max(elem_align, 16), total_size)
+            }
         }
         _ => match var.asm_type {
             AsmType::Byte => (1, 1),
@@ -167,12 +184,7 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
         // ポインタ配列は .data に配置
         StaticInit::PointerArrayInit(_) => false,
         // 配列初期化子リスト: 全要素がゼロなら .bss に配置
-        StaticInit::ArrayInit(elems) => elems.iter().all(|e| match e {
-            StaticInit::IntInit(v) => *v == 0,
-            StaticInit::DoubleInit(_) => false,
-            StaticInit::ZeroInit(_) => true,
-            _ => false,
-        }),
+        StaticInit::ArrayInit(elems) => elems.iter().all(|e| is_static_init_zero(e)),
     };
 
     if !is_zero {
@@ -243,7 +255,26 @@ fn emit_array_init_data(out: &mut String, elems: &[StaticInit], asm_type: &AsmTy
                 writeln!(out, "    .zero {n}")
                     .map_err(|e| CompileError::EmitError(e.to_string()))?;
             }
-            _ => unreachable!("unsupported element type in array initializer"),
+            StaticInit::PointerArrayInit(labels) => {
+                for label in labels {
+                    writeln!(out, "    .quad {label}")
+                        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                }
+            }
+            StaticInit::ByteArrayInit(bytes) => {
+                if !bytes.is_empty() {
+                    let byte_strs: Vec<String> = bytes.iter().map(|b| format!("0x{b:02x}")).collect();
+                    writeln!(out, "    .byte {}", byte_strs.join(", "))
+                        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                }
+            }
+            StaticInit::ArrayInit(inner) => {
+                emit_array_init_data(out, inner, asm_type)?;
+            }
+            StaticInit::StringInit(content, _) => {
+                writeln!(out, "    .asciz \"{}\"", escape_string_for_asm(content))
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
         }
     }
     Ok(())
@@ -1387,6 +1418,7 @@ mod tests {
                 global: true,
                 init: StaticInit::IntInit(5),
                 asm_type: LW,
+                var_type: None,
             }],
             static_constants: vec![],
         };
@@ -1408,6 +1440,7 @@ mod tests {
                 global: true,
                 init: StaticInit::IntInit(0),
                 asm_type: LW,
+                var_type: None,
             }],
             static_constants: vec![],
         };
@@ -1429,6 +1462,7 @@ mod tests {
                 global: false,
                 init: StaticInit::IntInit(0),
                 asm_type: LW,
+                var_type: None,
             }],
             static_constants: vec![],
         };
@@ -1611,6 +1645,7 @@ mod tests {
                 global: true,
                 init: StaticInit::IntInit(4294967296),
                 asm_type: AsmType::Quadword,
+                var_type: None,
             }],
             static_constants: vec![],
         };

@@ -135,42 +135,188 @@ impl TackyGenerator {
         init_expr: &Expr,
         string_constants: &mut Vec<(String, String)>,
         string_label_counter: &mut usize,
+        var_type: Option<&Type>,
     ) -> std::result::Result<TackyStaticInit, String> {
+        // 構造体型のコンパウンド初期化子: フィールドごとにレイアウトを生成
+        if let Expr::CompoundInit(inits) = init_expr {
+            if let Some(Type::Struct { members, .. }) = var_type {
+                return Self::resolve_struct_init(inits, members, string_constants, string_label_counter);
+            }
+            if let Some(Type::Array(elem_type, _)) = var_type {
+                let init_vals: Vec<TackyStaticInit> = inits
+                    .iter()
+                    .map(|e| {
+                        Self::resolve_static_init(
+                            e,
+                            string_constants,
+                            string_label_counter,
+                            Some(elem_type),
+                        )
+                    })
+                    .collect::<std::result::Result<_, _>>()?;
+                return Ok(TackyStaticInit::ArrayInit(init_vals));
+            }
+            // Fallback: untyped compound init
+            let init_vals: Vec<TackyStaticInit> = inits
+                .iter()
+                .map(|e| {
+                    Self::resolve_static_init(
+                        e,
+                        string_constants,
+                        string_label_counter,
+                        None,
+                    )
+                })
+                .collect::<std::result::Result<_, _>>()?;
+            return Ok(TackyStaticInit::ArrayInit(init_vals));
+        }
+
+        // 文字列リテラル → char 配列フィールドならインラインバイト列
+        if let Expr::StringLiteral(s) = init_expr {
+            if let Some(Type::Array(elem, count)) = var_type {
+                if matches!(**elem, Type::Char | Type::UChar) {
+                    let bytes: Vec<u8> = s.bytes().collect();
+                    let mut data = Vec::with_capacity(*count);
+                    for i in 0..*count {
+                        if i < bytes.len() {
+                            data.push(bytes[i]);
+                        } else {
+                            data.push(0);
+                        }
+                    }
+                    return Ok(TackyStaticInit::ByteArrayInit(data));
+                }
+            }
+            // Default: string literal → pointer to string constant
+            let label = format!(".Lstr_{}", *string_label_counter);
+            *string_label_counter += 1;
+            string_constants.push((label.clone(), s.clone()));
+            return Ok(TackyStaticInit::PointerArrayInit(vec![label]));
+        }
+
         match init_expr {
             Expr::Constant(v) => Ok(TackyStaticInit::IntInit(*v)),
             Expr::ConstantLong(v) => Ok(TackyStaticInit::IntInit(*v)),
             Expr::ConstantUInt(v) => Ok(TackyStaticInit::IntInit(*v as i64)),
             Expr::ConstantULong(v) => Ok(TackyStaticInit::IntInit(*v as i64)),
             Expr::ConstantDouble(v) => Ok(TackyStaticInit::DoubleInit(*v)),
-            Expr::StringLiteral(s) => {
-                // String literal → emit string constant and return pointer to it
-                let label = format!(".Lstr_{}", *string_label_counter);
-                *string_label_counter += 1;
-                string_constants.push((label.clone(), s.clone()));
-                Ok(TackyStaticInit::PointerArrayInit(vec![label]))
-            }
-            Expr::CompoundInit(inits) => {
-                let init_vals: Vec<TackyStaticInit> = inits
-                    .iter()
-                    .map(|e| {
-                        TackyGenerator::resolve_static_init(
-                            e,
-                            string_constants,
-                            string_label_counter,
-                        )
-                    })
-                    .collect::<std::result::Result<_, _>>()?;
-                Ok(TackyStaticInit::ArrayInit(init_vals))
-            }
             // NULL pointer: cast of 0 to pointer type
             Expr::Cast { target_type: _, expr, .. } => {
                 if let Expr::Constant(0) = expr.as_ref() {
                     Ok(TackyStaticInit::IntInit(0))
                 } else {
-                    TackyGenerator::resolve_static_init(expr, string_constants, string_label_counter)
+                    Self::resolve_static_init(expr, string_constants, string_label_counter, var_type)
+                }
+            }
+            // Variable reference (e.g. array name decaying to pointer)
+            Expr::Var(name) => {
+                Ok(TackyStaticInit::PointerArrayInit(vec![name.clone()]))
+            }
+            // Constant binary/unary expressions at file scope
+            Expr::Binary(..) | Expr::Unary(..) => {
+                if let Some(v) = Self::try_eval_static_const(init_expr) {
+                    Ok(TackyStaticInit::IntInit(v))
+                } else {
+                    Err("must be initialized with a constant expression".to_string())
                 }
             }
             _ => Err("must be initialized with a constant expression".to_string()),
+        }
+    }
+
+    /// 構造体のコンパウンド初期化子をバイトレイアウトに展開する
+    fn resolve_struct_init(
+        inits: &[Expr],
+        members: &[crate::parse::ast::MemberDecl],
+        string_constants: &mut Vec<(String, String)>,
+        string_label_counter: &mut usize,
+    ) -> std::result::Result<TackyStaticInit, String> {
+        let mut result: Vec<TackyStaticInit> = Vec::new();
+        let mut offset = 0usize;
+
+        for (i, member) in members.iter().enumerate() {
+            let align = member.member_type.alignment();
+            // パディング挿入
+            if offset % align != 0 {
+                let pad = align - (offset % align);
+                result.push(TackyStaticInit::ZeroInit(pad));
+                offset += pad;
+            }
+
+            if i < inits.len() {
+                let field_init = Self::resolve_static_init(
+                    &inits[i],
+                    string_constants,
+                    string_label_counter,
+                    Some(&member.member_type),
+                )?;
+                // int フィールドなどの小さいスカラー → バイト列に変換
+                let field_size = member.member_type.size();
+                match &field_init {
+                    TackyStaticInit::IntInit(v) if field_size < 8 => {
+                        let bytes = match field_size {
+                            1 => vec![*v as u8],
+                            4 => (*v as i32).to_le_bytes().to_vec(),
+                            _ => (*v as i64).to_le_bytes()[..field_size].to_vec(),
+                        };
+                        result.push(TackyStaticInit::ByteArrayInit(bytes));
+                    }
+                    _ => {
+                        result.push(field_init);
+                    }
+                }
+                offset += field_size;
+            } else {
+                // 初期化子不足: ゼロ埋め
+                result.push(TackyStaticInit::ZeroInit(member.member_type.size()));
+                offset += member.member_type.size();
+            }
+        }
+
+        // 末尾パディング
+        let struct_align = crate::parse::ast::struct_alignment(members);
+        if offset % struct_align != 0 {
+            let pad = struct_align - (offset % struct_align);
+            result.push(TackyStaticInit::ZeroInit(pad));
+        }
+
+        Ok(TackyStaticInit::ArrayInit(result))
+    }
+
+    /// ファイルスコープ初期化子の定数式を評価する
+    fn try_eval_static_const(expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::Constant(v) => Some(*v),
+            Expr::ConstantLong(v) => Some(*v),
+            Expr::ConstantUInt(v) => Some(*v as i64),
+            Expr::ConstantULong(v) => Some(*v as i64),
+            Expr::Binary(op, left, right) => {
+                let l = Self::try_eval_static_const(left)?;
+                let r = Self::try_eval_static_const(right)?;
+                Some(match op {
+                    BinaryOp::Add => l.wrapping_add(r),
+                    BinaryOp::Subtract => l.wrapping_sub(r),
+                    BinaryOp::Multiply => l.wrapping_mul(r),
+                    BinaryOp::Divide => l.checked_div(r)?,
+                    BinaryOp::Remainder => l.checked_rem(r)?,
+                    BinaryOp::BitwiseAnd => l & r,
+                    BinaryOp::BitwiseOr => l | r,
+                    BinaryOp::BitwiseXor => l ^ r,
+                    BinaryOp::ShiftLeft => l.wrapping_shl(r as u32),
+                    BinaryOp::ShiftRight => l.wrapping_shr(r as u32),
+                    _ => return None,
+                })
+            }
+            Expr::Unary(op, inner) => {
+                let v = Self::try_eval_static_const(inner)?;
+                Some(match op {
+                    UnaryOp::Negate => v.wrapping_neg(),
+                    UnaryOp::Complement => !v,
+                    UnaryOp::Not => if v == 0 { 1 } else { 0 },
+                    _ => return None,
+                })
+            }
+            _ => None,
         }
     }
 }
@@ -318,6 +464,7 @@ pub fn generate_tacky(program: &Program) -> Result<TackyProgram> {
                         init_expr,
                         &mut tgen.string_constants,
                         &mut tgen.string_label_counter,
+                        Some(&var_decl.var_type),
                     )
                     .map_err(|msg| {
                         CompileError::CodegenError(format!(
@@ -537,6 +684,7 @@ impl TackyGenerator {
                     init_expr,
                     &mut self.string_constants,
                     &mut self.string_label_counter,
+                    Some(&decl.var_type),
                 )
                 .map_err(|msg| {
                     CompileError::CodegenError(format!("static variable '{}' {}", decl.name, msg))

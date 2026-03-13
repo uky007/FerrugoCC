@@ -1067,8 +1067,26 @@ impl<'a> Parser<'a> {
             Ok(result) => result,
             Err(e) => {
                 if try_recovery {
-                    // 回復: `;` までスキップしてダミー宣言を返す
+                    // 回復: `;` までスキップ
+                    // 関数名を抽出: `(*name(...))(...)` パターンから名前を取得
                     self.pos = saved_pos;
+                    let mut recovered_name = String::new();
+                    // Skip `(` and `*`/`^`
+                    let scan = self.pos + 2;
+                    if scan < self.tokens.len() {
+                        // skip optional _Nullable / _Nonnull
+                        let mut name_pos = scan;
+                        while name_pos < self.tokens.len() {
+                            if let TokenKind::Identifier(ref id) = self.tokens[name_pos].kind {
+                                if id == "_Nullable" || id == "_Nonnull" {
+                                    name_pos += 1;
+                                    continue;
+                                }
+                                recovered_name = id.clone();
+                            }
+                            break;
+                        }
+                    }
                     while self.pos < self.tokens.len()
                         && self.peek()?.kind != TokenKind::Semicolon
                     {
@@ -1076,6 +1094,17 @@ impl<'a> Parser<'a> {
                     }
                     if self.pos < self.tokens.len() {
                         self.advance()?; // consume ';'
+                    }
+                    // 関数として登録（引数なし可変長、戻り値は base_type のポインタ）
+                    if !recovered_name.is_empty() {
+                        return Ok(vec![TopLevelDecl::Function(FunctionDecl {
+                            name: recovered_name,
+                            params: vec![],
+                            body: None,
+                            return_type: Type::Pointer(Box::new(base_type)),
+                            storage_class,
+                            is_variadic: true,
+                        })]);
                     }
                     return Ok(vec![TopLevelDecl::Variable(Declaration {
                         name: String::new(),
@@ -2124,7 +2153,17 @@ impl<'a> Parser<'a> {
             TokenKind::StringLiteral(_) => {
                 let token = self.advance()?;
                 if let TokenKind::StringLiteral(content) = &token.kind {
-                    Ok(Expr::StringLiteral(content.clone()))
+                    let mut combined = content.clone();
+                    // C adjacent string literal concatenation
+                    while self.pos < self.tokens.len() {
+                        if let TokenKind::StringLiteral(next) = &self.tokens[self.pos].kind {
+                            combined.push_str(next);
+                            self.pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    Ok(Expr::StringLiteral(combined))
                 } else {
                     unreachable!()
                 }

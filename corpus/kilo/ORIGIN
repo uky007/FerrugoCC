@@ -1,0 +1,6 @@
+Project: kilo — A small text editor in less than 1000 lines of C
+URL:     https://github.com/antirez/kilo
+License: BSD 2-Clause
+Commit:  dbee2af (2016-06-14)
+Notes:   Downloaded as-is. Requires -D_FORTIFY_SOURCE=0 to avoid checked
+         builtin expansion on macOS.

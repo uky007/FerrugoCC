@@ -64,14 +64,17 @@ pub enum Stage {
 ///
 /// ソースファイルのディレクトリを `-I` に含めることで、
 /// ローカルの `#include` を解決できるようにする。
-fn preprocess_external(source_path: &Path) -> Result<String> {
+fn preprocess_external(source_path: &Path, pp_defines: &[String]) -> Result<String> {
     let source_dir = source_path.parent().unwrap_or(Path::new("."));
-    let output = Command::new("gcc")
-        .arg("-E")
+    let mut cmd = Command::new("gcc");
+    cmd.arg("-E")
         .arg("-P")
         .arg("-I")
-        .arg(source_dir)
-        .arg(source_path)
+        .arg(source_dir);
+    for def in pp_defines {
+        cmd.arg(format!("-D{def}"));
+    }
+    let output = cmd.arg(source_path)
         .output()
         .map_err(|e| {
             CompileError::ExternalToolError(format!(
@@ -105,11 +108,12 @@ pub fn run(
     stage: Stage,
     obf_config: Option<ObfuscationConfig>,
     preprocess: PreprocessMode,
+    pp_defines: &[String],
 ) -> Result<()> {
     // ── Stage 0: 前処理 ──
     let source = match preprocess {
         PreprocessMode::None => std::fs::read_to_string(source_path)?,
-        PreprocessMode::External => preprocess_external(source_path)?,
+        PreprocessMode::External => preprocess_external(source_path, pp_defines)?,
     };
 
     // ── Stage 1: 字句解析 ──

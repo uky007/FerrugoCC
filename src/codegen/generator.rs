@@ -115,11 +115,14 @@ pub fn generate(
         .static_vars
         .iter()
         .map(|sv| {
-            let asm_type = if sv.var_type.is_struct() {
+            let elem_type = sv.var_type.target_type();
+            let is_struct_array = sv.var_type.is_array()
+                && elem_type.map_or(false, |t| t.is_struct());
+            let asm_type = if sv.var_type.is_struct() || is_struct_array {
                 AsmType::Quadword
             } else if sv.var_type.is_array() {
                 // 配列の asm_type は要素型を使用（初期値ディレクティブの選択に必要）
-                type_to_asm(sv.var_type.target_type().unwrap())
+                type_to_asm(elem_type.unwrap())
             } else {
                 type_to_asm(&sv.var_type)
             };
@@ -128,6 +131,11 @@ pub fn generate(
                 global: sv.global,
                 init: convert_static_init(&sv.init),
                 asm_type,
+                var_type: if is_struct_array || sv.var_type.is_struct() {
+                    Some(sv.var_type.clone())
+                } else {
+                    None
+                },
             }
         })
         .collect();

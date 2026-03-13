@@ -118,6 +118,8 @@ pub struct AsmStaticVar {
     pub global: bool,
     pub init: StaticInit,
     pub asm_type: AsmType,
+    /// 元の C 型（構造体配列の正確なフィールドレイアウトに必要）
+    pub var_type: Option<crate::parse::ast::Type>,
 }
 
 /// 個々のアセンブリ命令。

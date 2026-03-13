@@ -199,6 +199,10 @@ struct Cli {
     #[arg(long = "obf-outline-min-block", value_parser = clap::value_parser!(u64).range(1..))]
     obf_outline_min_block: Option<u64>,
 
+    /// Preprocessor defines (-D NAME=VALUE)
+    #[arg(short = 'D', value_name = "MACRO")]
+    defines: Vec<String>,
+
     /// Input C source file
     source: PathBuf,
 }
@@ -316,7 +320,7 @@ fn main() {
         None
     };
 
-    if let Err(e) = driver::run(&cli.source, stage, obf_config, driver::PreprocessMode::External) {
+    if let Err(e) = driver::run(&cli.source, stage, obf_config, driver::PreprocessMode::External, &cli.defines) {
         eprintln!("ferrugocc: {e}");
         process::exit(1);
     }
