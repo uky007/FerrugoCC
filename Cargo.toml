@@ -3,6 +3,13 @@ name = "ferrugocc"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "An experimental C compiler and obfuscating compiler written in Rust, targeting x86_64 SysV ABI"
+repository = "https://github.com/uky007/FerrugoCC"
+homepage = "https://github.com/uky007/FerrugoCC"
+keywords = ["compiler", "c-compiler", "obfuscation", "x86_64"]
+categories = ["compilers", "development-tools"]
+readme = "README.md"
+exclude = ["corpus/", "tests/", ".github/", "benchmark/", "docs/", "scripts/", "demo.c"]
 
 [dependencies]
 thiserror = "2"

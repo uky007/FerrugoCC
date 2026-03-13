@@ -56,12 +56,14 @@ use clap::Parser;
 use driver::Stage;
 use obfuscation::{ObfuscationConfig, OpsecPolicy};
 
-/// FerrugoCC のコマンドライン引数定義。
-///
-/// `clap` の derive マクロにより、構造体のフィールドから
-/// 自動的にコマンドライン引数のパーサーが生成される。
 #[derive(Parser)]
-#[command(name = "ferrugocc", about = "A C compiler written in Rust")]
+#[command(
+    name = "ferrugocc",
+    about = "An experimental C compiler and obfuscating compiler written in Rust",
+    long_about = "FerrugoCC compiles a practical subset of C to x86_64 assembly (SysV ABI).\n\
+                  Requires gcc for preprocessing (gcc -E) and assembling/linking.\n\
+                  With --fobfuscate, applies 16 obfuscation passes instead of optimization."
+)]
 struct Cli {
     /// Run the lexer only
     #[arg(long)]

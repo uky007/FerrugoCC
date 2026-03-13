@@ -1,8 +1,57 @@
 # FerrugoCC
 
-A C compiler written in Rust, developed incrementally following [Writing a C Compiler](https://nostarch.com/writing-c-compiler) by Nora Sandler.
+An experimental C compiler and obfuscating compiler written in Rust.
 
-"Ferrugo" means "rust" in Latin, a nod to the implementation language.
+Compiles a practical subset of C to x86_64 assembly (System V ABI), with an optional 16-pass obfuscation pipeline. Developed following [Writing a C Compiler](https://nostarch.com/writing-c-compiler) by Nora Sandler, then extended with real-world corpus support and obfuscation.
+
+> **Status: Preview (v0.1.0)** — Not a production compiler. See [Supported Scope](#supported-scope) and [Known Limitations](#known-limitations).
+
+## Requirements
+
+- **Rust** 2024 edition (1.85+)
+- **gcc** — used for preprocessing (`gcc -E -P`) and assembling/linking
+- **Target**: x86_64 only (Linux and macOS)
+- macOS on Apple Silicon: requires Rosetta 2 (`arch -x86_64`)
+
+## Install
+
+```bash
+cargo install ferrugocc
+```
+
+## Supported Scope
+
+**Language features:**
+- Types: `int`, `long`, `unsigned`, `double`, `char`, `void`, pointers, arrays, structs
+- Control flow: `if`/`else`, `while`, `do`/`while`, `for`, `switch`/`case`, `goto`/`label`, ternary `?:`
+- Functions: declarations, definitions, variadic (`va_list`/`va_arg`), function pointers (basic)
+- Declarations: `typedef`, `enum`, `struct`, `static`, `extern`, file-scope initializers
+- Operators: arithmetic, bitwise (`& | ^ << >>`), logical, comparison, compound assignment
+- Preprocessor: delegated to `gcc -E` (handles `#include`, `#define`, `#ifdef`, etc.)
+
+**Obfuscation (16 passes):** constant encoding, arithmetic substitution, junk code, opaque predicates, control flow flattening, string encryption, VM virtualization, library function obfuscation, OPSEC sanitization, anti-disassembly, indirect calls, register shuffle, stack frame obfuscation, instruction substitution, function inlining, function outlining
+
+**Tested corpora:** [jsmn](https://github.com/zserge/jsmn) (JSON parser), [inih](https://github.com/benhoyt/inih) (INI parser), [sds](https://github.com/antirez/sds) (dynamic strings), [kilo](https://github.com/antirez/kilo) (text editor, smoke test)
+
+## Known Limitations
+
+- No self-hosted preprocessor — requires `gcc` on PATH
+- No `union`, `float` (parsed as `double`), `_Bool`, bitfields (parsed but ignored)
+- No multi-file compilation (single translation unit only)
+- No `__attribute__` semantics (syntax is skipped)
+- `__builtin_bswap*` treated as identity (not lowered to byte-swap)
+- Function pointer types lose prototype information (stored as `Pointer(Void)`)
+- Register allocation may produce non-deterministic output (HashMap iteration order)
+
+## Corpus Licensing
+
+The `corpus/` directory contains third-party C projects used for regression testing:
+- **jsmn**: MIT — [zserge/jsmn](https://github.com/zserge/jsmn)
+- **inih**: BSD-3-Clause — [benhoyt/inih](https://github.com/benhoyt/inih)
+- **sds**: BSD-2-Clause — [antirez/sds](https://github.com/antirez/sds)
+- **kilo**: BSD-2-Clause — [antirez/kilo](https://github.com/antirez/kilo)
+
+Each directory contains an `ORIGIN` file with provenance details.
 
 ## Build & Run
 
