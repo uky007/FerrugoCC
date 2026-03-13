@@ -339,6 +339,7 @@ fn compile_and_run_corpus_ex(
 
 /// kilo smoke test: コンパイル → リンク → 引数なし実行 → "Usage:" 出力確認
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS system headers")]
 fn kilo_compile_link_smoke() {
     if !can_run_x86_64() {
         return;
@@ -362,6 +363,7 @@ fn kilo_compile_link_smoke() {
 // ── inih (Tier 1) ──
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS system headers")]
 fn inih_compile_and_run() {
     if !can_run_x86_64() {
         return;
@@ -370,6 +372,7 @@ fn inih_compile_and_run() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS system headers")]
 fn inih_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;
@@ -380,6 +383,7 @@ fn inih_compile_and_run_obfuscated() {
 // ── sds (Tier 1) ──
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS system headers")]
 fn sds_compile_and_run() {
     if !can_run_x86_64() {
         return;
@@ -388,6 +392,7 @@ fn sds_compile_and_run() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "requires macOS system headers")]
 fn sds_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;
