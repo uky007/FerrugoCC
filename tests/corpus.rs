@@ -180,14 +180,9 @@ fn platform_undefs() -> Vec<&'static str> {
     }
 }
 
-/// Linux glibc 環境で必要な追加 defines。
-/// ctype.h のインクルードガードを事前定義して inline/macro 版 isspace 等を抑制。
+/// Linux glibc 環境で必要な追加 defines（全 corpus 共通）。
 fn platform_defines() -> Vec<&'static str> {
-    if cfg!(target_os = "linux") {
-        vec!["_CTYPE_H=1"]
-    } else {
-        vec![]
-    }
+    vec![]
 }
 
 /// コンパイラ stderr からエラー行番号を抽出する。
@@ -442,12 +437,23 @@ fn kilo_compile_link_smoke() {
 
 // ── inih (Tier 1) ──
 
+/// inih は自前の isspace() を提供するため、glibc ctype.h を _CTYPE_H=1 で抑制。
+fn inih_defines() -> Vec<&'static str> {
+    if cfg!(target_os = "linux") {
+        vec!["_CTYPE_H=1"]
+    } else {
+        vec![]
+    }
+}
+
 #[test]
 fn inih_compile_and_run() {
     if !can_run_x86_64() {
         return;
     }
-    assert_eq!(compile_and_run_corpus("corpus/inih/test_inih.c", false), 42);
+    let (code, _stdout, _stderr) =
+        compile_and_run_corpus_ex("corpus/inih/test_inih.c", false, &inih_defines(), &[]);
+    assert_eq!(code, 42);
 }
 
 #[test]
@@ -455,7 +461,9 @@ fn inih_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;
     }
-    assert_eq!(compile_and_run_corpus("corpus/inih/test_inih.c", true), 42);
+    let (code, _stdout, _stderr) =
+        compile_and_run_corpus_ex("corpus/inih/test_inih.c", true, &inih_defines(), &[]);
+    assert_eq!(code, 42);
 }
 
 // ── sds (Tier 1) ──
