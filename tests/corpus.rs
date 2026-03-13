@@ -180,6 +180,19 @@ fn platform_undefs() -> Vec<&'static str> {
     }
 }
 
+/// コンパイラ stderr からエラー行番号を抽出する。
+fn extract_error_line(stderr: &str) -> Option<usize> {
+    // "at line 274, column 42" or "at line 1460, column 24"
+    for part in stderr.split("at line ") {
+        if let Some(comma) = part.find(',')
+            && let Ok(n) = part[..comma].trim().parse::<usize>()
+        {
+            return Some(n);
+        }
+    }
+    None
+}
+
 /// corpus テストの共通ヘルパー: コンパイル → リンク → 実行 → exit code を返す。
 fn compile_and_run_corpus(source_path: &str, obfuscate: bool) -> i32 {
     let dir = TempDir::new().unwrap();
@@ -207,11 +220,13 @@ fn compile_and_run_corpus(source_path: &str, obfuscate: bool) -> i32 {
         let _ = std::fs::remove_file(&default_asm);
     }
 
-    assert!(
-        output.status.success(),
-        "compilation failed (obfuscate={obfuscate}):\nstderr: {}",
-        String::from_utf8_lossy(&output.stderr),
-    );
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let diag = extract_error_line(&stderr)
+            .map(|line| dump_preprocessed_context(source_path, line))
+            .unwrap_or_default();
+        panic!("compilation failed (obfuscate={obfuscate}):\nstderr: {stderr}{diag}");
+    }
 
     assert!(asm_path.exists(), "assembly file not generated");
 
@@ -292,11 +307,13 @@ fn compile_and_run_corpus_ex(
         let _ = std::fs::remove_file(&default_asm);
     }
 
-    assert!(
-        output.status.success(),
-        "compilation failed (obfuscate={obfuscate}):\nstderr: {}",
-        String::from_utf8_lossy(&output.stderr),
-    );
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let diag = extract_error_line(&stderr)
+            .map(|line| dump_preprocessed_context(source_path, line))
+            .unwrap_or_default();
+        panic!("compilation failed (obfuscate={obfuscate}):\nstderr: {stderr}{diag}");
+    }
     assert!(asm_path.exists(), "assembly file not generated");
 
     if cfg!(target_os = "macos") {
@@ -349,6 +366,35 @@ fn compile_and_run_corpus_ex(
     let stdout = String::from_utf8_lossy(&run_output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&run_output.stderr).to_string();
     (code, stdout, stderr)
+}
+
+// ── diagnostic: dump preprocessed lines around known error locations on Linux ──
+
+/// gcc -E -P の出力から error_line 周辺を返す診断ヘルパー。
+fn dump_preprocessed_context(source_path: &str, error_line: usize) -> String {
+    let source_dir = std::path::Path::new(source_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let mut cmd = Command::new("gcc");
+    cmd.arg("-E").arg("-P").arg("-I").arg(source_dir);
+    for undef in platform_undefs() {
+        cmd.arg(format!("-U{undef}"));
+    }
+    cmd.arg(source_path);
+    let output = match cmd.output() {
+        Ok(o) if o.status.success() => o,
+        _ => return "[DIAG] gcc -E -P failed".to_string(),
+    };
+    let pp = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = pp.lines().collect();
+    let start = error_line.saturating_sub(6);
+    let end = (error_line + 5).min(lines.len());
+    let mut buf = format!("\n[DIAG] preprocessed lines {start}..{end} (error at {error_line}):\n");
+    for (i, line) in lines.iter().enumerate().take(end).skip(start) {
+        let marker = if i + 1 == error_line { ">>>" } else { "   " };
+        buf.push_str(&format!("{marker} {:>5}: {}\n", i + 1, line));
+    }
+    buf
 }
 
 // ── kilo (Tier 2) ──
