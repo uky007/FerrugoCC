@@ -834,25 +834,29 @@ impl<'a> Parser<'a> {
                     }
                 };
                 self.expect(&TokenKind::CloseParen)?;
-                // パラメータリストをスキップ: `(...)` — balanced parens
-                if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
-                    let mut depth = 0;
-                    loop {
-                        let tok = self.advance()?;
-                        match tok.kind {
-                            TokenKind::OpenParen => depth += 1,
-                            TokenKind::CloseParen => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                // 戻り値型: base_type に stars 分のポインタを適用
+                let mut return_type = base_type;
+                for _ in 0..stars {
+                    return_type = Type::Pointer(Box::new(return_type));
                 }
-                // 関数ポインタ → Pointer(Void) として近似
-                let ty = Type::Pointer(Box::new(Type::Void));
+                // パラメータリストをパース（失敗時はスキップして Pointer(Void) にフォールバック）
+                let ty = if self.pos < self.tokens.len()
+                    && self.peek()?.kind == TokenKind::OpenParen
+                {
+                    if let Some((param_types, is_variadic)) = self.try_parse_fn_ptr_params() {
+                        Type::Pointer(Box::new(Type::Function {
+                            return_type: Box::new(return_type),
+                            param_types,
+                            is_variadic,
+                        }))
+                    } else {
+                        self.skip_balanced_parens()?;
+                        Type::Pointer(Box::new(Type::Void))
+                    }
+                } else {
+                    // パラメータリストなし — 関数ポインタだが型情報不明
+                    Type::Pointer(Box::new(Type::Void))
+                };
                 return Ok((ty, name));
             }
         }
@@ -941,24 +945,28 @@ impl<'a> Parser<'a> {
                 String::new()
             };
             self.expect(&TokenKind::CloseParen)?;
-            // パラメータリストをスキップ
-            if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
-                let mut depth = 0;
-                loop {
-                    let tok = self.advance()?;
-                    match tok.kind {
-                        TokenKind::OpenParen => depth += 1,
-                        TokenKind::CloseParen => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+            // 戻り値型: base_type に stars 分のポインタを適用
+            let mut return_type = base_type;
+            for _ in 0..stars {
+                return_type = Type::Pointer(Box::new(return_type));
             }
-            let ty = Type::Pointer(Box::new(Type::Void));
+            // パラメータリストをパース（失敗時はフォールバック）
+            let ty = if self.pos < self.tokens.len()
+                && self.peek()?.kind == TokenKind::OpenParen
+            {
+                if let Some((param_types, is_variadic)) = self.try_parse_fn_ptr_params() {
+                    Type::Pointer(Box::new(Type::Function {
+                        return_type: Box::new(return_type),
+                        param_types,
+                        is_variadic,
+                    }))
+                } else {
+                    self.skip_balanced_parens()?;
+                    Type::Pointer(Box::new(Type::Void))
+                }
+            } else {
+                Type::Pointer(Box::new(Type::Void))
+            };
             return Ok((ty, name));
         }
 
@@ -1065,23 +1073,11 @@ impl<'a> Parser<'a> {
 
         let (resolved_type, name) = self.parse_declarator(base_type.clone())?;
 
-        // typedef T name(params); — 関数型 typedef（関数ポインタへ decay）
-        let resolved_type =
-            if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
-                self.advance()?; // consume '('
-                let mut depth = 1;
-                while depth > 0 && self.pos < self.tokens.len() {
-                    let t = self.advance()?;
-                    match t.kind {
-                        TokenKind::OpenParen => depth += 1,
-                        TokenKind::CloseParen => depth -= 1,
-                        _ => {}
-                    }
-                }
-                Type::Pointer(Box::new(Type::Void))
-            } else {
-                resolved_type
-            };
+        // typedef T name(params); — 関数型 typedef
+        // 例: `typedef int handler_t(void *, const char *);`
+        //   → handler_t = Function { return_type: resolved_type, params, variadic }
+        // ポインタ化は使用箇所（変数宣言・パラメータ）で行う。ここでは関数型のまま保持。
+        let resolved_type = self.try_resolve_fn_type_typedef(resolved_type)?;
 
         self.typedef_names
             .insert(name.clone(), resolved_type.clone());
@@ -1090,6 +1086,8 @@ impl<'a> Parser<'a> {
         while self.peek()?.kind == TokenKind::Comma {
             self.advance()?;
             let (resolved_type, name) = self.parse_declarator(base_type.clone())?;
+            // Finding 3: 2個目以降の declarator にも関数型チェックを適用
+            let resolved_type = self.try_resolve_fn_type_typedef(resolved_type)?;
             self.typedef_names
                 .insert(name.clone(), resolved_type.clone());
             results.push((name, resolved_type));
@@ -1097,6 +1095,120 @@ impl<'a> Parser<'a> {
 
         self.expect(&TokenKind::Semicolon)?;
         Ok(results)
+    }
+
+    /// typedef 宣言子の後に `(params)` が続く場合、関数型に解決する。
+    /// `typedef int handler_t(void *, const char *);`
+    ///   → `Function { return_type: Int, param_types: Some([Pointer(Void), Pointer(Char)]), ... }`
+    fn try_resolve_fn_type_typedef(&mut self, resolved_type: Type) -> Result<Type> {
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
+            if let Some((param_types, is_variadic)) = self.try_parse_fn_ptr_params() {
+                Ok(Type::Function {
+                    return_type: Box::new(resolved_type),
+                    param_types,
+                    is_variadic,
+                })
+            } else {
+                // フォールバック: パース失敗時はスキップして引数未指定の関数型
+                self.skip_balanced_parens()?;
+                Ok(Type::Function {
+                    return_type: Box::new(resolved_type),
+                    param_types: None,
+                    is_variadic: false,
+                })
+            }
+        } else {
+            Ok(resolved_type)
+        }
+    }
+
+    /// 関数ポインタ/関数型のパラメータリストをパースする。
+    /// `(` は呼び出し前に特定済み（未消費）。`(` から `)` まで消費する。
+    /// パース失敗時は位置を復元して None を返す（フォールバック用）。
+    ///
+    /// 返値: `(param_types, is_variadic)`
+    /// - `param_types: None` — 引数未指定 `()` (K&R 互換)
+    /// - `param_types: Some(vec![])` — 引数ゼロ `(void)`
+    /// - `param_types: Some(vec![...])` — 具体的なプロトタイプ
+    fn try_parse_fn_ptr_params(&mut self) -> Option<(Option<Vec<Type>>, bool)> {
+        let save_pos = self.pos;
+        match self.parse_fn_ptr_params_inner() {
+            Ok(result) => Some(result),
+            Err(_) => {
+                self.pos = save_pos;
+                None
+            }
+        }
+    }
+
+    /// 関数ポインタ/関数型のパラメータリストをパースする内部実装。
+    fn parse_fn_ptr_params_inner(&mut self) -> Result<(Option<Vec<Type>>, bool)> {
+        self.expect(&TokenKind::OpenParen)?;
+
+        // `()` — 引数未指定（K&R 互換）: None で表現
+        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::CloseParen {
+            self.advance()?;
+            return Ok((None, false));
+        }
+        // `(void)` — 引数ゼロ: Some(vec![]) で表現
+        if self.pos < self.tokens.len()
+            && self.peek()?.kind == TokenKind::KwVoid
+            && self.pos + 1 < self.tokens.len()
+            && self.tokens[self.pos + 1].kind == TokenKind::CloseParen
+        {
+            self.advance()?; // consume 'void'
+            self.advance()?; // consume ')'
+            return Ok((Some(Vec::new()), false));
+        }
+
+        let mut param_types = Vec::new();
+        let mut is_variadic = false;
+
+        let param_base = self.parse_type_specifier()?;
+        let (param_type, _) = self.parse_param_declarator(param_base)?;
+        param_types.push(Self::adjust_param_type(param_type));
+
+        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Comma {
+            self.advance()?; // consume ','
+            if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Ellipsis {
+                self.advance()?;
+                is_variadic = true;
+                break;
+            }
+            let param_base = self.parse_type_specifier()?;
+            let (param_type, _) = self.parse_param_declarator(param_base)?;
+            param_types.push(Self::adjust_param_type(param_type));
+        }
+
+        self.expect(&TokenKind::CloseParen)?;
+        Ok((Some(param_types), is_variadic))
+    }
+
+    /// バランスの取れた括弧をスキップする（フォールバック用）。
+    /// `(` が次のトークンであること前提。`(` から `)` まで消費する。
+    fn skip_balanced_parens(&mut self) -> Result<()> {
+        self.expect(&TokenKind::OpenParen)?;
+        let mut depth = 1;
+        while depth > 0 && self.pos < self.tokens.len() {
+            let tok = self.advance()?;
+            match tok.kind {
+                TokenKind::OpenParen => depth += 1,
+                TokenKind::CloseParen => depth -= 1,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// パラメータ型の調整（C 6.7.6.3p7,8）。
+    /// - 配列型 → ポインタ型
+    /// - 関数型 → 関数ポインタ型
+    fn adjust_param_type(ty: Type) -> Type {
+        match ty {
+            Type::Array(elem, _) => Type::Pointer(elem),
+            Type::Function { .. } => Type::Pointer(Box::new(ty)),
+            other => other,
+        }
     }
 
     /// `<program> ::= <top_level_decl>*`
@@ -1203,6 +1315,7 @@ impl<'a> Parser<'a> {
                             return_type: Type::Pointer(Box::new(base_type)),
                             storage_class,
                             is_variadic: true,
+                            has_prototype: false,
                         })]);
                     }
                     return Ok(vec![TopLevelDecl::Variable(Declaration {
@@ -1222,22 +1335,24 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::OpenParen)?;
 
             let mut is_variadic = false;
-            let params = if self.peek()?.kind == TokenKind::KwVoid
+            let mut has_prototype = true;
+            let params = if self.peek()?.kind == TokenKind::CloseParen {
+                // `()` — 引数未指定（K&R 互換）
+                has_prototype = false;
+                Vec::new()
+            } else if self.peek()?.kind == TokenKind::KwVoid
                 && self.pos + 1 < self.tokens.len()
                 && self.tokens[self.pos + 1].kind == TokenKind::CloseParen
             {
-                // `(void)` — no parameters
+                // `(void)` — 引数ゼロ
                 self.advance()?;
                 Vec::new()
             } else {
                 let mut params = Vec::new();
                 let param_base = self.parse_type_specifier()?;
-                let (mut param_type, param_name) = self.parse_param_declarator(param_base)?;
-                // Chapter 15: 配列パラメータ → ポインタに変換
-                if let Type::Array(elem, _) = param_type {
-                    param_type = Type::Pointer(elem);
-                }
-                params.push((param_type, param_name));
+                let (param_type, param_name) = self.parse_param_declarator(param_base)?;
+                // 配列/関数パラメータ → ポインタに調整（C 6.7.6.3p7,8）
+                params.push((Self::adjust_param_type(param_type), param_name));
                 while self.peek()?.kind == TokenKind::Comma {
                     self.advance()?;
                     // `, ...` → 可変長引数
@@ -1247,11 +1362,8 @@ impl<'a> Parser<'a> {
                         break;
                     }
                     let param_base = self.parse_type_specifier()?;
-                    let (mut param_type, param_name) = self.parse_param_declarator(param_base)?;
-                    if let Type::Array(elem, _) = param_type {
-                        param_type = Type::Pointer(elem);
-                    }
-                    params.push((param_type, param_name));
+                    let (param_type, param_name) = self.parse_param_declarator(param_base)?;
+                    params.push((Self::adjust_param_type(param_type), param_name));
                 }
                 params
             };
@@ -1278,6 +1390,7 @@ impl<'a> Parser<'a> {
                 body,
                 storage_class,
                 is_variadic,
+                has_prototype,
             })])
         } else {
             // 変数宣言 — カンマ区切り対応
@@ -3823,6 +3936,23 @@ mod tests {
                 assert_eq!(func.name, "foo");
                 assert!(!func.is_variadic);
                 assert_eq!(func.params.len(), 2);
+            }
+            _ => panic!("expected function declaration"),
+        }
+    }
+
+    /// int f(); — 引数未指定の前方宣言
+    #[test]
+    fn parse_unspecified_params_declaration() {
+        let tokens = lex::lex("int f();").unwrap();
+        let program = parse(&tokens).unwrap();
+        assert_eq!(program.declarations.len(), 1);
+        match &program.declarations[0] {
+            TopLevelDecl::Function(func) => {
+                assert_eq!(func.name, "f");
+                assert_eq!(func.params.len(), 0);
+                assert!(!func.has_prototype);
+                assert!(func.body.is_none());
             }
             _ => panic!("expected function declaration"),
         }

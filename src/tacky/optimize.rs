@@ -1356,7 +1356,9 @@ fn collect_uses(instr: &TackyInstruction, used: &mut HashSet<String>) {
         TackyInstruction::Copy { src, .. } => add_val(src, used),
         TackyInstruction::JumpIfZero { condition, .. }
         | TackyInstruction::JumpIfNotZero { condition, .. } => add_val(condition, used),
-        TackyInstruction::FunCall { args, .. } => {
+        TackyInstruction::FunCall { name, args, .. } => {
+            // name may be a function pointer variable — treat as use
+            used.insert(name.clone());
             for a in args {
                 add_val(a, used);
             }

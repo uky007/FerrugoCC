@@ -384,7 +384,8 @@ fn expr_type(
             if let Some(info) = func_table.get(name) {
                 info.return_type.clone()
             } else {
-                Type::Int
+                // 関数ポインタ変数経由の呼び出し: Pointer(Function { return_type, .. }) から取得
+                fn_ptr_return_type(var_map.get(name))
             }
         }
         Expr::Dereref(inner) => {
@@ -413,6 +414,32 @@ fn expr_type(
         Expr::VaStart(_) | Expr::VaEnd(_) | Expr::VaCopy(_, _) => Type::Void,
         Expr::VaArg { arg_type, .. } => arg_type.clone(),
     }
+}
+
+/// 関数ポインタ変数から戻り値型を取得する。
+/// `Pointer(Function { return_type, .. })` → return_type
+/// `Pointer(Void)` や不明 → Int（フォールバック）
+fn fn_ptr_return_type(var_kind: Option<&VarKind>) -> Type {
+    let ty = match var_kind {
+        Some(VarKind::Local(ty)) | Some(VarKind::Static(_, ty)) => ty,
+        None => return Type::Int,
+    };
+    match ty {
+        Type::Pointer(inner) => match inner.as_ref() {
+            Type::Function { return_type, .. } => *return_type.clone(),
+            _ => Type::Int,
+        },
+        _ => Type::Int,
+    }
+}
+
+/// 関数ポインタ変数から is_variadic を取得する。
+fn fn_ptr_is_variadic(var_kind: Option<&VarKind>) -> bool {
+    let ty = match var_kind {
+        Some(VarKind::Local(ty)) | Some(VarKind::Static(_, ty)) => ty,
+        None => return false,
+    };
+    matches!(ty, Type::Pointer(inner) if matches!(inner.as_ref(), Type::Function { is_variadic: true, .. }))
 }
 
 /// C の AST を TACKY IR に変換する。
@@ -2055,10 +2082,11 @@ impl TackyGenerator {
             }
         }
 
+        // 戻り値型: func_table → 関数ポインタ変数 → Int の順で解決
         let return_type = func_table
             .get(name)
             .map(|info| info.return_type.clone())
-            .unwrap_or(Type::Int);
+            .unwrap_or_else(|| fn_ptr_return_type(self.var_map.get(name)));
 
         // Evaluate all arguments
         let mut arg_vals = Vec::new();
@@ -2067,10 +2095,12 @@ impl TackyGenerator {
             arg_vals.push(val);
         }
 
-        let is_variadic = func_table
-            .get(name)
-            .map(|info| info.is_variadic)
-            .unwrap_or(false);
+        // 可変長引数: func_table → 関数ポインタ変数 → false の順で解決
+        let is_variadic = if let Some(info) = func_table.get(name) {
+            info.is_variadic
+        } else {
+            fn_ptr_is_variadic(self.var_map.get(name))
+        };
 
         let dst = self.new_temp(return_type.clone());
         instrs.push(TackyInstruction::FunCall {

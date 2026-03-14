@@ -69,7 +69,10 @@ enum SymbolType {
     Variable(Type),
     Function {
         return_type: Type,
-        param_types: Vec<Type>,
+        /// `None` = 引数未指定 `()` — 任意の引数で呼び出し可能
+        /// `Some(vec![])` = 引数ゼロ `(void)` — 引数なし
+        /// `Some(vec![...])` = 具体的なプロトタイプ
+        param_types: Option<Vec<Type>>,
         is_variadic: bool,
     },
 }
@@ -137,19 +140,11 @@ fn typecheck_file_scope_var(
         return Ok(());
     }
 
-    // void 型の変数宣言は禁止（不完全型）
-    if decl.var_type.is_void() {
+    // 非オブジェクト型の変数宣言は禁止（void, 関数型, 不完全構造体）
+    if !decl.var_type.is_object_type() {
         return Err(CompileError::TypeError(format!(
-            "variable '{}' declared void",
-            decl.name
-        )));
-    }
-
-    // 不完全な構造体型の変数宣言は禁止（Chapter 18）
-    if decl.var_type.is_incomplete() {
-        return Err(CompileError::TypeError(format!(
-            "variable '{}' has incomplete type",
-            decl.name
+            "variable '{}' has non-object type '{:?}'",
+            decl.name, decl.var_type
         )));
     }
 
@@ -173,33 +168,54 @@ fn typecheck_function_decl(
     func: &mut FunctionDecl,
     symbols: &mut HashMap<String, SymbolType>,
 ) -> Result<()> {
-    let param_types: Vec<Type> = func.params.iter().map(|(t, _)| t.clone()).collect();
+    let param_types_vec: Vec<Type> = func.params.iter().map(|(t, _)| t.clone()).collect();
+    let param_types: Option<Vec<Type>> = if func.has_prototype {
+        Some(param_types_vec)
+    } else {
+        None
+    };
 
     // 既存の宣言との互換性チェック
+    // 一方が引数未指定 (None) の場合はプロトタイプ側で上書きを許容
     if let Some(existing) = symbols.get(&func.name)
         && let SymbolType::Function {
             return_type,
             param_types: existing_params,
             is_variadic,
         } = existing
-        && (*return_type != func.return_type
-            || *existing_params != param_types
-            || *is_variadic != func.is_variadic)
     {
-        return Err(CompileError::TypeError(format!(
-            "conflicting types for function '{}'",
-            func.name
-        )));
+        let conflict = *return_type != func.return_type
+            || *is_variadic != func.is_variadic
+            || match (existing_params, &param_types) {
+                (None, _) | (_, &None) => false, // 一方が未指定なら互換
+                (Some(a), Some(b)) => a != b,
+            };
+        if conflict {
+            return Err(CompileError::TypeError(format!(
+                "conflicting types for function '{}'",
+                func.name
+            )));
+        }
     }
 
-    symbols.insert(
-        func.name.clone(),
-        SymbolType::Function {
-            return_type: func.return_type.clone(),
-            param_types: param_types.clone(),
-            is_variadic: func.is_variadic,
-        },
-    );
+    // プロトタイプ情報がある方で上書き（None → Some への昇格）
+    let should_update = match symbols.get(&func.name) {
+        Some(SymbolType::Function {
+            param_types: existing_params,
+            ..
+        }) => existing_params.is_none() && param_types.is_some(),
+        _ => true,
+    };
+    if should_update {
+        symbols.insert(
+            func.name.clone(),
+            SymbolType::Function {
+                return_type: func.return_type.clone(),
+                param_types: param_types.clone(),
+                is_variadic: func.is_variadic,
+            },
+        );
+    }
 
     if let Some(body) = &mut func.body {
         // パラメータをローカルシンボルに追加
@@ -239,19 +255,11 @@ fn typecheck_local_declaration(
         return Ok(());
     }
 
-    // void 型の変数宣言は禁止（不完全型）
-    if decl.var_type.is_void() {
+    // 非オブジェクト型の変数宣言は禁止（void, 関数型, 不完全構造体）
+    if !decl.var_type.is_object_type() {
         return Err(CompileError::TypeError(format!(
-            "variable '{}' declared void",
-            decl.name
-        )));
-    }
-
-    // 不完全な構造体型の変数宣言は禁止（Chapter 18）
-    if decl.var_type.is_incomplete() {
-        return Err(CompileError::TypeError(format!(
-            "variable '{}' has incomplete type",
-            decl.name
+            "variable '{}' has non-object type '{:?}'",
+            decl.name, decl.var_type
         )));
     }
 
@@ -583,9 +591,17 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     // 配列→ポインタ減衰（Chapter 15）
                     Ok(array_decay(t.clone()))
                 }
-                Some(SymbolType::Function { .. }) => {
-                    // Function name used as value → decays to function pointer
-                    Ok(Type::Pointer(Box::new(Type::Void)))
+                Some(SymbolType::Function {
+                    return_type,
+                    param_types,
+                    is_variadic,
+                }) => {
+                    // Function name used as value → decays to function pointer with prototype
+                    Ok(Type::Pointer(Box::new(Type::Function {
+                        return_type: Box::new(return_type.clone()),
+                        param_types: param_types.clone(),
+                        is_variadic: *is_variadic,
+                    })))
                 }
                 None if name == "__func__" || name == "__FUNCTION__" => {
                     // C99 predefined identifier: const char[]
@@ -1156,22 +1172,46 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 return Ok(Type::Int);
             }
 
-            let (return_type, param_types, is_variadic) = match symbols.get(name) {
+            // 関数シグネチャを解決: 直接呼び出し / 関数ポインタ呼び出し
+            let call_sig = match symbols.get(name) {
                 Some(SymbolType::Function {
                     return_type,
                     param_types,
                     is_variadic,
-                }) => (return_type.clone(), param_types.clone(), *is_variadic),
-                Some(SymbolType::Variable(ty)) if ty.is_pointer() => {
-                    // Function pointer call: variable of Pointer(Void) type
-                    // Typecheck args but skip conversion (no param type info)
-                    for arg in args.iter_mut() {
-                        typecheck_expr(arg, symbols)?;
+                }) => CallSig {
+                    return_type: return_type.clone(),
+                    param_types: param_types.clone(),
+                    is_variadic: *is_variadic,
+                },
+                Some(SymbolType::Variable(Type::Pointer(inner))) => match inner.as_ref() {
+                    // 関数ポインタ: Pointer(Function { ... })
+                    Type::Function {
+                        return_type,
+                        param_types,
+                        is_variadic,
+                    } => CallSig {
+                        return_type: *return_type.clone(),
+                        param_types: param_types.clone(),
+                        is_variadic: *is_variadic,
+                    },
+                    // Pointer(Void) — 型情報なし（system header tolerance 用フォールバック）
+                    // パーサーが関数ポインタのパラメータリストをパースできなかった場合に残る。
+                    // 引数の型チェックのみ行い、戻り値は Int と仮定する。
+                    // TODO: tacky_gen で戻り値型を使う段階で、このパスが実コードで
+                    // 踏まれるケースを調査し、必要なら Pointer(Void) を排除する。
+                    Type::Void => {
+                        for arg in args.iter_mut() {
+                            typecheck_expr(arg, symbols)?;
+                        }
+                        return Ok(Type::Int);
                     }
-                    // Return Pointer(Void) — compatible with pointer comparisons
-                    // and logical operators (covers both int and pointer return types)
-                    return Ok(Type::Pointer(Box::new(Type::Void)));
-                }
+                    _ => {
+                        return Err(CompileError::TypeError(format!(
+                            "called object '{}' is not a function or function pointer",
+                            name
+                        )));
+                    }
+                },
                 _ => {
                     return Err(CompileError::TypeError(format!(
                         "undeclared function '{}'",
@@ -1180,66 +1220,8 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 }
             };
 
-            if is_variadic {
-                // 可変長関数: 名前付きパラメータ以上の引数があれば OK
-                if args.len() < param_types.len() {
-                    return Err(CompileError::TypeError(format!(
-                        "function '{}' requires at least {} arguments, got {}",
-                        name,
-                        param_types.len(),
-                        args.len()
-                    )));
-                }
-            } else if args.len() != param_types.len() {
-                return Err(CompileError::TypeError(format!(
-                    "function '{}' expects {} arguments, got {}",
-                    name,
-                    param_types.len(),
-                    args.len()
-                )));
-            }
-
-            // 名前付きパラメータの型チェック+キャスト
-            for (arg, expected_type) in args.iter_mut().zip(param_types.iter()) {
-                let arg_type = typecheck_expr(arg, symbols)?;
-                if arg_type != *expected_type {
-                    // void ポインタ暗黙変換チェック: 一方が void* なら許可
-                    if expected_type.is_pointer()
-                        && arg_type.is_pointer()
-                        && *expected_type != arg_type
-                        && !is_void_pointer(expected_type)
-                        && !is_void_pointer(&arg_type)
-                    {
-                        return Err(CompileError::TypeError(format!(
-                            "incompatible pointer types in argument to function '{}'",
-                            name
-                        )));
-                    }
-                    let old_arg = std::mem::replace(arg, Expr::Constant(0));
-                    *arg = Expr::Cast {
-                        target_type: expected_type.clone(),
-                        source_type: arg_type,
-                        expr: Box::new(old_arg),
-                    };
-                }
-            }
-
-            // 可変長引数部分: デフォルト引数昇格（char → int）
-            if is_variadic {
-                for arg in args.iter_mut().skip(param_types.len()) {
-                    let arg_type = typecheck_expr(arg, symbols)?;
-                    if arg_type.is_character() {
-                        let old_arg = std::mem::replace(arg, Expr::Constant(0));
-                        *arg = Expr::Cast {
-                            target_type: Type::Int,
-                            source_type: arg_type,
-                            expr: Box::new(old_arg),
-                        };
-                    }
-                }
-            }
-
-            Ok(return_type)
+            typecheck_call_args(name, args, &call_sig, symbols)?;
+            Ok(call_sig.return_type)
         }
 
         Expr::Dereref(inner) => {
@@ -1391,12 +1373,114 @@ fn resolve_constant(expr: &mut Expr) {
     }
 }
 
-/// 配列→ポインタ減衰（Chapter 15）。
+/// 関数呼び出しのシグネチャ情報。直接呼び出しと間接呼び出しの両方で共用。
+struct CallSig {
+    return_type: Type,
+    /// `None` = 引数未指定 `()` — 引数チェックをスキップ（K&R 互換）
+    /// `Some(vec![])` = 引数ゼロ `(void)` — 引数があればエラー
+    /// `Some(vec![...])` = 具体的なプロトタイプ
+    param_types: Option<Vec<Type>>,
+    is_variadic: bool,
+}
+
+/// 関数呼び出しの引数を型チェックする（直接/間接呼び出し共通）。
+fn typecheck_call_args(
+    name: &str,
+    args: &mut [Expr],
+    sig: &CallSig,
+    symbols: &HashMap<String, SymbolType>,
+) -> Result<()> {
+    let param_types = match &sig.param_types {
+        Some(pt) => pt,
+        None => {
+            // 引数未指定 — 型チェックのみ行い、引数数・型の整合性はスキップ
+            for arg in args.iter_mut() {
+                let arg_type = typecheck_expr(arg, symbols)?;
+                // デフォルト引数昇格: char → int
+                if arg_type.is_character() {
+                    let old_arg = std::mem::replace(arg, Expr::Constant(0));
+                    *arg = Expr::Cast {
+                        target_type: Type::Int,
+                        source_type: arg_type,
+                        expr: Box::new(old_arg),
+                    };
+                }
+            }
+            return Ok(());
+        }
+    };
+
+    // 引数数チェック
+    if sig.is_variadic {
+        if args.len() < param_types.len() {
+            return Err(CompileError::TypeError(format!(
+                "function '{}' requires at least {} arguments, got {}",
+                name,
+                param_types.len(),
+                args.len()
+            )));
+        }
+    } else if args.len() != param_types.len() {
+        return Err(CompileError::TypeError(format!(
+            "function '{}' expects {} arguments, got {}",
+            name,
+            param_types.len(),
+            args.len()
+        )));
+    }
+
+    // 名前付きパラメータの型チェック+キャスト
+    for (arg, expected_type) in args.iter_mut().zip(param_types.iter()) {
+        let arg_type = typecheck_expr(arg, symbols)?;
+        if arg_type != *expected_type {
+            // void ポインタ暗黙変換チェック: 一方が void* なら許可
+            if expected_type.is_pointer()
+                && arg_type.is_pointer()
+                && *expected_type != arg_type
+                && !is_void_pointer(expected_type)
+                && !is_void_pointer(&arg_type)
+            {
+                return Err(CompileError::TypeError(format!(
+                    "incompatible pointer types in argument to function '{}'",
+                    name
+                )));
+            }
+            let old_arg = std::mem::replace(arg, Expr::Constant(0));
+            *arg = Expr::Cast {
+                target_type: expected_type.clone(),
+                source_type: arg_type,
+                expr: Box::new(old_arg),
+            };
+        }
+    }
+
+    // 可変長引数部分: デフォルト引数昇格（char → int）
+    if sig.is_variadic {
+        for arg in args.iter_mut().skip(param_types.len()) {
+            let arg_type = typecheck_expr(arg, symbols)?;
+            if arg_type.is_character() {
+                let old_arg = std::mem::replace(arg, Expr::Constant(0));
+                *arg = Expr::Cast {
+                    target_type: Type::Int,
+                    source_type: arg_type,
+                    expr: Box::new(old_arg),
+                };
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 配列/関数→ポインタ減衰。
 ///
-/// 配列型を対応するポインタ型に変換する。非配列型はそのまま返す。
+/// - 配列型 → ポインタ型（Chapter 15）
+/// - 関数型 → 関数ポインタ型（typedef `handler_t` → `handler_t *` 相当）
+/// - その他 → そのまま返す
 fn array_decay(ty: Type) -> Type {
     match ty {
         Type::Array(elem, _) => Type::Pointer(elem),
+        Type::Function { .. } => Type::Pointer(Box::new(ty)),
         other => other,
     }
 }
@@ -1515,6 +1599,7 @@ mod tests {
                 )))]),
                 storage_class: None,
                 is_variadic: false,
+                has_prototype: true,
             })],
         };
         typecheck(&mut program).unwrap();
@@ -1543,6 +1628,7 @@ mod tests {
                 ]),
                 storage_class: None,
                 is_variadic: false,
+                has_prototype: true,
             })],
         };
         typecheck(&mut program).unwrap();
@@ -1570,6 +1656,7 @@ mod tests {
                 )))]),
                 storage_class: None,
                 is_variadic: false,
+                has_prototype: true,
             })],
         };
         typecheck(&mut program).unwrap();
@@ -1620,6 +1707,7 @@ mod tests {
                 ]),
                 storage_class: None,
                 is_variadic: false,
+                has_prototype: true,
             })],
         };
         typecheck(&mut program).unwrap();

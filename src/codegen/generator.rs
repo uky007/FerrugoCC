@@ -43,6 +43,7 @@ fn type_to_asm(t: &Type) -> AsmType {
         Type::Pointer(_) => AsmType::Quadword,
         Type::Array(_, _) => AsmType::Quadword,
         Type::Struct { .. } => unreachable!("struct has no single AsmType"),
+        Type::Function { .. } => unreachable!("function type has no assembly representation"),
         Type::VaList => AsmType::Quadword,
     }
 }

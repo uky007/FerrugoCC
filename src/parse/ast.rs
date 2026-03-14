@@ -95,6 +95,18 @@ pub enum Type {
     },
     /// `va_list` 型 — 可変長引数アクセス用の24バイト構造体（System V AMD64 ABI）
     VaList,
+    /// 関数型 — typedef の基底型や関数ポインタの指す先として使用。
+    /// 変数型としては不可（値を格納できない）。typedef 定義時はそのまま保持し、
+    /// 変数宣言・パラメータ宣言で使われた時点で Pointer(Function) に decay する。
+    ///
+    /// - `param_types: None` — 引数未指定 `()`: 任意個の引数を受け付ける（K&R 互換）
+    /// - `param_types: Some(vec![])` — 引数ゼロ `(void)`: 引数なしが確定
+    /// - `param_types: Some(vec![Int, Double])` — 具体的なプロトタイプ
+    Function {
+        return_type: Box<Type>,
+        param_types: Option<Vec<Type>>,
+        is_variadic: bool,
+    },
 }
 
 /// 構造体メンバ宣言（Chapter 18）。
@@ -116,13 +128,23 @@ impl Type {
     }
 
     /// 不完全型かどうかを判定する（Chapter 17, 18）。
-    /// void は不完全型。前方宣言のみの構造体（members が空）も不完全型。
+    /// void、前方宣言のみの構造体（members が空）が該当。
+    /// 注意: Function は不完全型ではなく「非オブジェクト型」。
+    /// 変数型として禁止したい場合は `is_object_type()` を使う。
     pub fn is_incomplete(&self) -> bool {
         match self {
             Type::Void => true,
             Type::Struct { members, .. } => members.is_empty(),
             _ => false,
         }
+    }
+
+    /// オブジェクト型かどうかを判定する。
+    /// 変数の型として使用可能な型のみ true を返す。
+    /// Function 型は typedef の基底型としては合法だが、変数型としては不可。
+    pub fn is_object_type(&self) -> bool {
+        !matches!(self, Type::Void | Type::Function { .. })
+            && !self.is_incomplete()
     }
 
     /// va_list 型かどうかを判定する。
@@ -168,6 +190,7 @@ impl Type {
     pub fn size(&self) -> usize {
         match self {
             Type::Void => panic!("void has no size"),
+            Type::Function { .. } => panic!("function type has no size"),
             Type::Char | Type::UChar => 1,
             Type::Int | Type::UInt => 4,
             Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
@@ -186,6 +209,7 @@ impl Type {
     pub fn alignment(&self) -> usize {
         match self {
             Type::Void => panic!("void has no alignment"),
+            Type::Function { .. } => panic!("function type has no alignment"),
             Type::Char | Type::UChar => 1,
             Type::Int | Type::UInt => 4,
             Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
@@ -278,6 +302,8 @@ pub struct Program {
 /// - `body`: `Some(...)` なら関数定義、`None` なら前方宣言（プロトタイプ）
 /// - `storage_class`: オプショナルのストレージクラス指定子（Chapter 10）
 /// - `is_variadic`: 可変長引数関数かどうか（`...` を含む）
+/// - `has_prototype`: プロトタイプの有無。`(void)` や `(int x)` は true、`()` は false。
+///   `()` は「引数未指定」（K&R 互換）で、任意の引数で呼べる。
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDecl {
     pub name: String,
@@ -286,6 +312,7 @@ pub struct FunctionDecl {
     pub body: Option<Vec<BlockItem>>,
     pub storage_class: Option<StorageClass>,
     pub is_variadic: bool,
+    pub has_prototype: bool,
 }
 
 /// ブロック要素（Chapter 5 で追加）。
