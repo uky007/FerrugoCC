@@ -218,9 +218,8 @@ int main(void) {
     assert_eq!(compile_and_run(source), 42);
 }
 
-/// 関数ポインタ配列 → 42 (未対応: 複合宣言子 (*name[N])(params))
+/// 関数ポインタ配列 → 42
 #[test]
-#[ignore]
 fn fn_ptr_array() {
     if !can_run_x86_64() {
         return;
@@ -232,9 +231,9 @@ int main(void) {
     int (*ops[2])(int, int);
     ops[0] = add;
     ops[1] = sub;
-    int r1 = ops[0](30, 20);
-    int r2 = ops[1](10, 18);
-    return r1 + r2 + 10;
+    int r1 = ops[0](20, 10);
+    int r2 = ops[1](22, 10);
+    return r1 + r2;
 }
 "#;
     assert_eq!(compile_and_run(source), 42);
@@ -277,9 +276,8 @@ int main(void) {
     assert_eq!(compile_and_run(source), 42);
 }
 
-/// コールバックパターン: 構造体メンバとしての関数ポインタ → 42 (未対応: 構造体内 fn ptr 宣言)
+/// コールバックパターン: 構造体メンバとしての関数ポインタ → 42
 #[test]
-#[ignore]
 fn fn_ptr_struct_member() {
     if !can_run_x86_64() {
         return;

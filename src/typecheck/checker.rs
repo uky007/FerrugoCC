@@ -1224,6 +1224,41 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
             Ok(call_sig.return_type)
         }
 
+        Expr::CallExpr(callee, args) => {
+            let callee_type = typecheck_expr(callee, symbols)?;
+            let call_sig = match &callee_type {
+                Type::Pointer(inner) => match inner.as_ref() {
+                    Type::Function {
+                        return_type,
+                        param_types,
+                        is_variadic,
+                    } => CallSig {
+                        return_type: *return_type.clone(),
+                        param_types: param_types.clone(),
+                        is_variadic: *is_variadic,
+                    },
+                    Type::Void => {
+                        for arg in args.iter_mut() {
+                            typecheck_expr(arg, symbols)?;
+                        }
+                        return Ok(Type::Int);
+                    }
+                    _ => {
+                        return Err(CompileError::TypeError(
+                            "called expression is not a function pointer".to_string(),
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(CompileError::TypeError(
+                        "called expression is not a function pointer".to_string(),
+                    ));
+                }
+            };
+            typecheck_call_args("<expr>", args, &call_sig, symbols)?;
+            Ok(call_sig.return_type)
+        }
+
         Expr::Dereref(inner) => {
             let inner_type = typecheck_expr(inner, symbols)?;
             match inner_type {

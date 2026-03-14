@@ -410,6 +410,16 @@ fn expr_type(
                 Type::Int
             }
         }
+        Expr::CallExpr(callee, _) => {
+            let callee_type = expr_type(callee, var_map, func_table);
+            match callee_type {
+                Type::Pointer(inner) => match *inner {
+                    Type::Function { return_type, .. } => *return_type,
+                    _ => Type::Int,
+                },
+                _ => Type::Int,
+            }
+        }
         Expr::CompoundInit(_) => Type::Int,
         Expr::VaStart(_) | Expr::VaEnd(_) | Expr::VaCopy(_, _) => Type::Void,
         Expr::VaArg { arg_type, .. } => arg_type.clone(),
@@ -1612,6 +1622,10 @@ impl TackyGenerator {
                 self.generate_function_call(name, args, instrs, func_table)
             }
 
+            Expr::CallExpr(callee, args) => {
+                self.generate_call_expr(callee, args, instrs, func_table)
+            }
+
             Expr::Binary(op, left, right) => {
                 self.generate_binary(op, left, right, instrs, func_table)
             }
@@ -2111,6 +2125,61 @@ impl TackyGenerator {
         let dst = self.new_temp(return_type.clone());
         instrs.push(TackyInstruction::FunCall {
             name: name.to_string(),
+            args: arg_vals,
+            dst: dst.clone(),
+            dst_type: return_type.clone(),
+            is_variadic,
+        });
+
+        Ok((dst, return_type))
+    }
+
+    /// 式経由の間接呼び出し: ops[0](a, b), s.callback(x) など。
+    /// callee 式を評価して一時変数に格納し、FunCall で間接呼び出しする。
+    fn generate_call_expr(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        instrs: &mut Vec<TackyInstruction>,
+        func_table: &HashMap<String, FunctionInfo>,
+    ) -> Result<(TackyVal, Type)> {
+        let callee_type = expr_type(callee, &self.var_map, func_table);
+        let (return_type, is_variadic) = match &callee_type {
+            Type::Pointer(inner) => match inner.as_ref() {
+                Type::Function {
+                    return_type,
+                    is_variadic,
+                    ..
+                } => (*return_type.clone(), *is_variadic),
+                _ => (Type::Int, false),
+            },
+            _ => (Type::Int, false),
+        };
+
+        // Evaluate callee expression to get the function pointer
+        let (fn_ptr_val, _) = self.generate_expr(callee, instrs, func_table)?;
+
+        // Store the function pointer into a named temp so codegen recognizes it
+        let tmp_name = format!("__call_expr.{}", self.temp_counter);
+        self.temp_counter += 1;
+        self.var_map
+            .insert(tmp_name.clone(), VarKind::Local(callee_type.clone()));
+        self.var_types.insert(tmp_name.clone(), callee_type);
+        instrs.push(TackyInstruction::Copy {
+            src: fn_ptr_val,
+            dst: TackyVal::Var(tmp_name.clone()),
+        });
+
+        // Evaluate args
+        let mut arg_vals = Vec::new();
+        for arg in args {
+            let (val, _) = self.generate_expr(arg, instrs, func_table)?;
+            arg_vals.push(val);
+        }
+
+        let dst = self.new_temp(return_type.clone());
+        instrs.push(TackyInstruction::FunCall {
+            name: tmp_name,
             args: arg_vals,
             dst: dst.clone(),
             dst_type: return_type.clone(),

@@ -458,6 +458,9 @@ pub enum Expr {
     PostfixDecrement(Box<Expr>),
     /// 関数呼び出し（Chapter 9）。`foo(a, b)` → `FunctionCall("foo", vec![a, b])`
     FunctionCall(String, Vec<Expr>),
+    /// 間接呼び出し（式経由）。`expr(a, b)` — 関数ポインタ配列やメンバ経由の呼び出し。
+    /// 例: `ops[0](30, 20)`, `s.callback(x)`
+    CallExpr(Box<Expr>, Vec<Expr>),
     /// 間接参照（Chapter 14）。`*expr` — ポインタの指す先の値を取得。左辺値にもなる。
     Dereref(Box<Expr>),
     /// アドレス取得（Chapter 14）。`&expr` — 式のアドレスを取得。

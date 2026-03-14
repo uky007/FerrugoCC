@@ -833,6 +833,19 @@ impl<'a> Parser<'a> {
                         )));
                     }
                 };
+                // 配列サフィックス: (*ops[2])(int, int) — 関数ポインタの配列
+                let mut array_sizes: Vec<usize> = Vec::new();
+                while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
+                    self.advance()?; // consume '['
+                    if self.peek()?.kind == TokenKind::CloseBracket {
+                        array_sizes.push(0);
+                    } else {
+                        let size_expr = self.parse_conditional()?;
+                        let n = Self::eval_const_expr(&size_expr)?;
+                        array_sizes.push(n as usize);
+                    }
+                    self.expect(&TokenKind::CloseBracket)?;
+                }
                 self.expect(&TokenKind::CloseParen)?;
                 // 戻り値型: base_type に stars 分のポインタを適用
                 let mut return_type = base_type;
@@ -840,7 +853,7 @@ impl<'a> Parser<'a> {
                     return_type = Type::Pointer(Box::new(return_type));
                 }
                 // パラメータリストをパース（失敗時はスキップして Pointer(Void) にフォールバック）
-                let ty =
+                let mut ty =
                     if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
                         if let Some((param_types, is_variadic)) = self.try_parse_fn_ptr_params() {
                             Type::Pointer(Box::new(Type::Function {
@@ -856,6 +869,10 @@ impl<'a> Parser<'a> {
                         // パラメータリストなし — 関数ポインタだが型情報不明
                         Type::Pointer(Box::new(Type::Void))
                     };
+                // 配列でラップ: (*ops[2])(int,int) → Array(Pointer(Function{...}), 2)
+                for size in array_sizes {
+                    ty = Type::Array(Box::new(ty), size);
+                }
                 return Ok((ty, name));
             }
         }
@@ -2280,6 +2297,20 @@ impl<'a> Parser<'a> {
                         }
                     };
                     expr = Expr::Dot(Box::new(expr), member_name);
+                }
+                // 間接呼び出し: expr(args) — 関数ポインタ配列・メンバ経由の呼び出し
+                TokenKind::OpenParen => {
+                    self.advance()?; // consume '('
+                    let mut args = Vec::new();
+                    if self.peek()?.kind != TokenKind::CloseParen {
+                        args.push(self.parse_assignment()?);
+                        while self.peek()?.kind == TokenKind::Comma {
+                            self.advance()?;
+                            args.push(self.parse_assignment()?);
+                        }
+                    }
+                    self.expect(&TokenKind::CloseParen)?;
+                    expr = Expr::CallExpr(Box::new(expr), args);
                 }
                 // Chapter 18: `->member` — ポインタメンバアクセス → `(*ptr).member` に脱糖
                 TokenKind::Arrow => {
