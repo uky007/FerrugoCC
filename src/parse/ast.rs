@@ -143,8 +143,7 @@ impl Type {
     /// 変数の型として使用可能な型のみ true を返す。
     /// Function 型は typedef の基底型としては合法だが、変数型としては不可。
     pub fn is_object_type(&self) -> bool {
-        !matches!(self, Type::Void | Type::Function { .. })
-            && !self.is_incomplete()
+        !matches!(self, Type::Void | Type::Function { .. }) && !self.is_incomplete()
     }
 
     /// va_list 型かどうかを判定する。

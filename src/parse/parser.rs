@@ -840,23 +840,22 @@ impl<'a> Parser<'a> {
                     return_type = Type::Pointer(Box::new(return_type));
                 }
                 // パラメータリストをパース（失敗時はスキップして Pointer(Void) にフォールバック）
-                let ty = if self.pos < self.tokens.len()
-                    && self.peek()?.kind == TokenKind::OpenParen
-                {
-                    if let Some((param_types, is_variadic)) = self.try_parse_fn_ptr_params() {
-                        Type::Pointer(Box::new(Type::Function {
-                            return_type: Box::new(return_type),
-                            param_types,
-                            is_variadic,
-                        }))
+                let ty =
+                    if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
+                        if let Some((param_types, is_variadic)) = self.try_parse_fn_ptr_params() {
+                            Type::Pointer(Box::new(Type::Function {
+                                return_type: Box::new(return_type),
+                                param_types,
+                                is_variadic,
+                            }))
+                        } else {
+                            self.skip_balanced_parens()?;
+                            Type::Pointer(Box::new(Type::Void))
+                        }
                     } else {
-                        self.skip_balanced_parens()?;
+                        // パラメータリストなし — 関数ポインタだが型情報不明
                         Type::Pointer(Box::new(Type::Void))
-                    }
-                } else {
-                    // パラメータリストなし — 関数ポインタだが型情報不明
-                    Type::Pointer(Box::new(Type::Void))
-                };
+                    };
                 return Ok((ty, name));
             }
         }
@@ -951,9 +950,7 @@ impl<'a> Parser<'a> {
                 return_type = Type::Pointer(Box::new(return_type));
             }
             // パラメータリストをパース（失敗時はフォールバック）
-            let ty = if self.pos < self.tokens.len()
-                && self.peek()?.kind == TokenKind::OpenParen
-            {
+            let ty = if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
                 if let Some((param_types, is_variadic)) = self.try_parse_fn_ptr_params() {
                     Type::Pointer(Box::new(Type::Function {
                         return_type: Box::new(return_type),
