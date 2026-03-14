@@ -435,6 +435,28 @@ fn kilo_compile_link_smoke() {
     );
 }
 
+/// kilo obfuscated smoke test: コンパイル → リンク → 引数なし実行 → "Usage:" 出力確認
+#[test]
+fn kilo_compile_link_smoke_obfuscated() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, stderr) = compile_and_run_corpus_ex(
+        "corpus/kilo/kilo.c",
+        true,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[], // no args → usage message
+    );
+    assert_eq!(
+        code, 1,
+        "kilo obfuscated with no args should exit with 1, stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Usage:"),
+        "kilo obfuscated stderr should contain 'Usage:', got: {stderr}"
+    );
+}
+
 // ── inih (Tier 1) ──
 
 /// inih は自前の isspace() を提供するため、glibc ctype.h を _CTYPE_H=1 で抑制。
