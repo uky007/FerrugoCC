@@ -410,3 +410,57 @@ int main(void) {
 "#;
     assert_eq!(compile_and_run(src, false), 40);
 }
+
+// ── __builtin_bswap{16,32,64} lowering ──
+
+#[test]
+fn bswap16_basic() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let src = r#"
+int main(void) {
+    // 0x0102 -> 0x0201
+    unsigned int x = __builtin_bswap16(0x0102);
+    if (x != 0x0201) return 1;
+    // 0xAABB -> 0xBBAA
+    unsigned int y = __builtin_bswap16(0xAABB);
+    if (y != 0xBBAA) return 2;
+    return 42;
+}
+"#;
+    assert_eq!(compile_and_run(src, false), 42);
+}
+
+#[test]
+fn bswap32_basic() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let src = r#"
+int main(void) {
+    unsigned int x = __builtin_bswap32(0x01020304);
+    if (x != 0x04030201) return 1;
+    // round-trip
+    unsigned int rt = __builtin_bswap32(__builtin_bswap32(0xDEADBEEF));
+    if (rt != 0xDEADBEEF) return 2;
+    return 42;
+}
+"#;
+    assert_eq!(compile_and_run(src, false), 42);
+}
+
+#[test]
+fn bswap64_basic() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let src = r#"
+int main(void) {
+    unsigned long x = __builtin_bswap64(0x0102030405060708UL);
+    if (x != 0x0807060504030201UL) return 1;
+    return 42;
+}
+"#;
+    assert_eq!(compile_and_run(src, false), 42);
+}

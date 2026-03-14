@@ -2037,14 +2037,20 @@ impl TackyGenerator {
         instrs: &mut Vec<TackyInstruction>,
         func_table: &HashMap<String, FunctionInfo>,
     ) -> Result<(TackyVal, Type)> {
+        // __builtin_bswap{16,32,64}: byte-swap lowering via shift+mask+or
+        if matches!(
+            name,
+            "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64"
+        ) {
+            let (val, _) = self.generate_expr(&args[0], instrs, func_table)?;
+            return self.generate_bswap(name, val, instrs);
+        }
+
         // GCC builtins (whitelist): evaluate args, return first arg value.
         // __builtin_expect is handled separately in the checker.
         if matches!(
             name,
             "__builtin_expect"
-                | "__builtin_bswap16"
-                | "__builtin_bswap32"
-                | "__builtin_bswap64"
                 | "__builtin_object_size"
                 | "__builtin_ctz"
                 | "__builtin_ctzl"
@@ -2112,6 +2118,188 @@ impl TackyGenerator {
         });
 
         Ok((dst, return_type))
+    }
+
+    /// __builtin_bswap{16,32,64} を shift+mask+or に lowering する。
+    fn generate_bswap(
+        &mut self,
+        name: &str,
+        val: TackyVal,
+        instrs: &mut Vec<TackyInstruction>,
+    ) -> Result<(TackyVal, Type)> {
+        match name {
+            "__builtin_bswap16" => {
+                // (val >> 8) | (val << 8), masked to 16 bits
+                let ty = Type::UInt;
+                let hi = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::ShiftRight,
+                    left: val.clone(),
+                    right: TackyVal::Constant(TackyConst::Int(8)),
+                    dst: hi.clone(),
+                });
+                let lo = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::ShiftLeft,
+                    left: val,
+                    right: TackyVal::Constant(TackyConst::Int(8)),
+                    dst: lo.clone(),
+                });
+                let combined = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::BitwiseOr,
+                    left: hi,
+                    right: lo,
+                    dst: combined.clone(),
+                });
+                let result = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: combined,
+                    right: TackyVal::Constant(TackyConst::Int(0xFFFF)),
+                    dst: result.clone(),
+                });
+                Ok((result, ty))
+            }
+            "__builtin_bswap32" => {
+                // byte3 = (val >> 24) & 0xFF
+                // byte2 = (val >> 8)  & 0xFF00
+                // byte1 = (val << 8)  & 0xFF0000
+                // byte0 = (val << 24)
+                // result = byte3 | byte2 | byte1 | byte0
+                let ty = Type::UInt;
+                let b3_shift = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::ShiftRight,
+                    left: val.clone(),
+                    right: TackyVal::Constant(TackyConst::Int(24)),
+                    dst: b3_shift.clone(),
+                });
+                let b3 = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: b3_shift,
+                    right: TackyVal::Constant(TackyConst::Int(0xFF)),
+                    dst: b3.clone(),
+                });
+
+                let b2_shift = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::ShiftRight,
+                    left: val.clone(),
+                    right: TackyVal::Constant(TackyConst::Int(8)),
+                    dst: b2_shift.clone(),
+                });
+                let b2 = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: b2_shift,
+                    right: TackyVal::Constant(TackyConst::Int(0xFF00)),
+                    dst: b2.clone(),
+                });
+
+                let b1_shift = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::ShiftLeft,
+                    left: val.clone(),
+                    right: TackyVal::Constant(TackyConst::Int(8)),
+                    dst: b1_shift.clone(),
+                });
+                let b1 = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::BitwiseAnd,
+                    left: b1_shift,
+                    right: TackyVal::Constant(TackyConst::Int(0x00FF_0000)),
+                    dst: b1.clone(),
+                });
+
+                let b0 = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::ShiftLeft,
+                    left: val,
+                    right: TackyVal::Constant(TackyConst::Int(24)),
+                    dst: b0.clone(),
+                });
+
+                let or1 = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::BitwiseOr,
+                    left: b3,
+                    right: b2,
+                    dst: or1.clone(),
+                });
+                let or2 = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::BitwiseOr,
+                    left: b1,
+                    right: b0,
+                    dst: or2.clone(),
+                });
+                let result = self.new_temp(ty.clone());
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::BitwiseOr,
+                    left: or1,
+                    right: or2,
+                    dst: result.clone(),
+                });
+                Ok((result, ty))
+            }
+            "__builtin_bswap64" => {
+                // 8 bytes: swap each byte position
+                let ty = Type::ULong;
+                let mut bytes = Vec::new();
+                for i in 0..8u8 {
+                    let shift_amt = (7 - 2 * (i as i32)) * 8; // 56,40,24,8,-8,-24,-40,-56
+                    let mask_pos = i as i64 * 8;
+                    let mask = 0xFFi64 << mask_pos;
+
+                    let masked = self.new_temp(ty.clone());
+                    instrs.push(TackyInstruction::Binary {
+                        op: TackyBinaryOp::BitwiseAnd,
+                        left: val.clone(),
+                        right: TackyVal::Constant(TackyConst::Long(mask)),
+                        dst: masked.clone(),
+                    });
+
+                    let shifted = self.new_temp(ty.clone());
+                    if shift_amt > 0 {
+                        instrs.push(TackyInstruction::Binary {
+                            op: TackyBinaryOp::ShiftLeft,
+                            left: masked,
+                            right: TackyVal::Constant(TackyConst::Int(shift_amt)),
+                            dst: shifted.clone(),
+                        });
+                    } else if shift_amt < 0 {
+                        instrs.push(TackyInstruction::Binary {
+                            op: TackyBinaryOp::ShiftRight,
+                            left: masked,
+                            right: TackyVal::Constant(TackyConst::Int(-shift_amt)),
+                            dst: shifted.clone(),
+                        });
+                    } else {
+                        instrs.push(TackyInstruction::Copy {
+                            src: masked,
+                            dst: shifted.clone(),
+                        });
+                    }
+                    bytes.push(shifted);
+                }
+                // OR all 8 bytes together
+                let mut acc = bytes[0].clone();
+                for b in &bytes[1..] {
+                    let next = self.new_temp(ty.clone());
+                    instrs.push(TackyInstruction::Binary {
+                        op: TackyBinaryOp::BitwiseOr,
+                        left: acc,
+                        right: b.clone(),
+                        dst: next.clone(),
+                    });
+                    acc = next;
+                }
+                Ok((acc, ty))
+            }
+            _ => unreachable!(),
+        }
     }
 
     /// 二項演算
