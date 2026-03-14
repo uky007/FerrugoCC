@@ -20,8 +20,16 @@ Compiles a practical subset of C to x86_64 assembly (System V ABI), with an opti
 
 ## Install
 
+From crates.io:
+
 ```bash
 cargo install ferrugocc
+```
+
+From the repository checkout:
+
+```bash
+cargo install --path .
 ```
 
 ## Supported Scope
