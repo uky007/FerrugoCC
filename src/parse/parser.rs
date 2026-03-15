@@ -816,7 +816,6 @@ impl<'a> Parser<'a> {
     /// Pointer: `*` プレフィクス
     /// Array: `[N]` サフィクス
     /// Function: `(params)` サフィクス（グループ後のみ）
-
     /// 宣言子ツリーを構築する。
     ///
     /// `allow_empty_name`: true なら名前なしを許容（パラメータ宣言子、抽象宣言子用）
@@ -838,11 +837,11 @@ impl<'a> Parser<'a> {
             }
             // Clang nullability: _Nonnull, _Nullable, _Null_unspecified
             while self.pos < self.tokens.len() {
-                if let TokenKind::Identifier(attr) = &self.peek()?.kind {
-                    if attr.starts_with("_N") || attr.starts_with("_null") {
-                        self.advance()?;
-                        continue;
-                    }
+                if let TokenKind::Identifier(attr) = &self.peek()?.kind
+                    && (attr.starts_with("_N") || attr.starts_with("_null"))
+                {
+                    self.advance()?;
+                    continue;
                 }
                 break;
             }

@@ -1665,10 +1665,10 @@ impl TackyGenerator {
                 // *(ptr_to_array): 配列への deref は Load ではなく、
                 // ポインタ値をそのまま返す（配列はアドレスと同一）
                 let inner_raw_type = expr_type(inner, &self.var_map, func_table);
-                if let Type::Pointer(ref target) = inner_raw_type {
-                    if target.is_array() {
-                        return self.generate_expr(inner, instrs, func_table);
-                    }
+                if let Type::Pointer(ref target) = inner_raw_type
+                    && target.is_array()
+                {
+                    return self.generate_expr(inner, instrs, func_table);
                 }
                 let (ptr_val, _) = self.generate_expr(inner, instrs, func_table)?;
                 let dst = self.new_temp(target_type.clone());
