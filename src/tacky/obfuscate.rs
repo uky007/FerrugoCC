@@ -1629,6 +1629,14 @@ fn is_inline_eligible(
     if has_param_address_taken(callee, static_names) {
         return false;
     }
+    // 7. 間接呼び出し（CallExpr 由来の __call_expr.N）を含まない
+    // FunCall.name が実際にはローカル変数（関数ポインタ）の場合、
+    // インライン化すると name がリネームされず未解決シンボルになる。
+    if callee.body.iter().any(|instr| {
+        matches!(instr, TackyInstruction::FunCall { name, .. } if name.starts_with("__call_expr."))
+    }) {
+        return false;
+    }
     true
 }
 
