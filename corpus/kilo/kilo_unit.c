@@ -9,12 +9,19 @@
  *   - 文字分類 (is_separator 相当)
  *   - struct ポインタ経由のメンバ操作
  *   - ビット演算 (&= ~(...))
- *   - 関数ポインタ typedef
+ *   - 関数ポインタ typedef + コールバック
+ *   - タブ展開 (editorUpdateRow 相当)
+ *   - 複数行管理 (InsertRow / DelRow)
+ *   - 行連結 (editorRowAppendString 相当)
+ *   - 検索 (strstr + ポインタ演算)
+ *   - va_list 経由の vsnprintf (editorSetStatusMessage 相当)
+ *   - ファイル読み込み (editorOpen 相当)
  */
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 /* ── 1. struct + char 配列メンバ ── */
 
@@ -472,6 +479,126 @@ static int test_status_message(void) {
     return 0;
 }
 
+/* ── 14. editorSetStatusMessage 相当 — 実 va_list 経路 ── */
+
+static char statusmsg_buf[256];
+
+static void setStatusMessage(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(statusmsg_buf, sizeof(statusmsg_buf), fmt, ap);
+    va_end(ap);
+}
+
+static int test_va_list_status(void) {
+    /* basic string + int */
+    setStatusMessage("Line %d/%d", 10, 100);
+    if (strcmp(statusmsg_buf, "Line 10/100") != 0) return 130;
+
+    /* string arg */
+    setStatusMessage("Search: %s", "hello");
+    if (strcmp(statusmsg_buf, "Search: hello") != 0) return 131;
+
+    /* multiple args of different types */
+    setStatusMessage("%d bytes written on disk", 4096);
+    if (strcmp(statusmsg_buf, "4096 bytes written on disk") != 0) return 132;
+
+    /* empty format */
+    setStatusMessage("");
+    if (statusmsg_buf[0] != '\0') return 133;
+
+    /* WARNING message */
+    setStatusMessage("WARNING!!! Press Ctrl-Q %d more times to quit.", 3);
+    if (strstr(statusmsg_buf, "3 more times") == NULL) return 134;
+
+    /* long message with multiple arg types */
+    setStatusMessage("File '%s' saved (%d lines, %d bytes)", "test.c", 42, 1024);
+    if (strstr(statusmsg_buf, "test.c") == NULL) return 135;
+    if (strstr(statusmsg_buf, "42 lines") == NULL) return 136;
+    if (strstr(statusmsg_buf, "1024 bytes") == NULL) return 137;
+
+    return 0;
+}
+
+/* ── 15. ファイル読み込み — editorOpen 相当の最小パス ── */
+
+struct fileState {
+    int numrows;
+    char **rows;
+};
+
+static int fileOpen(struct fileState *fs, const char *filename) {
+    FILE *fp = fopen(filename, "r");
+    if (!fp) return -1;
+
+    char line[1024];
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        int len = strlen(line);
+        /* Strip trailing \n and \r (like kilo) */
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+
+        fs->rows = realloc(fs->rows, sizeof(char *) * (fs->numrows + 1));
+        fs->rows[fs->numrows] = malloc(len + 1);
+        memcpy(fs->rows[fs->numrows], line, len + 1);
+        fs->numrows++;
+    }
+    fclose(fp);
+    return 0;
+}
+
+static void fileFree(struct fileState *fs) {
+    int i;
+    for (i = 0; i < fs->numrows; i++)
+        free(fs->rows[i]);
+    free(fs->rows);
+}
+
+static int test_file_read(void) {
+    /* Write a temp file, read it back, verify contents */
+    const char *tmppath = "/tmp/kilo_unit_test.txt";
+    FILE *fp = fopen(tmppath, "w");
+    if (!fp) return 140;
+    fprintf(fp, "First line\n");
+    fprintf(fp, "Second line\n");
+    fprintf(fp, "Third\n");
+    fclose(fp);
+
+    struct fileState fs;
+    fs.numrows = 0;
+    fs.rows = NULL;
+
+    if (fileOpen(&fs, tmppath) != 0) return 141;
+    if (fs.numrows != 3) return 142;
+    if (strcmp(fs.rows[0], "First line") != 0) return 143;
+    if (strcmp(fs.rows[1], "Second line") != 0) return 144;
+    if (strcmp(fs.rows[2], "Third") != 0) return 145;
+
+    fileFree(&fs);
+
+    /* Non-existent file → error */
+    struct fileState fs2;
+    fs2.numrows = 0;
+    fs2.rows = NULL;
+    if (fileOpen(&fs2, "/tmp/kilo_unit_NONEXISTENT_12345.txt") != -1) return 146;
+
+    /* Empty file */
+    fp = fopen(tmppath, "w");
+    if (!fp) return 147;
+    fclose(fp);
+
+    struct fileState fs3;
+    fs3.numrows = 0;
+    fs3.rows = NULL;
+    if (fileOpen(&fs3, tmppath) != 0) return 148;
+    if (fs3.numrows != 0) return 149;
+    fileFree(&fs3);
+
+    /* Cleanup */
+    remove(tmppath);
+    return 0;
+}
+
 /* ── メインテストランナー ── */
 
 int main(void) {
@@ -514,6 +641,12 @@ int main(void) {
     if (r != 0) return r;
 
     r = test_status_message();
+    if (r != 0) return r;
+
+    r = test_va_list_status();
+    if (r != 0) return r;
+
+    r = test_file_read();
     if (r != 0) return r;
 
     /* 全テスト通過 */

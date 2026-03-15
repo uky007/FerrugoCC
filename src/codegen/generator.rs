@@ -1859,6 +1859,13 @@ fn generate_function_call(
                 dst: Operand::Register(Reg::XMM0),
             });
             instrs.push(Instruction::Push(Operand::Register(Reg::XMM0)));
+        } else if matches!(arg_types[i], Type::VaList) {
+            let src = val_to_operand(&args[i], static_vars, stack_vars)?;
+            instrs.push(Instruction::Lea {
+                src,
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
         } else {
             let src = val_to_operand(&args[i], static_vars, stack_vars)?;
             instrs.push(Instruction::Mov {
@@ -1873,12 +1880,20 @@ fn generate_function_call(
     // Int register args
     for &(arg_idx, _) in int_reg_args.iter().rev() {
         let src = val_to_operand(&args[arg_idx], static_vars, stack_vars)?;
-        let asm_type = safe_asm_type(&arg_types[arg_idx]);
-        instrs.push(Instruction::Mov {
-            asm_type,
-            src,
-            dst: Operand::Register(Reg::AX),
-        });
+        // VaList はスタック割り当て構造体 — アドレスを渡す (Lea)
+        if matches!(arg_types[arg_idx], Type::VaList) {
+            instrs.push(Instruction::Lea {
+                src,
+                dst: Operand::Register(Reg::AX),
+            });
+        } else {
+            let asm_type = safe_asm_type(&arg_types[arg_idx]);
+            instrs.push(Instruction::Mov {
+                asm_type,
+                src,
+                dst: Operand::Register(Reg::AX),
+            });
+        }
         instrs.push(Instruction::Push(Operand::Register(Reg::AX)));
     }
     for &(_, reg_idx) in &int_reg_args {
