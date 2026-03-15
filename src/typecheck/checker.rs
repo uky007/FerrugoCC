@@ -1265,7 +1265,11 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 Type::Pointer(ref target) if target.is_void() => Err(CompileError::TypeError(
                     "dereference of void pointer".to_string(),
                 )),
-                Type::Pointer(target) => Ok(*target),
+                Type::Pointer(target) => {
+                    // 配列→ポインタ減衰: *(ptr_to_array) → Pointer(elem)
+                    // 例: int (*p)[3]; *p → Array(Int,3) → decay → Pointer(Int)
+                    Ok(array_decay(*target))
+                }
                 _ => Err(CompileError::TypeError(
                     "dereference of non-pointer type".to_string(),
                 )),
@@ -1274,12 +1278,12 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
 
         Expr::AddrOf(inner) => {
             // 配列変数の場合は特別処理（Chapter 15）
-            // &arr は先頭要素へのポインタ（decay 前の型から Pointer(elem) を生成）
+            // &arr → Pointer(Array(elem, size))（配列全体へのポインタ）
             if let Expr::Var(name) = inner.as_ref()
-                && let Some(SymbolType::Variable(Type::Array(elem, _))) = symbols.get(name)
+                && let Some(SymbolType::Variable(Type::Array(elem, size))) = symbols.get(name)
             {
                 // typecheck_expr は既に decay してしまうので、直接配列型から計算
-                return Ok(Type::Pointer(elem.clone()));
+                return Ok(Type::Pointer(Box::new(Type::Array(elem.clone(), *size))));
             }
             let inner_type = typecheck_expr(inner, symbols)?;
             if !is_lvalue(inner) {
