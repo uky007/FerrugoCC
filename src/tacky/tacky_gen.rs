@@ -391,12 +391,27 @@ fn expr_type(
         Expr::Dereref(inner) => {
             let inner_t = expr_type(inner, var_map, func_table);
             match inner_t {
-                Type::Pointer(target) => *target,
+                Type::Pointer(target) => {
+                    // 配列→ポインタ減衰: *(ptr_to_array) → Pointer(elem)
+                    match *target {
+                        Type::Array(elem, _) => Type::Pointer(elem),
+                        other => other,
+                    }
+                }
                 _ => Type::Int,
             }
         }
         Expr::AddrOf(inner) => {
-            let inner_t = expr_type(inner, var_map, func_table);
+            // &arr では decay 前の型を使う: &(int[3]) → Pointer(Array(Int, 3))
+            let inner_t = if let Expr::Var(name) = inner.as_ref() {
+                match var_map.get(name) {
+                    Some(VarKind::Local(ty)) => ty.clone(),
+                    Some(VarKind::Static(_, ty)) => ty.clone(),
+                    None => Type::Int,
+                }
+            } else {
+                expr_type(inner, var_map, func_table)
+            };
             Type::Pointer(Box::new(inner_t))
         }
         Expr::SizeOfType(_) | Expr::SizeOfExpr(_) => Type::ULong,
@@ -1646,6 +1661,14 @@ impl TackyGenerator {
                 if target_type.is_struct() {
                     // struct pointer deref: just return the address
                     return self.generate_expr(inner, instrs, func_table);
+                }
+                // *(ptr_to_array): 配列への deref は Load ではなく、
+                // ポインタ値をそのまま返す（配列はアドレスと同一）
+                let inner_raw_type = expr_type(inner, &self.var_map, func_table);
+                if let Type::Pointer(ref target) = inner_raw_type {
+                    if target.is_array() {
+                        return self.generate_expr(inner, instrs, func_table);
+                    }
                 }
                 let (ptr_val, _) = self.generate_expr(inner, instrs, func_table)?;
                 let dst = self.new_temp(target_type.clone());

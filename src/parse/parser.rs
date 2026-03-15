@@ -91,6 +91,27 @@ pub fn parse(tokens: &[Token]) -> Result<Program> {
     Ok(program)
 }
 
+/// 宣言子の構文木ノード。C の宣言子を内側から外側へ読んで型を構築する。
+///
+/// 例: `int (*ops[2])(int, int)` のパース結果:
+///   Function { inner: Pointer(Array(Name("ops"), 2)), params: [Int, Int], variadic: false }
+/// apply(tree, Int) の結果:
+///   Array(Pointer(Function { ret: Int, params: [Int, Int] }), 2)
+enum DeclaratorNode {
+    /// 終端: 識別子名（空文字列 = 無名パラメータ）
+    Name(String),
+    /// ポインタ: `*inner`
+    Pointer(Box<DeclaratorNode>),
+    /// 配列: `inner[size]`
+    Array(Box<DeclaratorNode>, usize),
+    /// 関数: `inner(params)` — グループ化宣言子 `(*)` の後のみ
+    Function {
+        inner: Box<DeclaratorNode>,
+        param_types: Option<Vec<Type>>,
+        is_variadic: bool,
+    },
+}
+
 /// パーサーの内部状態。トークン列への参照と現在の読み取り位置を保持する。
 struct Parser<'a> {
     tokens: &'a [Token],
@@ -781,17 +802,32 @@ impl<'a> Parser<'a> {
         Ok(Type::Int)
     }
 
-    /// 宣言子のパース（Chapter 14）。
+    // ────────────────────────────────────────────
+    // Declarator tree — C の宣言子を構文木として表現
+    // ────────────────────────────────────────────
+
+    /// 宣言子の構文木。C の宣言子は名前から外側へ読んで型を構築する。
     ///
-    /// `int *x`, `int **pp` などのポインタ宣言をパースする。
-    /// 先頭の `*` の個数をカウントし、識別子を読み、型をラップして返す。
-    fn parse_declarator(&mut self, base_type: Type) -> Result<(Type, String)> {
-        // leading '*' をカウント（const/volatile を '*' の後でスキップ）
+    /// 例: `int (*ops[2])(int, int)` →
+    ///   tree = Function { inner: Pointer(Array(Name("ops"), 2)), params, variadic }
+    ///   apply(tree, Int) → Array(Pointer(Function { ret: Int, params: [Int, Int] }), 2)
+    ///
+    /// Name: 終端（識別子）
+    /// Pointer: `*` プレフィクス
+    /// Array: `[N]` サフィクス
+    /// Function: `(params)` サフィクス（グループ後のみ）
+
+    /// 宣言子ツリーを構築する。
+    ///
+    /// `allow_empty_name`: true なら名前なしを許容（パラメータ宣言子、抽象宣言子用）
+    fn parse_declarator_tree(&mut self, allow_empty_name: bool) -> Result<DeclaratorNode> {
+        // ポインタプレフィクス: * をカウント（const/volatile/restrict/_Nonnull 等をスキップ）
         let mut stars = 0;
-        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Star {
+        while self.pos < self.tokens.len()
+            && matches!(self.peek()?.kind, TokenKind::Star | TokenKind::Caret)
+        {
             self.advance()?;
             stars += 1;
-            // `* const` や `* volatile` をスキップ（parse-only）
             while self.pos < self.tokens.len()
                 && matches!(
                     self.peek()?.kind,
@@ -800,280 +836,146 @@ impl<'a> Parser<'a> {
             {
                 self.advance()?;
             }
-        }
-
-        // 関数ポインタ: `(*name)(params)` — parse-only, Pointer(Void) として扱う
-        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
-            // `(` の後に `*` があれば関数ポインタ宣言子
-            if self.pos + 1 < self.tokens.len()
-                && matches!(
-                    self.tokens[self.pos + 1].kind,
-                    TokenKind::Star | TokenKind::Caret
-                )
-            {
-                self.advance()?; // consume '('
-                self.advance()?; // consume '*' or '^'
-                // Clang nullability attributes: _Nullable, _Nonnull, _Null_unspecified
-                while self.pos < self.tokens.len() {
-                    if let TokenKind::Identifier(attr) = &self.peek()?.kind
-                        && (attr.starts_with("_N") || attr.starts_with("_null"))
-                    {
+            // Clang nullability: _Nonnull, _Nullable, _Null_unspecified
+            while self.pos < self.tokens.len() {
+                if let TokenKind::Identifier(attr) = &self.peek()?.kind {
+                    if attr.starts_with("_N") || attr.starts_with("_null") {
                         self.advance()?;
                         continue;
                     }
-                    break;
                 }
-                let name_token = self.advance()?;
-                let name = match &name_token.kind {
-                    TokenKind::Identifier(name) => name.clone(),
-                    other => {
-                        return Err(CompileError::ParseError(format!(
-                            "expected identifier in function pointer declarator, got {:?}",
-                            other
-                        )));
-                    }
-                };
-                // 配列サフィックス: (*ops[2])(int, int) — 関数ポインタの配列
-                let mut array_sizes: Vec<usize> = Vec::new();
-                while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
-                    self.advance()?; // consume '['
-                    if self.peek()?.kind == TokenKind::CloseBracket {
-                        array_sizes.push(0);
-                    } else {
-                        let size_expr = self.parse_conditional()?;
-                        let n = Self::eval_const_expr(&size_expr)?;
-                        array_sizes.push(n as usize);
-                    }
-                    self.expect(&TokenKind::CloseBracket)?;
-                }
-                self.expect(&TokenKind::CloseParen)?;
-                // 戻り値型: base_type に stars 分のポインタを適用
-                let mut return_type = base_type;
-                for _ in 0..stars {
-                    return_type = Type::Pointer(Box::new(return_type));
-                }
-                // パラメータリストをパース（失敗時はスキップして Pointer(Void) にフォールバック）
-                let mut ty =
-                    if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
-                        if let Some((param_types, is_variadic)) = self.try_parse_fn_ptr_params() {
-                            Type::Pointer(Box::new(Type::Function {
-                                return_type: Box::new(return_type),
-                                param_types,
-                                is_variadic,
-                            }))
-                        } else {
-                            self.skip_balanced_parens()?;
-                            Type::Pointer(Box::new(Type::Void))
-                        }
-                    } else {
-                        // パラメータリストなし — 関数ポインタだが型情報不明
-                        Type::Pointer(Box::new(Type::Void))
-                    };
-                // 配列でラップ: (*ops[2])(int,int) → Array(Pointer(Function{...}), 2)
-                for size in array_sizes {
-                    ty = Type::Array(Box::new(ty), size);
-                }
-                return Ok((ty, name));
+                break;
             }
         }
 
-        let name_token = self.advance()?;
-        let name = match &name_token.kind {
-            TokenKind::Identifier(name) => name.clone(),
-            other => {
-                return Err(CompileError::ParseError(format!(
-                    "expected identifier in declarator, got {:?}",
-                    other
-                )));
-            }
-        };
+        let decl = self.parse_direct_declarator_tree(allow_empty_name)?;
 
-        let mut ty = base_type;
+        // ポインタでラップ（内側から）
+        let mut result = decl;
         for _ in 0..stars {
-            ty = Type::Pointer(Box::new(ty));
+            result = DeclaratorNode::Pointer(Box::new(result));
         }
-
-        // Chapter 15: 配列サフィックス `[N]`（多次元対応）
-        // 定数式を受理: リテラル、sizeof、算術演算、三項演算子。
-        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
-            self.advance()?; // consume '['
-            if self.peek()?.kind == TokenKind::CloseBracket {
-                // パラメータ用: `int arr[]` → Array(ty, 0)
-                ty = Type::Array(Box::new(ty), 0);
-            } else {
-                let size_expr = self.parse_conditional()?;
-                let n = Self::eval_const_expr(&size_expr)?;
-                ty = Type::Array(Box::new(ty), n as usize);
-            }
-            self.expect(&TokenKind::CloseBracket)?;
-        }
-
-        Ok((ty, name))
+        Ok(result)
     }
 
-    /// パラメータ宣言子のパース。
+    /// 直接宣言子ツリーを構築する。
     ///
-    /// 名前付き `int x` と名前なし `int` の両方を受け付ける。
-    /// システムヘッダの `int printf(const char *, ...)` 等に対応。
-    fn parse_param_declarator(&mut self, base_type: Type) -> Result<(Type, String)> {
-        // ポインタの `*` をカウント（const/volatile/restrict をスキップ）
-        let mut stars = 0;
-        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Star {
-            self.advance()?;
-            stars += 1;
-            while self.pos < self.tokens.len()
-                && matches!(
-                    self.peek()?.kind,
-                    TokenKind::KwConst | TokenKind::KwVolatile | TokenKind::KwRestrict
-                )
-            {
-                self.advance()?;
-            }
-        }
+    /// ベースケース: 識別子 or `( declarator_tree )`
+    /// サフィクス: `[N]` (常時), `(params)` (グループ後のみ)
+    fn parse_direct_declarator_tree(&mut self, allow_empty_name: bool) -> Result<DeclaratorNode> {
+        let mut from_group = false;
 
-        // 関数ポインタ: `(*name)(params)` or `(* _Nonnull)(...)` — parse-only
-        if self.pos < self.tokens.len()
+        let mut decl = if self.pos < self.tokens.len()
             && self.peek()?.kind == TokenKind::OpenParen
             && self.pos + 1 < self.tokens.len()
             && matches!(
                 self.tokens[self.pos + 1].kind,
                 TokenKind::Star | TokenKind::Caret
-            )
-        {
+            ) {
+            // グループ化宣言子: ( declarator_tree )
+            from_group = true;
             self.advance()?; // consume '('
-            self.advance()?; // consume '*' or '^'
-            // Clang nullability attributes: _Nullable, _Nonnull, _Null_unspecified
-            while self.pos < self.tokens.len() {
-                if let TokenKind::Identifier(attr) = &self.peek()?.kind
-                    && (attr.starts_with("_N") || attr.starts_with("_null"))
-                {
-                    self.advance()?;
-                    continue;
-                }
-                break;
-            }
-            // 名前があれば取得、なければ匿名（`(*)(...)`）
-            let name = if let TokenKind::Identifier(name) = &self.peek()?.kind {
-                let name = name.clone();
-                self.advance()?;
-                name
-            } else {
-                String::new()
-            };
+            let inner = self.parse_declarator_tree(allow_empty_name)?;
             self.expect(&TokenKind::CloseParen)?;
-            // 戻り値型: base_type に stars 分のポインタを適用
-            let mut return_type = base_type;
-            for _ in 0..stars {
-                return_type = Type::Pointer(Box::new(return_type));
-            }
-            // パラメータリストをパース（失敗時はフォールバック）
-            let ty = if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenParen {
-                if let Some((param_types, is_variadic)) = self.try_parse_fn_ptr_params() {
-                    Type::Pointer(Box::new(Type::Function {
-                        return_type: Box::new(return_type),
-                        param_types,
-                        is_variadic,
-                    }))
-                } else {
-                    self.skip_balanced_parens()?;
-                    Type::Pointer(Box::new(Type::Void))
-                }
-            } else {
-                Type::Pointer(Box::new(Type::Void))
-            };
-            return Ok((ty, name));
-        }
-
-        // 次のトークンが識別子なら名前付きパラメータ
-        let name = if self.pos < self.tokens.len() {
-            if let TokenKind::Identifier(name) = &self.peek()?.kind {
-                let name = name.clone();
-                self.advance()?;
-                name
-            } else {
-                // 名前なしパラメータ（例: `int`, `const char *`）
-                String::new()
-            }
+            inner
+        } else if self.pos < self.tokens.len()
+            && let TokenKind::Identifier(name) = &self.peek()?.kind
+        {
+            let name = name.clone();
+            self.advance()?;
+            DeclaratorNode::Name(name)
+        } else if allow_empty_name {
+            DeclaratorNode::Name(String::new())
         } else {
-            String::new()
+            let token = self.peek()?;
+            return Err(CompileError::ParseError(format!(
+                "expected identifier in declarator, got {:?} at line {}, column {}",
+                token.kind, token.span.line, token.span.column
+            )));
         };
 
-        let mut ty = base_type;
-        for _ in 0..stars {
-            ty = Type::Pointer(Box::new(ty));
-        }
-
-        // 配列サフィックス `[N]`（多次元対応）
-        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
-            self.advance()?; // consume '['
-            // 単純な `[N]` — IntLiteral 直後に `]`
-            if matches!(&self.peek()?.kind, TokenKind::IntLiteral(_))
-                && self.pos + 1 < self.tokens.len()
-                && self.tokens[self.pos + 1].kind == TokenKind::CloseBracket
-            {
-                if let TokenKind::IntLiteral(n) = &self.peek()?.kind {
-                    let n = *n as usize;
-                    self.advance()?;
-                    ty = Type::Array(Box::new(ty), n);
+        // サフィクスループ
+        while self.pos < self.tokens.len() {
+            match self.peek()?.kind {
+                // 配列サフィクス: [N] — 常時許可
+                TokenKind::OpenBracket => {
+                    self.advance()?; // consume '['
+                    let size = if self.peek()?.kind == TokenKind::CloseBracket {
+                        0
+                    } else {
+                        let size_expr = self.parse_conditional()?;
+                        Self::eval_const_expr(&size_expr)? as usize
+                    };
+                    self.expect(&TokenKind::CloseBracket)?;
+                    decl = DeclaratorNode::Array(Box::new(decl), size);
                 }
-            } else if self.peek()?.kind == TokenKind::CloseBracket {
-                ty = Type::Array(Box::new(ty), 0);
-            } else {
-                // 複雑な定数式: balanced bracket skip
-                let mut depth = 1;
-                while depth > 0 {
-                    let tok = self.advance()?;
-                    match tok.kind {
-                        TokenKind::OpenBracket => depth += 1,
-                        TokenKind::CloseBracket => depth -= 1,
-                        _ => {}
+                // 関数サフィクス: (params) — グループ後のみ
+                TokenKind::OpenParen if from_group => {
+                    if let Some((param_types, is_variadic)) = self.try_parse_fn_ptr_params() {
+                        decl = DeclaratorNode::Function {
+                            inner: Box::new(decl),
+                            param_types,
+                            is_variadic,
+                        };
+                    } else {
+                        self.skip_balanced_parens()?;
+                        decl = DeclaratorNode::Function {
+                            inner: Box::new(decl),
+                            param_types: None,
+                            is_variadic: false,
+                        };
                     }
+                    // 関数後に更に配列/関数サフィクスは実用上出ないが、
+                    // ループは継続可能（C 文法的には valid）
                 }
-                ty = Type::Array(Box::new(ty), 0);
-                continue;
+                _ => break,
             }
-            self.expect(&TokenKind::CloseBracket)?;
         }
 
-        Ok((ty, name))
+        Ok(decl)
     }
 
-    /// 抽象宣言子のパース（Chapter 14）。
-    ///
-    /// キャスト式 `(int *)`, `(double **)` で使用する。
-    /// 識別子なしで型だけを返す。
+    /// 宣言子ツリーをベース型に適用し、最終的な (Type, name) を返す。
+    fn apply_declarator(decl: DeclaratorNode, base_type: Type) -> (Type, String) {
+        match decl {
+            DeclaratorNode::Name(name) => (base_type, name),
+            DeclaratorNode::Pointer(inner) => {
+                Self::apply_declarator(*inner, Type::Pointer(Box::new(base_type)))
+            }
+            DeclaratorNode::Array(inner, size) => {
+                Self::apply_declarator(*inner, Type::Array(Box::new(base_type), size))
+            }
+            DeclaratorNode::Function {
+                inner,
+                param_types,
+                is_variadic,
+            } => {
+                let fn_type = Type::Function {
+                    return_type: Box::new(base_type),
+                    param_types,
+                    is_variadic,
+                };
+                Self::apply_declarator(*inner, fn_type)
+            }
+        }
+    }
+
+    /// 宣言子のパース。DeclaratorNode ツリーを構築し、ベース型に適用する。
+    fn parse_declarator(&mut self, base_type: Type) -> Result<(Type, String)> {
+        let tree = self.parse_declarator_tree(false)?;
+        Ok(Self::apply_declarator(tree, base_type))
+    }
+
+    /// パラメータ宣言子のパース。名前付き・名前なし両対応。
+    fn parse_param_declarator(&mut self, base_type: Type) -> Result<(Type, String)> {
+        let tree = self.parse_declarator_tree(true)?;
+        Ok(Self::apply_declarator(tree, base_type))
+    }
+
+    /// 抽象宣言子のパース。キャスト `(int *)` 等で使用。識別子なしで型だけを返す。
     fn parse_abstract_declarator(&mut self, base_type: Type) -> Result<Type> {
-        let mut stars = 0;
-        while self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::Star {
-            self.advance()?;
-            stars += 1;
-            // `* const` や `* volatile` をスキップ（parse-only）
-            while self.pos < self.tokens.len()
-                && matches!(
-                    self.peek()?.kind,
-                    TokenKind::KwConst | TokenKind::KwVolatile | TokenKind::KwRestrict
-                )
-            {
-                self.advance()?;
-            }
-        }
-
-        let mut ty = base_type;
-        for _ in 0..stars {
-            ty = Type::Pointer(Box::new(ty));
-        }
-
-        // Chapter 15: 配列サフィックス `[N]` for sizeof(int[10]) etc.
-        if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBracket {
-            self.advance()?; // consume '['
-            if let TokenKind::IntLiteral(n) = &self.peek()?.kind {
-                let n = *n as usize;
-                self.advance()?;
-                ty = Type::Array(Box::new(ty), n);
-            }
-            self.expect(&TokenKind::CloseBracket)?;
-        }
-
+        let tree = self.parse_declarator_tree(true)?;
+        let (ty, _) = Self::apply_declarator(tree, base_type);
         Ok(ty)
     }
 

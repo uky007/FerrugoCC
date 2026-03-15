@@ -256,6 +256,110 @@ int main(void) {
     assert_eq!(compile_and_run(source), 42);
 }
 
+/// pointer-to-array: int (*p)[3] = &arr; return (*p)[1]; → 20
+#[test]
+fn declarator_pointer_to_array() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int main(void) {
+    int arr[3];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 12;
+    int (*p)[3] = &arr;
+    return (*p)[1];
+}
+"#;
+    assert_eq!(compile_and_run(source), 20);
+}
+
+/// pointer-to-array: 加算でアクセス → 42
+#[test]
+fn declarator_pointer_to_array_sum() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int main(void) {
+    int arr[3];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 12;
+    int (*p)[3] = &arr;
+    return (*p)[0] + (*p)[1] + (*p)[2];
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
+
+/// abstract declarator grouping: (int (*)[3]) cast → 42
+#[test]
+fn declarator_abstract_group_cast() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int main(void) {
+    int arr[3];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 12;
+    int (*p)[3] = (int (*)[3])&arr;
+    return (*p)[0] + (*p)[1] + (*p)[2];
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
+
+/// abstract declarator grouping: sizeof(int (*)[3]) → 8 (pointer size)
+#[test]
+fn declarator_abstract_group_sizeof() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int main(void) {
+    return sizeof(int (*)[3]);
+}
+"#;
+    assert_eq!(compile_and_run(source), 8);
+}
+
+/// abstract declarator: fn ptr cast (int (*)(int, int)) → 42
+#[test]
+fn declarator_abstract_fn_ptr_cast() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int add(int a, int b) { return a + b; }
+int main(void) {
+    int (*op)(int, int) = (int (*)(int, int))add;
+    return op(30, 12);
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
+
+/// function returning pointer: int *f(void) → 42
+#[test]
+fn declarator_fn_returning_pointer() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int g_val = 42;
+int *get_ptr(void) { return &g_val; }
+int main(void) {
+    int *p = get_ptr();
+    return *p;
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
+
 /// 関数ポインタの切り替え → 42
 #[test]
 fn fn_ptr_reassign() {

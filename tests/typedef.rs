@@ -301,6 +301,79 @@ int main(void) {
     assert_eq!(compile_and_run(source), 30);
 }
 
+/// typedef int (*binop_t)(int, int) — fn ptr typedef → 42
+#[test]
+fn typedef_fn_ptr() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+typedef int (*binop_t)(int, int);
+int add(int a, int b) { return a + b; }
+int main(void) {
+    binop_t op = add;
+    return op(30, 12);
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
+
+/// typedef int handler_t(int, int) — fn type typedef + pointer decl → 42
+#[test]
+fn typedef_fn_type() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+typedef int handler_t(int, int);
+int add(int a, int b) { return a + b; }
+int main(void) {
+    handler_t *op = add;
+    return op(30, 12);
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
+
+/// typedef int *retptr_t(void) — fn type returning pointer → 42
+#[test]
+fn typedef_fn_returning_pointer() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+typedef int *retptr_t(void);
+int g_val = 42;
+int *get_ptr(void) { return &g_val; }
+int main(void) {
+    retptr_t *fp = get_ptr;
+    int *p = fp();
+    return *p;
+}
+"#;
+    assert_eq!(compile_and_run(source), 42);
+}
+
+/// typedef fn ptr 経由の apply パターン → 84
+#[test]
+fn typedef_fn_ptr_apply() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+typedef int (*binop_t)(int, int);
+int add(int a, int b) { return a + b; }
+int sub(int a, int b) { return a - b; }
+int apply(binop_t op, int x, int y) { return op(x, y); }
+int main(void) {
+    int r1 = apply(add, 30, 12);
+    int r2 = apply(sub, 50, 8);
+    return r1 + r2;
+}
+"#;
+    assert_eq!(compile_and_run(source), 84);
+}
+
 /// ブロック内 typedef: → 99
 #[test]
 fn typedef_block_scope() {

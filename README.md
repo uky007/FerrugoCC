@@ -37,7 +37,7 @@ cargo install --path .
 **Language features:**
 - Types: `int`, `long`, `unsigned`, `double`, `char`, `void`, pointers, arrays, structs
 - Control flow: `if`/`else`, `while`, `do`/`while`, `for`, `switch`/`case`, `goto`/`label`, ternary `?:`
-- Functions: declarations, definitions, variadic (`va_list`/`va_arg`), function pointers (basic)
+- Functions: declarations, definitions, variadic (`va_list`/`va_arg`), function pointers (compositional declarator tree — arrays of fn ptrs, struct member fn ptrs, pointer-to-array)
 - Declarations: `typedef`, `enum`, `struct`, `static`, `extern`, file-scope initializers
 - Operators: arithmetic, bitwise (`& | ^ << >>`), logical, comparison, compound assignment
 - Preprocessor: delegated to `gcc -E` (handles `#include`, `#define`, `#ifdef`, etc.)
