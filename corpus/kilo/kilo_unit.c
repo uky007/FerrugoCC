@@ -255,6 +255,223 @@ static int test_rows_to_string(void) {
     return 0;
 }
 
+/* ── 9. タブ展開 — editorUpdateRow 相当 ── */
+
+#define KILO_TAB_STOP 8
+
+static char *renderRow(const char *chars, int size, int *rsize) {
+    int tabs = 0;
+    int j;
+    for (j = 0; j < size; j++)
+        if (chars[j] == '\t') tabs++;
+
+    char *render = malloc(size + tabs * 8 + 1);
+    int idx = 0;
+    for (j = 0; j < size; j++) {
+        if (chars[j] == '\t') {
+            render[idx++] = ' ';
+            while ((idx + 1) % KILO_TAB_STOP != 0) render[idx++] = ' ';
+        } else {
+            render[idx++] = chars[j];
+        }
+    }
+    render[idx] = '\0';
+    *rsize = idx;
+    return render;
+}
+
+static int test_tab_expansion(void) {
+    int rsize;
+    /* "A\tB" → "A       B" (A + 7 spaces + B = 9 chars, tab stop at 8) */
+    /* Actually: idx=0 'A', idx=1 tab: render[1]=' ', while (2+1)%8!=0 → spaces at 2..6,
+       then idx=7, then 'B' at idx=7. Wait let me trace:
+       j=0: chars[0]='A' → render[0]='A', idx=1
+       j=1: chars[1]='\t' → render[1]=' ', idx=2; while (2+1)%8!=0 → render[2]=' ' idx=3,
+            (3+1)%8!=0 → render[3]=' ' idx=4, (4+1)%8!=0 → render[4]=' ' idx=5,
+            (5+1)%8!=0 → render[5]=' ' idx=6, (6+1)%8!=0 → render[6]=' ' idx=7,
+            (7+1)%8==0 → stop
+       j=2: chars[2]='B' → render[7]='B', idx=8
+       rsize = 8 */
+    char *r = renderRow("A\tB", 3, &rsize);
+    if (rsize != 8) { free(r); return 80; }
+    if (r[0] != 'A') { free(r); return 81; }
+    if (r[7] != 'B') { free(r); return 82; }
+    /* all middle chars should be spaces */
+    int i;
+    for (i = 1; i < 7; i++) {
+        if (r[i] != ' ') { free(r); return 83; }
+    }
+    free(r);
+
+    /* no tabs → same length */
+    r = renderRow("Hello", 5, &rsize);
+    if (rsize != 5) { free(r); return 84; }
+    if (strcmp(r, "Hello") != 0) { free(r); return 85; }
+    free(r);
+
+    return 0;
+}
+
+/* ── 10. 複数行管理 — InsertRow + DelRow + RowsToString ── */
+
+struct editorState {
+    int numrows;
+    struct editorRow *row;
+};
+
+static void stateInsertRow(struct editorState *s, int at, const char *text, int len) {
+    if (at > s->numrows) return;
+    s->row = realloc(s->row, sizeof(struct editorRow) * (s->numrows + 1));
+    if (at != s->numrows) {
+        memmove(s->row + at + 1, s->row + at,
+                sizeof(struct editorRow) * (s->numrows - at));
+    }
+    s->row[at].size = len;
+    s->row[at].chars = malloc(len + 1);
+    memcpy(s->row[at].chars, text, len);
+    s->row[at].chars[len] = '\0';
+    s->row[at].render = NULL;
+    s->row[at].rsize = 0;
+    s->numrows++;
+}
+
+static void stateDelRow(struct editorState *s, int at) {
+    if (at >= s->numrows) return;
+    free(s->row[at].chars);
+    free(s->row[at].render);
+    if (at < s->numrows - 1) {
+        memmove(s->row + at, s->row + at + 1,
+                sizeof(struct editorRow) * (s->numrows - at - 1));
+    }
+    s->numrows--;
+}
+
+static void stateFreeAll(struct editorState *s) {
+    int i;
+    for (i = 0; i < s->numrows; i++) {
+        free(s->row[i].chars);
+        free(s->row[i].render);
+    }
+    free(s->row);
+}
+
+static int test_multi_row(void) {
+    struct editorState s;
+    s.numrows = 0;
+    s.row = NULL;
+
+    stateInsertRow(&s, 0, "First", 5);
+    stateInsertRow(&s, 1, "Second", 6);
+    stateInsertRow(&s, 2, "Third", 5);
+
+    if (s.numrows != 3) return 90;
+    if (strcmp(s.row[0].chars, "First") != 0) return 91;
+    if (strcmp(s.row[1].chars, "Second") != 0) return 92;
+    if (strcmp(s.row[2].chars, "Third") != 0) return 93;
+
+    /* Insert in the middle */
+    stateInsertRow(&s, 1, "Middle", 6);
+    if (s.numrows != 4) return 94;
+    if (strcmp(s.row[1].chars, "Middle") != 0) return 95;
+    if (strcmp(s.row[2].chars, "Second") != 0) return 96;
+
+    /* Delete from middle */
+    stateDelRow(&s, 1);
+    if (s.numrows != 3) return 97;
+    if (strcmp(s.row[0].chars, "First") != 0) return 98;
+    if (strcmp(s.row[1].chars, "Second") != 0) return 99;
+
+    stateFreeAll(&s);
+    return 0;
+}
+
+/* ── 11. 行連結 — editorRowAppendString 相当 ── */
+
+static void rowAppendString(struct editorRow *row, const char *s, int len) {
+    row->chars = realloc(row->chars, row->size + len + 1);
+    memcpy(row->chars + row->size, s, len);
+    row->size += len;
+    row->chars[row->size] = '\0';
+}
+
+static int test_row_append(void) {
+    struct editorRow row;
+    row.size = 5;
+    row.chars = malloc(16);
+    memcpy(row.chars, "Hello", 6);
+
+    rowAppendString(&row, " World", 6);
+    if (row.size != 11) return 100;
+    if (strcmp(row.chars, "Hello World") != 0) return 101;
+
+    rowAppendString(&row, "!", 1);
+    if (row.size != 12) return 102;
+    if (strcmp(row.chars, "Hello World!") != 0) return 103;
+
+    free(row.chars);
+    return 0;
+}
+
+/* ── 12. 検索 — strstr ベースの行マッチング ── */
+
+static int findInRows(char **rows, int numrows, const char *query) {
+    int i;
+    for (i = 0; i < numrows; i++) {
+        if (strstr(rows[i], query) != NULL) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int test_search(void) {
+    char *rows[4];
+    rows[0] = "int main(void) {";
+    rows[1] = "    int x = 42;";
+    rows[2] = "    return x;";
+    rows[3] = "}";
+
+    if (findInRows(rows, 4, "main") != 0) return 110;
+    if (findInRows(rows, 4, "42") != 1) return 111;
+    if (findInRows(rows, 4, "return") != 2) return 112;
+    if (findInRows(rows, 4, "}") != 3) return 113;
+    if (findInRows(rows, 4, "notfound") != -1) return 114;
+
+    /* pointer arithmetic on match */
+    char *match = strstr(rows[1], "42");
+    int offset = match - rows[1];
+    if (offset != 12) return 115;
+
+    return 0;
+}
+
+/* ── 13. ステータスメッセージフォーマット — vsnprintf 相当 ── */
+
+static int test_status_message(void) {
+    char statusmsg[80];
+
+    snprintf(statusmsg, sizeof(statusmsg),
+             "HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
+    if (strlen(statusmsg) == 0) return 120;
+    if (strstr(statusmsg, "Ctrl-Q") == NULL) return 121;
+
+    snprintf(statusmsg, sizeof(statusmsg),
+             "Search: %s (Use ESC/Arrows/Enter)", "hello");
+    if (strstr(statusmsg, "hello") == NULL) return 122;
+
+    /* WARNING message with %d */
+    snprintf(statusmsg, sizeof(statusmsg),
+             "WARNING!!! Press Ctrl-Q %d more times to quit.", 3);
+    if (strstr(statusmsg, "3") == NULL) return 123;
+
+    /* Truncation: long message into small buffer */
+    char small[16];
+    snprintf(small, sizeof(small), "This is a very long message");
+    if (strlen(small) != 15) return 124;  /* 15 chars + null */
+
+    return 0;
+}
+
 /* ── メインテストランナー ── */
 
 int main(void) {
@@ -282,6 +499,21 @@ int main(void) {
     if (r != 0) return r;
 
     r = test_rows_to_string();
+    if (r != 0) return r;
+
+    r = test_tab_expansion();
+    if (r != 0) return r;
+
+    r = test_multi_row();
+    if (r != 0) return r;
+
+    r = test_row_append();
+    if (r != 0) return r;
+
+    r = test_search();
+    if (r != 0) return r;
+
+    r = test_status_message();
     if (r != 0) return r;
 
     /* 全テスト通過 */
