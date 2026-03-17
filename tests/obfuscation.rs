@@ -1914,3 +1914,49 @@ fn test_opsec_warn_utf8_no_panic() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Regression: cvtsi2sd memory dst (obfuscated IntToDouble)
+///
+/// Under heavy register pressure from obfuscation, both src and dst of
+/// cvtsi2sd can be memory operands. The regalloc fixup must rewrite dst
+/// to an XMM register (the x86 ISA requires it).
+///
+/// Bug: fixup pattern 1 (memory src → R10) fires and emits a new
+/// Cvtsi2sd with R10 src, but the original memory dst is preserved.
+/// Pattern 2 (memory dst → XMM15) never sees the rewritten instruction
+/// because the fixup is single-pass.
+#[test]
+fn test_obfuscate_int_to_double_regalloc() {
+    if !can_run_x86_64() {
+        return;
+    }
+    // This exercises IntToDouble (cvtsi2sd) under obfuscation register
+    // pressure. Multiple local variables and int↔double casts ensure the
+    // regalloc can spill cvtsi2sd operands to memory.
+    let source = r#"
+int main(void) {
+    int a = 10, b = 20, c = 30, d = 40;
+    double da = (double)a;
+    double db = (double)b;
+    double dc = (double)c;
+    double dd = (double)d;
+    double sum = da + db + dc + dd;  /* 100.0 */
+    int isum = (int)sum;
+    /* round-trip: int → double → int should preserve value */
+    if (isum != 100) return 1;
+
+    /* more pressure: nested conversions */
+    int e = 5, f = 7;
+    double de = (double)e;
+    double df = (double)f;
+    double prod = de * df;   /* 35.0 */
+    int iprod = (int)prod;
+    if (iprod != 35) return 2;
+
+    /* result: 100 - 35 - 23 = 42 */
+    return isum - iprod - 23;
+}
+"#;
+    assert_eq!(compile_and_run(source, true), 42);
+}
+

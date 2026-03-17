@@ -1254,21 +1254,27 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             });
         }
 
-        // Binary: double memory,memory → via XMM15
+        // Binary: double with memory dst → dst must be XMM register.
+        // Load dst into XMM15, operate (src can be memory), store back.
         Instruction::Binary {
             asm_type,
             op,
             ref src,
             ref dst,
-        } if asm_type == AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) => {
+        } if asm_type == AsmType::Double && is_memory_operand(dst) => {
             out.push(Instruction::Mov {
                 asm_type: AsmType::Double,
-                src: src.clone(),
+                src: dst.clone(),
                 dst: Operand::Register(Reg::XMM15),
             });
             out.push(Instruction::Binary {
                 asm_type,
                 op,
+                src: src.clone(),
+                dst: Operand::Register(Reg::XMM15),
+            });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Double,
                 src: Operand::Register(Reg::XMM15),
                 dst: dst.clone(),
             });
@@ -1531,40 +1537,43 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             });
         }
 
-        // Cvtsi2sd: immediate src → load to R10 first
+        // Cvtsi2sd: dst must be XMM register. Handle all problematic cases:
+        // 1. immediate src → load to R10 first
+        // 2. memory dst → use XMM15 as intermediate
+        // 3. both → fix both
         Instruction::Cvtsi2sd {
             asm_type,
             ref src,
             ref dst,
-        } if is_imm(src) => {
-            out.push(Instruction::Mov {
-                asm_type,
-                src: src.clone(),
-                dst: Operand::Register(Reg::R10),
-            });
-            out.push(Instruction::Cvtsi2sd {
-                asm_type,
-                src: Operand::Register(Reg::R10),
-                dst: dst.clone(),
-            });
-        }
-
-        // Cvtsi2sd: memory dst → via XMM15
-        Instruction::Cvtsi2sd {
-            asm_type,
-            ref src,
-            ref dst,
-        } if is_memory_operand(dst) => {
-            out.push(Instruction::Cvtsi2sd {
-                asm_type,
-                src: src.clone(),
-                dst: Operand::Register(Reg::XMM15),
-            });
-            out.push(Instruction::Mov {
-                asm_type: AsmType::Double,
-                src: Operand::Register(Reg::XMM15),
-                dst: dst.clone(),
-            });
+        } if is_imm(src) || is_memory_operand(dst) => {
+            let fixed_src = if is_imm(src) {
+                out.push(Instruction::Mov {
+                    asm_type,
+                    src: src.clone(),
+                    dst: Operand::Register(Reg::R10),
+                });
+                Operand::Register(Reg::R10)
+            } else {
+                src.clone()
+            };
+            if is_memory_operand(dst) {
+                out.push(Instruction::Cvtsi2sd {
+                    asm_type,
+                    src: fixed_src,
+                    dst: Operand::Register(Reg::XMM15),
+                });
+                out.push(Instruction::Mov {
+                    asm_type: AsmType::Double,
+                    src: Operand::Register(Reg::XMM15),
+                    dst: dst.clone(),
+                });
+            } else {
+                out.push(Instruction::Cvtsi2sd {
+                    asm_type,
+                    src: fixed_src,
+                    dst: dst.clone(),
+                });
+            }
         }
 
         // Cvttsd2si: memory dst → via R11

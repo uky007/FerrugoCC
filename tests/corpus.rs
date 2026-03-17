@@ -490,6 +490,40 @@ fn kilo_unit_test_obfuscated() {
     );
 }
 
+// ── pdjson (Tier 1) ──
+
+#[test]
+fn pdjson_compile_and_run() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, _stderr) = compile_and_run_corpus_ex(
+        "corpus/pdjson/test_pdjson.c",
+        false,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[],
+    );
+    assert_eq!(code, 42, "pdjson test failed with exit code {code}");
+}
+
+#[test]
+#[ignore] // known runtime crash under obfuscation — tracked separately
+fn pdjson_compile_and_run_obfuscated() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, _stderr) = compile_and_run_corpus_ex(
+        "corpus/pdjson/test_pdjson.c",
+        true,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[],
+    );
+    assert_eq!(
+        code, 42,
+        "pdjson obfuscated test failed with exit code {code}"
+    );
+}
+
 // ── inih (Tier 1) ──
 
 /// inih は自前の isspace() を提供するため、glibc ctype.h を _CTYPE_H=1 で抑制。

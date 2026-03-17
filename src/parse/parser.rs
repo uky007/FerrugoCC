@@ -421,13 +421,14 @@ impl<'a> Parser<'a> {
                     count += 1;
                 }
                 TokenKind::KwStruct | TokenKind::KwUnion => {
+                    let is_union = self.peek()?.kind == TokenKind::KwUnion;
                     if count > 0 {
                         return Err(CompileError::ParseError(
                             "cannot combine 'struct'/'union' with other type specifiers"
                                 .to_string(),
                         ));
                     }
-                    return self.parse_struct_type();
+                    return self.parse_struct_type(is_union);
                 }
                 TokenKind::KwEnum => {
                     if count > 0 {
@@ -507,8 +508,9 @@ impl<'a> Parser<'a> {
     /// 構造体型のパース（Chapter 18）。
     ///
     /// `struct tag { members }` または `struct tag` を解析する。
-    fn parse_struct_type(&mut self) -> Result<Type> {
-        self.advance()?; // consume 'struct'
+    /// is_union: true なら union として扱い、メンバレイアウトを offset 0 にする。
+    fn parse_struct_type(&mut self, is_union: bool) -> Result<Type> {
+        self.advance()?; // consume 'struct' or 'union'
 
         // タグ名を取得（匿名 struct/union は合成名を生成）
         let tag = match &self.peek()?.kind {
@@ -568,14 +570,89 @@ impl<'a> Parser<'a> {
             }
             self.expect(&TokenKind::CloseBrace)?;
 
-            // タグテーブルに登録
-            self.struct_tags.insert(tag.clone(), members.clone());
+            // 自己参照修正: メンバ型内の空 self 参照を更新
+            let mut fixed_members = members.clone();
+            for m in fixed_members.iter_mut() {
+                Self::fixup_type_members(&mut m.member_type, &tag, &members);
+            }
 
-            Ok(Type::Struct { tag, members })
+            // タグテーブルに登録（自己参照修正済み）
+            self.struct_tags.insert(tag.clone(), fixed_members.clone());
+
+            // typedef/他 struct が前方宣言時の空メンバを持っている場合、更新する
+            self.fixup_forward_typedefs(&tag, &fixed_members);
+
+            Ok(Type::Struct {
+                tag,
+                members: fixed_members,
+                is_union,
+            })
         } else {
             // 前方参照: タグテーブルからメンバ情報を取得
             let members = self.struct_tags.get(&tag).cloned().unwrap_or_default();
-            Ok(Type::Struct { tag, members })
+            // union フラグはタグテーブルから復元できないため、
+            // 前方参照でも呼び出し側の is_union を使う
+            Ok(Type::Struct {
+                tag,
+                members,
+                is_union,
+            })
+        }
+    }
+
+    /// struct 定義後に、前方宣言時の空メンバを持つ typedef や
+    /// 他 struct のメンバ型を再帰的に更新する。
+    fn fixup_forward_typedefs(&mut self, tag: &str, members: &[MemberDecl]) {
+        for (_name, existing) in self.typedef_names.iter_mut() {
+            Self::fixup_type_members(existing, tag, members);
+        }
+        // 他の struct 定義内のメンバ型も更新（前方参照ポインタ等）
+        let other_tags: Vec<String> = self
+            .struct_tags
+            .keys()
+            .filter(|k| *k != tag)
+            .cloned()
+            .collect();
+        for other_tag in other_tags {
+            if let Some(other_members) = self.struct_tags.get_mut(&other_tag) {
+                for m in other_members.iter_mut() {
+                    Self::fixup_type_members(&mut m.member_type, tag, members);
+                }
+            }
+        }
+    }
+
+    fn fixup_type_members(ty: &mut Type, tag: &str, members: &[MemberDecl]) {
+        match ty {
+            Type::Struct {
+                tag: t,
+                members: m,
+                ..
+            } => {
+                if t == tag && m.is_empty() {
+                    *m = members.to_vec();
+                } else {
+                    // 他 struct のメンバ型にも再帰的に適用
+                    for md in m.iter_mut() {
+                        Self::fixup_type_members(&mut md.member_type, tag, members);
+                    }
+                }
+            }
+            Type::Pointer(inner) => Self::fixup_type_members(inner, tag, members),
+            Type::Array(inner, _) => Self::fixup_type_members(inner, tag, members),
+            Type::Function {
+                return_type,
+                param_types,
+                ..
+            } => {
+                Self::fixup_type_members(return_type, tag, members);
+                if let Some(params) = param_types {
+                    for p in params.iter_mut() {
+                        Self::fixup_type_members(p, tag, members);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1503,6 +1580,60 @@ impl<'a> Parser<'a> {
         Ok(Expr::CompoundInit(inits))
     }
 
+    /// case ラベルの定数式をパースする。
+    /// `(-1)`, `-1`, `42`, `'a'`, `ENUM_CONST`, `(expr)` 等に対応。
+    fn parse_case_constant(&mut self) -> Result<i64> {
+        // 括弧で囲まれた定数式: case (expr):
+        if self.peek()?.kind == TokenKind::OpenParen {
+            self.advance()?;
+            let val = self.parse_case_constant()?;
+            self.expect(&TokenKind::CloseParen)?;
+            return Ok(val);
+        }
+        // 負値対応: '-' リテラル
+        let negative = if self.peek()?.kind == TokenKind::Minus {
+            self.advance()?;
+            true
+        } else {
+            false
+        };
+        let val_token = self.peek()?;
+        let value = match &val_token.kind {
+            TokenKind::IntLiteral(v) => {
+                let v = *v;
+                self.advance()?;
+                v
+            }
+            TokenKind::LongLiteral(v) => {
+                let v = *v;
+                self.advance()?;
+                v
+            }
+            TokenKind::CharLiteral(v) => {
+                let v = *v as i64;
+                self.advance()?;
+                v
+            }
+            TokenKind::Identifier(name) => {
+                let name = name.clone();
+                self.advance()?;
+                *self.enum_constants.get(&name).ok_or_else(|| {
+                    CompileError::ParseError(format!(
+                        "expected constant expression in case label, got '{}'",
+                        name
+                    ))
+                })?
+            }
+            other => {
+                return Err(CompileError::ParseError(format!(
+                    "expected constant expression in case label, got {:?}",
+                    other
+                )));
+            }
+        };
+        Ok(if negative { -value } else { value })
+    }
+
     /// `<statement> ::= "return" <exp> ";" | <exp> ";" | ";"
     ///                | "if" "(" <exp> ")" <statement> ("else" <statement>)?
     ///                | "{" <block_item>* "}"`
@@ -1590,7 +1721,8 @@ impl<'a> Parser<'a> {
                     | TokenKind::KwStatic
                     | TokenKind::KwExtern
                     | TokenKind::KwStruct
-                    | TokenKind::KwEnum => {
+                    | TokenKind::KwEnum
+                    | TokenKind::KwConst => {
                         // parse_declaration() returns Vec<Declaration> for comma-separated decls
                         ForInit::Declaration(self.parse_declaration()?)
                     }
@@ -1659,48 +1791,7 @@ impl<'a> Parser<'a> {
             // case <const>: stmt
             TokenKind::KwCase => {
                 self.advance()?;
-                // 負値対応: '-' リテラル
-                let negative = if self.peek()?.kind == TokenKind::Minus {
-                    self.advance()?;
-                    true
-                } else {
-                    false
-                };
-                let val_token = self.peek()?;
-                let value = match &val_token.kind {
-                    TokenKind::IntLiteral(v) => {
-                        let v = *v;
-                        self.advance()?;
-                        v
-                    }
-                    TokenKind::LongLiteral(v) => {
-                        let v = *v;
-                        self.advance()?;
-                        v
-                    }
-                    TokenKind::CharLiteral(v) => {
-                        let v = *v as i64;
-                        self.advance()?;
-                        v
-                    }
-                    TokenKind::Identifier(name) => {
-                        let name = name.clone();
-                        self.advance()?;
-                        *self.enum_constants.get(&name).ok_or_else(|| {
-                            CompileError::ParseError(format!(
-                                "expected constant expression in case label, got '{}'",
-                                name
-                            ))
-                        })?
-                    }
-                    other => {
-                        return Err(CompileError::ParseError(format!(
-                            "expected constant expression in case label, got {:?}",
-                            other
-                        )));
-                    }
-                };
-                let value = if negative { -value } else { value };
+                let value = self.parse_case_constant()?;
                 self.expect(&TokenKind::Colon)?;
                 let body = Box::new(self.parse_statement()?);
                 Ok(Statement::Case { value, body })

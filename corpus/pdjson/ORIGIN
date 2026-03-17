@@ -1,0 +1,11 @@
+pdjson — public domain JSON parser in C
+Source: https://github.com/skeeto/pdjson
+License: Unlicense (public domain)
+Retrieved: 2026-03-16
+
+Local patches:
+- test_pdjson.c: FerrugoCC test harness (exit 42 on success)
+
+Files from upstream (unmodified):
+- pdjson.h
+- pdjson.c

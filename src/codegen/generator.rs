@@ -1957,8 +1957,13 @@ fn generate_function_call(
         });
     }
 
-    // Indirect call if name refers to a variable (function pointer)
-    if var_types.contains_key(name) {
+    // Indirect call if name refers to a function pointer variable.
+    // Check both existence AND that the type is actually a function pointer
+    // (avoids false hits from local variables that shadow function names).
+    let is_fn_ptr_var = var_types.get(name).is_some_and(|ty| {
+        matches!(ty, Type::Pointer(inner) if matches!(inner.as_ref(), Type::Function { .. }))
+    });
+    if is_fn_ptr_var {
         let fn_ptr_op = val_to_operand(&TackyVal::Var(name.to_string()), static_vars, stack_vars)?;
         instrs.push(Instruction::Mov {
             asm_type: AsmType::Quadword,

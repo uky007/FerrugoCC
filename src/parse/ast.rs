@@ -65,7 +65,10 @@
 //! ```
 
 /// 型（Chapter 11, 12, 14, 16, 17, 18）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Struct variant の等価比較は tag 名のみで行う（C セマンティクス:
+/// 同一タグ名の struct は前方宣言と定義で同一型）。
+#[derive(Debug, Clone, Eq)]
 pub enum Type {
     /// `void` — 不完全型。関数の戻り値やキャスト先として使用（Chapter 17）
     Void,
@@ -87,11 +90,13 @@ pub enum Type {
     Pointer(Box<Type>),
     /// 配列型（Chapter 15）。`int[10]` → `Array(Box::new(Int), 10)`
     Array(Box<Type>, usize),
-    /// 構造体型（Chapter 18）。tag 名とメンバリストを保持。
+    /// 構造体/共用体型（Chapter 18）。tag 名とメンバリストを保持。
     /// members が空の場合は前方宣言（不完全型）。
+    /// is_union: true の場合、全メンバが offset 0 に配置される。
     Struct {
         tag: String,
         members: Vec<MemberDecl>,
+        is_union: bool,
     },
     /// `va_list` 型 — 可変長引数アクセス用の24バイト構造体（System V AMD64 ABI）
     VaList,
@@ -107,6 +112,39 @@ pub enum Type {
         param_types: Option<Vec<Type>>,
         is_variadic: bool,
     },
+}
+
+/// Struct variant はタグ名のみで等価比較する（C の名前的同一性）。
+impl PartialEq for Type {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Type::Void, Type::Void) => true,
+            (Type::Char, Type::Char) => true,
+            (Type::UChar, Type::UChar) => true,
+            (Type::Int, Type::Int) => true,
+            (Type::Long, Type::Long) => true,
+            (Type::UInt, Type::UInt) => true,
+            (Type::ULong, Type::ULong) => true,
+            (Type::Double, Type::Double) => true,
+            (Type::VaList, Type::VaList) => true,
+            (Type::Pointer(a), Type::Pointer(b)) => a == b,
+            (Type::Array(a, sa), Type::Array(b, sb)) => a == b && sa == sb,
+            (Type::Struct { tag: ta, .. }, Type::Struct { tag: tb, .. }) => ta == tb, // nominal
+            (
+                Type::Function {
+                    return_type: ra,
+                    param_types: pa,
+                    is_variadic: va,
+                },
+                Type::Function {
+                    return_type: rb,
+                    param_types: pb,
+                    is_variadic: vb,
+                },
+            ) => ra == rb && pa == pb && va == vb,
+            _ => false,
+        }
+    }
 }
 
 /// 構造体メンバ宣言（Chapter 18）。
@@ -194,11 +232,19 @@ impl Type {
             Type::Int | Type::UInt => 4,
             Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
             Type::Array(elem, count) => elem.size() * count,
-            Type::Struct { members, tag } => {
+            Type::Struct {
+                members,
+                tag,
+                is_union,
+            } => {
                 if members.is_empty() {
                     panic!("incomplete struct '{}' has no size", tag);
                 }
-                struct_size(members)
+                if *is_union {
+                    union_size(members)
+                } else {
+                    struct_size(members)
+                }
             }
             Type::VaList => 24,
         }
@@ -213,7 +259,7 @@ impl Type {
             Type::Int | Type::UInt => 4,
             Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
             Type::Array(elem, _) => elem.alignment(),
-            Type::Struct { members, tag } => {
+            Type::Struct { members, tag, .. } => {
                 if members.is_empty() {
                     panic!("incomplete struct '{}' has no alignment", tag);
                 }
@@ -252,20 +298,46 @@ pub fn struct_size(members: &[MemberDecl]) -> usize {
     offset
 }
 
-/// 構造体メンバのオフセットと型を取得する。
-pub fn struct_member_offset(members: &[MemberDecl], name: &str) -> Option<(usize, Type)> {
-    let mut offset = 0;
-    for m in members {
-        let align = m.member_type.alignment();
-        if offset % align != 0 {
-            offset += align - (offset % align);
-        }
-        if m.name == name {
-            return Some((offset, m.member_type.clone()));
-        }
-        offset += m.member_type.size();
+/// 共用体の全体サイズを計算する（最大メンバサイズ、アラインメント切り上げ）。
+pub fn union_size(members: &[MemberDecl]) -> usize {
+    let max_member = members.iter().map(|m| m.member_type.size()).max().unwrap_or(0);
+    let align = struct_alignment(members);
+    if max_member % align != 0 {
+        max_member + align - (max_member % align)
+    } else {
+        max_member
     }
-    None
+}
+
+/// 構造体/共用体メンバのオフセットと型を取得する。
+/// is_union が true の場合、全メンバが offset 0。
+pub fn struct_member_offset_ex(
+    members: &[MemberDecl],
+    name: &str,
+    is_union: bool,
+) -> Option<(usize, Type)> {
+    if is_union {
+        // union: 全メンバ offset 0
+        for m in members {
+            if m.name == name {
+                return Some((0, m.member_type.clone()));
+            }
+        }
+        None
+    } else {
+        let mut offset = 0;
+        for m in members {
+            let align = m.member_type.alignment();
+            if offset % align != 0 {
+                offset += align - (offset % align);
+            }
+            if m.name == name {
+                return Some((offset, m.member_type.clone()));
+            }
+            offset += m.member_type.size();
+        }
+        None
+    }
 }
 
 /// ストレージクラス指定子（Chapter 10）。

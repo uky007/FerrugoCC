@@ -8,7 +8,7 @@ use super::tacky_ast::*;
 use crate::error::{CompileError, Result};
 use crate::parse::ast::{
     BinaryOp, BlockItem, Declaration, Expr, ForInit, FunctionDecl, Program, Statement,
-    StorageClass, TopLevelDecl, Type, UnaryOp, struct_member_offset,
+    StorageClass, TopLevelDecl, Type, UnaryOp, struct_member_offset_ex,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -417,8 +417,8 @@ fn expr_type(
         Expr::SizeOfType(_) | Expr::SizeOfExpr(_) => Type::ULong,
         Expr::Dot(inner, member_name) => {
             let inner_t = expr_type(inner, var_map, func_table);
-            if let Type::Struct { ref members, .. } = inner_t {
-                struct_member_offset(members, member_name)
+            if let Type::Struct { ref members, is_union, .. } = inner_t {
+                struct_member_offset_ex(members, member_name, is_union)
                     .map(|(_, t)| t)
                     .unwrap_or(Type::Int)
             } else {
@@ -1681,8 +1681,8 @@ impl TackyGenerator {
 
             Expr::Dot(inner, member_name) => {
                 let inner_type = expr_type(inner, &self.var_map, func_table);
-                if let Type::Struct { ref members, .. } = inner_type {
-                    let (member_off, member_type) = struct_member_offset(members, member_name)
+                if let Type::Struct { ref members, is_union, .. } = inner_type {
+                    let (member_off, member_type) = struct_member_offset_ex(members, member_name, is_union)
                         .ok_or_else(|| {
                             CompileError::CodegenError(format!(
                                 "no member '{}' in struct",
@@ -1693,8 +1693,9 @@ impl TackyGenerator {
                     // Get inner's address
                     let (inner_addr, _) = self.generate_lvalue_addr(inner, instrs, func_table)?;
 
-                    if member_type.is_struct() {
-                        // Nested struct: return address + offset
+                    if member_type.is_struct() || matches!(member_type, Type::Array(..)) {
+                        // Nested struct or array member: return address + offset
+                        // (arrays decay to pointers — the address IS the value)
                         if member_off != 0 {
                             let offset_val =
                                 TackyVal::Constant(TackyConst::Long(member_off as i64));
@@ -1848,8 +1849,8 @@ impl TackyGenerator {
             }
             Expr::Dot(inner, member_name) => {
                 let inner_type = expr_type(inner, &self.var_map, func_table);
-                if let Type::Struct { ref members, .. } = inner_type {
-                    let (member_off, member_type) = struct_member_offset(members, member_name)
+                if let Type::Struct { ref members, is_union, .. } = inner_type {
+                    let (member_off, member_type) = struct_member_offset_ex(members, member_name, is_union)
                         .ok_or_else(|| {
                             CompileError::CodegenError(format!(
                                 "no member '{}' in struct",

@@ -744,6 +744,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "restrict" | "__restrict" | "__restrict__" => TokenKind::KwRestrict,
                 "inline" | "__inline" | "__inline__" => TokenKind::KwInline,
                 "_Noreturn" | "__noreturn__" => TokenKind::KwNoreturn,
+                "_Bool" => TokenKind::KwInt, // C99 _Bool → int
                 "__signed__" => TokenKind::KwSigned,
 
                 // __extension__ は no-op — トークンを発行しない
