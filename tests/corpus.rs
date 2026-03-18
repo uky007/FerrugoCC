@@ -245,12 +245,12 @@ fn compile_and_run_corpus(source_path: &str, obfuscate: bool) -> i32 {
     }
 
     let gcc_output = if cfg!(target_arch = "x86_64") {
-        Command::new("gcc")
-            .arg(&asm_path)
-            .arg("-o")
-            .arg(&bin_path)
-            .output()
-            .expect("failed to run gcc")
+        let mut cmd = Command::new("gcc");
+        cmd.arg(&asm_path).arg("-o").arg(&bin_path);
+        if cfg!(target_os = "linux") {
+            cmd.arg("-no-pie"); // FerrugoCC は non-PIC コードを生成する
+        }
+        cmd.output().expect("failed to run gcc")
     } else {
         Command::new("arch")
             .args(["-x86_64", "gcc"])
@@ -339,6 +339,9 @@ fn compile_and_run_corpus_ex(
         if cfg!(target_os = "macos") {
             // macOS: 未使用のプラットフォームインライン関数が弱シンボルを参照するため
             cmd.arg("-Wl,-undefined,dynamic_lookup");
+        }
+        if cfg!(target_os = "linux") {
+            cmd.arg("-no-pie"); // FerrugoCC は non-PIC コードを生成する
         }
         cmd.output().expect("failed to run gcc")
     } else {
