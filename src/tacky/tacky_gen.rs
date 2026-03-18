@@ -417,7 +417,12 @@ fn expr_type(
         Expr::SizeOfType(_) | Expr::SizeOfExpr(_) => Type::ULong,
         Expr::Dot(inner, member_name) => {
             let inner_t = expr_type(inner, var_map, func_table);
-            if let Type::Struct { ref members, is_union, .. } = inner_t {
+            if let Type::Struct {
+                ref members,
+                is_union,
+                ..
+            } = inner_t
+            {
                 struct_member_offset_ex(members, member_name, is_union)
                     .map(|(_, t)| t)
                     .unwrap_or(Type::Int)
@@ -964,7 +969,7 @@ impl TackyGenerator {
 
                 let saved_var_map = self.var_map.clone();
 
-                match init {
+                match init.as_ref() {
                     ForInit::Declaration(decls) => {
                         for decl in decls {
                             self.generate_declaration(decl, instrs, None, func_table)?;
@@ -1681,14 +1686,20 @@ impl TackyGenerator {
 
             Expr::Dot(inner, member_name) => {
                 let inner_type = expr_type(inner, &self.var_map, func_table);
-                if let Type::Struct { ref members, is_union, .. } = inner_type {
-                    let (member_off, member_type) = struct_member_offset_ex(members, member_name, is_union)
-                        .ok_or_else(|| {
-                            CompileError::CodegenError(format!(
-                                "no member '{}' in struct",
-                                member_name
-                            ))
-                        })?;
+                if let Type::Struct {
+                    ref members,
+                    is_union,
+                    ..
+                } = inner_type
+                {
+                    let (member_off, member_type) = struct_member_offset_ex(
+                        members,
+                        member_name,
+                        is_union,
+                    )
+                    .ok_or_else(|| {
+                        CompileError::CodegenError(format!("no member '{}' in struct", member_name))
+                    })?;
 
                     // Get inner's address
                     let (inner_addr, _) = self.generate_lvalue_addr(inner, instrs, func_table)?;
@@ -1849,14 +1860,20 @@ impl TackyGenerator {
             }
             Expr::Dot(inner, member_name) => {
                 let inner_type = expr_type(inner, &self.var_map, func_table);
-                if let Type::Struct { ref members, is_union, .. } = inner_type {
-                    let (member_off, member_type) = struct_member_offset_ex(members, member_name, is_union)
-                        .ok_or_else(|| {
-                            CompileError::CodegenError(format!(
-                                "no member '{}' in struct",
-                                member_name
-                            ))
-                        })?;
+                if let Type::Struct {
+                    ref members,
+                    is_union,
+                    ..
+                } = inner_type
+                {
+                    let (member_off, member_type) = struct_member_offset_ex(
+                        members,
+                        member_name,
+                        is_union,
+                    )
+                    .ok_or_else(|| {
+                        CompileError::CodegenError(format!("no member '{}' in struct", member_name))
+                    })?;
 
                     let (inner_addr, _) = self.generate_lvalue_addr(inner, instrs, func_table)?;
 

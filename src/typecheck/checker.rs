@@ -478,7 +478,7 @@ fn typecheck_statement(
             body,
         } => {
             let mut inner_symbols = symbols.clone();
-            match init {
+            match init.as_mut() {
                 ForInit::Declaration(decls) => {
                     for decl in decls.iter_mut() {
                         typecheck_local_declaration(decl, &mut inner_symbols)?;
@@ -1333,7 +1333,11 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         Expr::Dot(inner, member_name) => {
             let inner_type = typecheck_expr(inner, symbols)?;
             match &inner_type {
-                Type::Struct { members, tag, is_union } => match struct_member_offset_ex(members, member_name, *is_union) {
+                Type::Struct {
+                    members,
+                    tag,
+                    is_union,
+                } => match struct_member_offset_ex(members, member_name, *is_union) {
                     Some((_, member_type)) => Ok(array_decay(member_type)),
                     None => Err(CompileError::TypeError(format!(
                         "struct '{}' has no member '{}'",

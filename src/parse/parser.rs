@@ -625,9 +625,7 @@ impl<'a> Parser<'a> {
     fn fixup_type_members(ty: &mut Type, tag: &str, members: &[MemberDecl]) {
         match ty {
             Type::Struct {
-                tag: t,
-                members: m,
-                ..
+                tag: t, members: m, ..
             } => {
                 if t == tag && m.is_empty() {
                     *m = members.to_vec();
@@ -1761,7 +1759,7 @@ impl<'a> Parser<'a> {
 
                 let body = Box::new(self.parse_statement()?);
                 Ok(Statement::For {
-                    init,
+                    init: Box::new(init),
                     condition,
                     post,
                     body,
@@ -3474,12 +3472,12 @@ mod tests {
         {
             assert_eq!(
                 *init,
-                ForInit::Declaration(vec![Declaration {
+                Box::new(ForInit::Declaration(vec![Declaration {
                     name: "i".to_string(),
                     var_type: Type::Int,
                     init: Some(Expr::Constant(0)),
                     storage_class: None,
-                }])
+                }]))
             );
             assert!(condition.is_some());
             assert!(post.is_some());
@@ -3500,7 +3498,7 @@ mod tests {
         assert_eq!(
             func.body.as_ref().unwrap()[0],
             BlockItem::Statement(Statement::For {
-                init: ForInit::Expression(None),
+                init: Box::new(ForInit::Expression(None)),
                 condition: None,
                 post: None,
                 body: Box::new(Statement::Break),

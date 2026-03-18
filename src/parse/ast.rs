@@ -300,7 +300,11 @@ pub fn struct_size(members: &[MemberDecl]) -> usize {
 
 /// 共用体の全体サイズを計算する（最大メンバサイズ、アラインメント切り上げ）。
 pub fn union_size(members: &[MemberDecl]) -> usize {
-    let max_member = members.iter().map(|m| m.member_type.size()).max().unwrap_or(0);
+    let max_member = members
+        .iter()
+        .map(|m| m.member_type.size())
+        .max()
+        .unwrap_or(0);
     let align = struct_alignment(members);
     if max_member % align != 0 {
         max_member + align - (max_member % align)
@@ -445,7 +449,7 @@ pub enum Statement {
     },
     /// `for (<init> <cond>? ; <post>?) <body>` — forループ（Chapter 8）
     For {
-        init: ForInit,
+        init: Box<ForInit>,
         condition: Option<Expr>,
         post: Option<Expr>,
         body: Box<Statement>,

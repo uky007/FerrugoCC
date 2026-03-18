@@ -159,7 +159,10 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                     let sym = after.split_whitespace().next().unwrap_or("");
                     if !sym.is_empty()
                         && !sym.starts_with('.')
-                        && sym.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                        && sym
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphabetic() || c == '_')
                     {
                         new_line = new_line.replacen(
                             &format!("{directive}{sym}"),
@@ -2055,4 +2058,3 @@ int main(void) {
 "#;
     assert_eq!(compile_and_run(source, true), 42);
 }
-
