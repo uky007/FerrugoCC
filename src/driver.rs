@@ -171,11 +171,13 @@ pub fn run(
     // gcc に .s ファイルを渡してバイナリを生成する。
     // gcc は内部で as（アセンブラ）と ld（リンカ）を呼び出す。
     let output_path = source_path.with_extension("");
-    let status = Command::new("gcc")
-        .arg(&asm_path)
-        .arg("-o")
-        .arg(&output_path)
-        .status()?;
+    let mut link_cmd = Command::new("gcc");
+    link_cmd.arg(&asm_path).arg("-o").arg(&output_path);
+    // FerrugoCC は non-PIC コードを生成するため、Linux PIE 既定環境では -no-pie が必要
+    if cfg!(target_os = "linux") {
+        link_cmd.arg("-no-pie");
+    }
+    let status = link_cmd.status()?;
 
     // アセンブリファイルは中間生成物なので削除
     let _ = std::fs::remove_file(&asm_path);

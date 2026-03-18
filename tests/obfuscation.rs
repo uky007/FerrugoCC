@@ -528,12 +528,12 @@ fn compile_and_run_with_flags(source: &str, extra_flags: &[&str]) -> i32 {
     }
 
     let gcc_output = if cfg!(target_arch = "x86_64") {
-        Command::new("gcc")
-            .arg(&asm_path)
-            .arg("-o")
-            .arg(&bin_path)
-            .output()
-            .expect("failed to run gcc")
+        let mut cmd = Command::new("gcc");
+        cmd.arg(&asm_path).arg("-o").arg(&bin_path);
+        if cfg!(target_os = "linux") {
+            cmd.arg("-no-pie");
+        }
+        cmd.output().expect("failed to run gcc")
     } else {
         Command::new("arch")
             .args(["-x86_64", "gcc"])
@@ -1405,12 +1405,12 @@ fn compile_and_run_with_opts(source: &str, extra_args: &[&str]) -> i32 {
     }
 
     let gcc_output = if cfg!(target_arch = "x86_64") {
-        Command::new("gcc")
-            .arg(&asm_path)
-            .arg("-o")
-            .arg(&bin_path)
-            .output()
-            .expect("failed to run gcc")
+        let mut cmd = Command::new("gcc");
+        cmd.arg(&asm_path).arg("-o").arg(&bin_path);
+        if cfg!(target_os = "linux") {
+            cmd.arg("-no-pie");
+        }
+        cmd.output().expect("failed to run gcc")
     } else {
         Command::new("arch")
             .args(["-x86_64", "gcc"])
