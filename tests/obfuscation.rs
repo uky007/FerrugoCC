@@ -103,68 +103,102 @@ fn compile_and_run(source: &str, obfuscate: bool) -> i32 {
 /// - シンボル名に `_` プレフィックスを付加（.globl と関数ラベル）
 /// - `call` 命令のターゲットに `_` プレフィックスを付加
 fn fixup_asm_for_macos(asm: &str) -> String {
+    use std::collections::HashSet;
+
     let mut result = Vec::new();
-    // .globl で宣言されるシンボル名を収集
-    let mut symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 全シンボル（.globl + ラベル定義）を収集
+    let mut all_symbols: HashSet<String> = HashSet::new();
     for line in asm.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix(".globl ") {
-            symbols.insert(rest.trim().to_string());
+            all_symbols.insert(rest.trim().to_string());
+        }
+        if trimmed.ends_with(':') && !trimmed.starts_with('.') {
+            all_symbols.insert(trimmed.trim_end_matches(':').to_string());
         }
     }
 
     for line in asm.lines() {
         let trimmed = line.trim();
 
-        // GNU-stack ディレクティブを削除
         if trimmed.contains(".note.GNU-stack") {
             continue;
         }
-
-        // .section .rodata → .section __TEXT,__const (macOS)
-        if trimmed == ".section .rodata" {
+        if trimmed.starts_with(".section .rodata") {
             result.push("    .section __TEXT,__const".to_string());
             continue;
         }
 
-        // .globl シンボル → .globl _シンボル
+        let mut new_line = line.to_string();
+
         if let Some(rest) = trimmed.strip_prefix(".globl ") {
             let sym = rest.trim();
-            result.push(format!("    .globl _{sym}"));
-            continue;
-        }
-
-        // シンボルラベル定義: `main:` → `_main:`
-        if let Some(label) = trimmed.strip_suffix(':')
-            && symbols.contains(label)
-        {
-            result.push(format!("_{label}:"));
-            continue;
-        }
-
-        // call 命令: `call func` → `call _func`
-        if trimmed.starts_with("call ") {
-            let target = trimmed.strip_prefix("call ").unwrap().trim();
-            if symbols.contains(target) {
-                result.push(format!("    call _{target}"));
-                continue;
+            new_line = format!("    .globl _{sym}");
+        } else if trimmed.ends_with(':') && !trimmed.starts_with('.') {
+            let label = trimmed.trim_end_matches(':');
+            new_line = format!("_{label}:");
+        } else {
+            // call 命令: 非ローカル・非間接ターゲットに _ プレフィクス
+            for prefix in &["call ", "call\t"] {
+                if let Some(idx) = new_line.find(prefix) {
+                    let after = &new_line[idx + prefix.len()..];
+                    let sym = after.split_whitespace().next().unwrap_or("");
+                    if !sym.is_empty() && !sym.starts_with('.') && !sym.starts_with('*') {
+                        new_line = new_line.replacen(
+                            &format!("{prefix}{sym}"),
+                            &format!("{prefix}_{sym}"),
+                            1,
+                        );
+                    }
+                }
+            }
+            // .quad/.long シンボル参照
+            for directive in &[".quad ", ".long "] {
+                if let Some(idx) = trimmed.find(directive) {
+                    let after = &trimmed[idx + directive.len()..];
+                    let sym = after.split_whitespace().next().unwrap_or("");
+                    if !sym.is_empty()
+                        && !sym.starts_with('.')
+                        && sym.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                    {
+                        new_line = new_line.replacen(
+                            &format!("{directive}{sym}"),
+                            &format!("{directive}_{sym}"),
+                            1,
+                        );
+                    }
+                }
+            }
+            // sym(%rip) 参照: 外部シンボルは @GOTPCREL、内部は _prefix
+            let mut search_from = 0;
+            while let Some(rel_idx) = new_line[search_from..].find("(%rip)") {
+                let rip_idx = search_from + rel_idx;
+                let before = &new_line[..rip_idx];
+                let sym_start = before
+                    .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                let sym = &new_line[sym_start..rip_idx];
+                if !sym.is_empty() && !sym.starts_with('.') {
+                    let is_external = !all_symbols.contains(sym);
+                    let trimmed_line = new_line.trim_start();
+                    if is_external && trimmed_line.starts_with("leaq ") {
+                        let original = format!("leaq {sym}(%rip)");
+                        let replacement = format!("movq _{sym}@GOTPCREL(%rip)");
+                        new_line = new_line.replacen(&original, &replacement, 1);
+                        search_from = sym_start + replacement.len();
+                    } else {
+                        let replacement = format!("_{sym}(%rip)");
+                        let original = format!("{sym}(%rip)");
+                        new_line = new_line.replacen(&original, &replacement, 1);
+                        search_from = sym_start + replacement.len();
+                    }
+                } else {
+                    search_from = rip_idx + 6;
+                }
             }
         }
-
-        // leaq 命令: `leaq func(%rip), reg` → `leaq _func(%rip), reg`
-        // （間接呼び出し変換で生成される lea 命令の macOS 対応）
-        if trimmed.starts_with("leaq ")
-            && let Some(rip_pos) = trimmed.find("(%rip)")
-        {
-            let after_leaq = &trimmed[5..rip_pos]; // "leaq " is 5 chars
-            if symbols.contains(after_leaq) {
-                let suffix = &trimmed[rip_pos..];
-                result.push(format!("    leaq _{after_leaq}{suffix}"));
-                continue;
-            }
-        }
-
-        result.push(line.to_string());
+        result.push(new_line);
     }
 
     result.join("\n") + "\n"
@@ -1955,6 +1989,68 @@ int main(void) {
 
     /* result: 100 - 35 - 23 = 42 */
     return isum - iprod - 23;
+}
+"#;
+    assert_eq!(compile_and_run(source, true), 42);
+}
+
+/// Regression: function pointer call through struct member under obfuscation.
+///
+/// pdjson's push() calls json->alloc.realloc(json->stack, size) — a function
+/// pointer stored in a struct member. Under obfuscation (inlining + register
+/// pressure), the indirect call must preserve the correct function pointer.
+#[test]
+fn test_obfuscate_fn_ptr_struct_realloc() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+void *realloc(void *, unsigned long);
+void free(void *);
+
+struct alloc {
+    void *(*my_realloc)(void *, unsigned long);
+    void (*my_free)(void *);
+};
+
+struct stream {
+    int *stack;
+    unsigned long stack_top;
+    unsigned long stack_size;
+    struct alloc alloc;
+};
+
+void init_stream(struct stream *s) {
+    s->stack = 0;
+    s->stack_top = 0;
+    s->stack_size = 0;
+    s->alloc.my_realloc = realloc;
+    s->alloc.my_free = free;
+}
+
+int do_push(struct stream *s, int val) {
+    if (s->stack_top >= s->stack_size) {
+        unsigned long size = (s->stack_size + 4) * sizeof(int);
+        int *new_stack = (int *)s->alloc.my_realloc(s->stack, size);
+        if (new_stack == 0) return -1;
+        s->stack_size += 4;
+        s->stack = new_stack;
+    }
+    s->stack[s->stack_top] = val;
+    s->stack_top += 1;
+    return val;
+}
+
+int main(void) {
+    struct stream s;
+    init_stream(&s);
+    int r = 0;
+    r += do_push(&s, 10);
+    r += do_push(&s, 15);
+    r += do_push(&s, 17);
+    /* 10 + 15 + 17 = 42 */
+    s.alloc.my_free(s.stack);
+    return r;
 }
 "#;
     assert_eq!(compile_and_run(source, true), 42);
