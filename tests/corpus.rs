@@ -510,7 +510,6 @@ fn pdjson_compile_and_run() {
 }
 
 #[test]
-#[ignore] // known runtime crash under obfuscation — tracked separately
 fn pdjson_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;

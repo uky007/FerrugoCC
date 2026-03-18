@@ -2058,3 +2058,60 @@ int main(void) {
 "#;
     assert_eq!(compile_and_run(source, true), 42);
 }
+
+/// Regression: outliner must not extract blocks containing indirect call setup.
+///
+/// When a function pointer variable (__call_expr.N) is written in a block that
+/// gets outlined, the subsequent FunCall { name: "__call_expr.N", ... } outside
+/// the block reads an uninitialized variable. The safety check must treat
+/// FunCall.name as a use of that variable.
+#[test]
+fn test_obfuscate_outliner_indirect_call_safety() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+void *realloc(void *, unsigned long);
+void free(void *);
+
+struct ctx {
+    int *buf;
+    unsigned long len;
+    unsigned long cap;
+    void *(*alloc)(void *, unsigned long);
+    void (*dealloc)(void *);
+};
+
+void ctx_init(struct ctx *c) {
+    c->buf = 0;
+    c->len = 0;
+    c->cap = 0;
+    c->alloc = realloc;
+    c->dealloc = free;
+}
+
+/* The function pointer call c->alloc(...) generates:
+     Copy { src: <fn_ptr_load>, dst: __call_expr.N }
+     FunCall { name: "__call_expr.N", args: [...] }
+   The outliner must not split these across the outline boundary. */
+int ctx_grow(struct ctx *c) {
+    unsigned long new_cap = (c->cap + 4) * sizeof(int);
+    int *p = (int *)c->alloc(c->buf, new_cap);
+    if (p == 0) return -1;
+    c->cap += 4;
+    c->buf = p;
+    return 0;
+}
+
+int main(void) {
+    struct ctx c;
+    ctx_init(&c);
+    if (ctx_grow(&c) != 0) return 1;
+    c.buf[0] = 42;
+    int result = c.buf[0];
+    c.dealloc(c.buf);
+    return result;
+}
+"#;
+    assert_eq!(compile_and_run(source, true), 42);
+}

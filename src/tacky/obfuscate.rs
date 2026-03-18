@@ -2023,6 +2023,27 @@ fn analyze_block(
                     return None; // 中間変数がブロック外で使われている
                 }
             }
+            // FunCall.name / CopyToOffset.dst / CopyFromOffset.src は
+            // String フィールドであり instruction_all_operands に含まれないため
+            // 別途チェックする（間接呼び出し変数の漏れ防止）
+            match instr {
+                TackyInstruction::FunCall { name, .. } => {
+                    if intermediates.contains(name) {
+                        return None;
+                    }
+                }
+                TackyInstruction::CopyToOffset { dst, .. } => {
+                    if intermediates.contains(dst) {
+                        return None;
+                    }
+                }
+                TackyInstruction::CopyFromOffset { src, .. } => {
+                    if intermediates.contains(src) {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
