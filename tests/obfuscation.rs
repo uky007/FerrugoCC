@@ -2115,3 +2115,40 @@ int main(void) {
 "#;
     assert_eq!(compile_and_run(source, true), 42);
 }
+
+/// Regression: va_list parameter passed to another function.
+///
+/// va_list is a 24-byte struct when created locally (va_start), but an
+/// 8-byte pointer when received as a function parameter. The codegen must
+/// use Mov (value) not Lea (address-of) for parameter va_list arguments.
+#[test]
+fn test_obfuscate_valist_param_pass() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int vsnprintf(char *, unsigned long, const char *, va_list);
+
+static int inner(char *buf, unsigned long size, const char *fmt, va_list ap) {
+    return vsnprintf(buf, size, fmt, ap);
+}
+
+static int outer(char *buf, unsigned long size, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = inner(buf, size, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+int strcmp(const char *, const char *);
+
+int main(void) {
+    char buf[64];
+    outer(buf, 64, "hello %s %d", "world", 99);
+    if (strcmp(buf, "hello world 99") != 0) return 1;
+    return 42;
+}
+"#;
+    assert_eq!(compile_and_run(source, false), 42);
+}

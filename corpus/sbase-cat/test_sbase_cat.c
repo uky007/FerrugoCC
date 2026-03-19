@@ -1,7 +1,7 @@
 /* sbase/cat corpus test driver — exercise cat's core I/O logic.
  *
  * Single-file compilation: include all sbase-cat .c files directly.
- * Tests writeall, concat via pipes (no file I/O to avoid sandbox issues).
+ * Tests writeall, concat via pipes, error handling via weprintf.
  */
 
 #define _FORTIFY_SOURCE 0
@@ -36,7 +36,6 @@ static int test_writeall_pipe(void) {
 }
 
 static int test_concat_pipe(void) {
-    /* Simulate cat: pipe in → concat → pipe out */
     int in_pipe[2];
     int out_pipe[2];
     if (pipe(in_pipe) < 0) return 10;
@@ -64,11 +63,9 @@ static int test_concat_pipe(void) {
 }
 
 static int test_concat_multi(void) {
-    /* Concat two separate inputs into same output (like cat file1 file2) */
     int out_pipe[2];
     if (pipe(out_pipe) < 0) return 30;
 
-    /* First input */
     int p1[2];
     if (pipe(p1) < 0) return 31;
     writeall(p1[1], "AAA", 3);
@@ -76,7 +73,6 @@ static int test_concat_multi(void) {
     if (concat(p1[0], "p1", out_pipe[1], "out") != 0) return 32;
     close(p1[0]);
 
-    /* Second input */
     int p2[2];
     if (pipe(p2) < 0) return 33;
     writeall(p2[1], "BBB", 3);
@@ -96,6 +92,19 @@ static int test_concat_multi(void) {
     return 0;
 }
 
+static int test_concat_error(void) {
+    /* concat with invalid read fd → read fails → weprintf → returns -1 */
+    int out_pipe[2];
+    if (pipe(out_pipe) < 0) return 20;
+
+    int r = concat(999, "badfd", out_pipe[1], "<stdout>");
+    close(out_pipe[0]);
+    close(out_pipe[1]);
+
+    if (r != -1) return 21;
+    return 0;
+}
+
 int main(void) {
     int r;
 
@@ -106,6 +115,9 @@ int main(void) {
     if (r != 0) return r;
 
     r = test_concat_multi();
+    if (r != 0) return r;
+
+    r = test_concat_error();
     if (r != 0) return r;
 
     return 42;

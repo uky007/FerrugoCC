@@ -235,10 +235,13 @@ fn classify_parameters(params: &[(Type, String)]) -> ParamClassification {
 }
 
 /// Pseudo にしてはいけない変数を収集する（アドレス取得対象・構造体・配列）
-fn collect_forced_stack_vars(func: &TackyFunction) -> HashSet<String> {
+fn collect_forced_stack_vars(
+    body: &[TackyInstruction],
+    var_types: &HashMap<String, Type>,
+) -> HashSet<String> {
     let mut forced = HashSet::new();
 
-    for instr in &func.body {
+    for instr in body {
         match instr {
             TackyInstruction::GetAddress {
                 src: TackyVal::Var(name),
@@ -257,7 +260,7 @@ fn collect_forced_stack_vars(func: &TackyFunction) -> HashSet<String> {
     }
 
     // 構造体/配列型/va_list型の変数もスタックに強制配置
-    for (name, ty) in &func.var_types {
+    for (name, ty) in var_types {
         if ty.is_struct() || ty.is_array() || ty.is_va_list() {
             forced.insert(name.clone());
         }
@@ -272,12 +275,22 @@ fn generate_function(
     double_constants: &mut HashMap<u64, (String, usize)>,
 ) -> Result<CodegenFunctionResult> {
     let mut instructions = Vec::new();
-    let forced_stack = collect_forced_stack_vars(func);
 
     // スタックに強制配置する変数のオフセットを計算
     let mut stack_vars: HashMap<String, i32> = HashMap::new();
     let mut next_offset: i32 = 0;
     let mut var_types = func.var_types.clone();
+
+    // va_list パラメータは「ポインタ」として受け取る（呼び出し元が &va_list を渡す）。
+    // ローカル va_list (va_start) は 24B struct だが、パラメータは 8B ポインタ。
+    // 型を Pointer(VaList) に変更して、引数渡し時に Lea ではなく Mov を使わせる。
+    for param_name in &func.params {
+        if let Some(ty) = var_types.get(param_name)
+            && matches!(ty, Type::VaList)
+        {
+            var_types.insert(param_name.clone(), Type::Pointer(Box::new(Type::VaList)));
+        }
+    }
 
     // 可変長関数: レジスタ保存領域（176B）をスタックに確保
     if func.is_variadic {
@@ -293,8 +306,10 @@ fn generate_function(
         );
     }
 
+    let forced_stack = collect_forced_stack_vars(&func.body, &var_types);
+
     // 1. 強制スタック変数を割り当て（ソート済みキーで決定的に）
-    let mut sorted_var_types: Vec<(&String, &Type)> = func.var_types.iter().collect();
+    let mut sorted_var_types: Vec<(&String, &Type)> = var_types.iter().collect();
     sorted_var_types.sort_by_key(|(name, _)| (*name).clone());
     for (name, ty) in sorted_var_types {
         if static_vars.contains_key(name) {
@@ -441,7 +456,7 @@ fn generate_function(
             &stack_vars,
             &mut instructions,
             double_constants,
-            &func.var_types,
+            &var_types,
             &mut va_label_counter,
         )?;
     }
