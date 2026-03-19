@@ -805,6 +805,260 @@ static int test_file_write(void) {
     return 0;
 }
 
+/* ── 19. カーソル移動 — editorMoveCursor 相当 ── */
+
+#define ARROW_LEFT  1000
+#define ARROW_RIGHT 1001
+#define ARROW_UP    1002
+#define ARROW_DOWN  1003
+
+struct cursorState {
+    int cx, cy;           /* cursor position on screen */
+    int rowoff, coloff;   /* scroll offset */
+    int screenrows, screencols;
+    int numrows;
+    int *rowsizes;        /* length of each row */
+};
+
+static void cursorMove(struct cursorState *E, int key) {
+    int filerow = E->rowoff + E->cy;
+    int filecol = E->coloff + E->cx;
+    int rowlen = (filerow < E->numrows) ? E->rowsizes[filerow] : 0;
+
+    switch (key) {
+    case ARROW_LEFT:
+        if (E->cx == 0) {
+            if (E->coloff) {
+                E->coloff--;
+            } else if (filerow > 0) {
+                E->cy--;
+                E->cx = E->rowsizes[filerow - 1];
+                if (E->cx > E->screencols - 1) {
+                    E->coloff = E->cx - E->screencols + 1;
+                    E->cx = E->screencols - 1;
+                }
+            }
+        } else {
+            E->cx--;
+        }
+        break;
+    case ARROW_RIGHT:
+        if (filecol < rowlen) {
+            if (E->cx == E->screencols - 1) {
+                E->coloff++;
+            } else {
+                E->cx++;
+            }
+        } else if (filecol == rowlen && filerow < E->numrows - 1) {
+            E->cx = 0;
+            E->coloff = 0;
+            if (E->cy == E->screenrows - 1) {
+                E->rowoff++;
+            } else {
+                E->cy++;
+            }
+        }
+        break;
+    case ARROW_UP:
+        if (E->cy == 0) {
+            if (E->rowoff) E->rowoff--;
+        } else {
+            E->cy--;
+        }
+        break;
+    case ARROW_DOWN:
+        if (filerow < E->numrows) {
+            if (E->cy == E->screenrows - 1) {
+                E->rowoff++;
+            } else {
+                E->cy++;
+            }
+        }
+        break;
+    }
+
+    /* Fix cx if current line is shorter */
+    filerow = E->rowoff + E->cy;
+    filecol = E->coloff + E->cx;
+    rowlen = (filerow < E->numrows) ? E->rowsizes[filerow] : 0;
+    if (filecol > rowlen) {
+        E->cx -= filecol - rowlen;
+        if (E->cx < 0) {
+            E->coloff += E->cx;
+            E->cx = 0;
+        }
+    }
+}
+
+static int test_cursor_move(void) {
+    int sizes[4];
+    sizes[0] = 10; sizes[1] = 5; sizes[2] = 20; sizes[3] = 3;
+    struct cursorState E;
+    E.cx = 0; E.cy = 0;
+    E.rowoff = 0; E.coloff = 0;
+    E.screenrows = 24; E.screencols = 80;
+    E.numrows = 4;
+    E.rowsizes = sizes;
+
+    /* Move right within row */
+    cursorMove(&E, ARROW_RIGHT);
+    if (E.cx != 1 || E.cy != 0) return 190;
+
+    /* Move down */
+    cursorMove(&E, ARROW_DOWN);
+    if (E.cy != 1) return 191;
+    /* cx=1 but row 1 has size 5 → cx stays 1 */
+    if (E.cx != 1) return 192;
+
+    /* Move to end of short row and try right → wraps to next row */
+    E.cx = 5; /* at end of row 1 (size=5) */
+    cursorMove(&E, ARROW_RIGHT);
+    if (E.cy != 2 || E.cx != 0) return 193;
+
+    /* Move up from row 2 to row 1 — cx clamped to row 1 length */
+    E.cx = 15; /* middle of row 2 (size=20) */
+    cursorMove(&E, ARROW_UP);
+    if (E.cy != 1) return 194;
+    /* filecol = 0+15=15, row 1 size=5 → cx = 15-(15-5) = 5 */
+    if (E.cx != 5) return 195;
+
+    /* Move left at beginning of row → go to end of previous row */
+    E.cx = 0; E.cy = 1; E.coloff = 0;
+    cursorMove(&E, ARROW_LEFT);
+    if (E.cy != 0) return 196;
+    if (E.cx != 10) return 197; /* row 0 size=10 */
+
+    return 0;
+}
+
+/* ── 20. スクロール計算 ── */
+
+static void editorScroll(struct cursorState *E) {
+    /* Vertical scroll */
+    int filerow = E->rowoff + E->cy;
+    if (filerow < E->rowoff) {
+        E->rowoff = filerow;
+    }
+    if (filerow >= E->rowoff + E->screenrows) {
+        E->rowoff = filerow - E->screenrows + 1;
+    }
+    /* Horizontal scroll */
+    int filecol = E->coloff + E->cx;
+    if (filecol < E->coloff) {
+        E->coloff = filecol;
+    }
+    if (filecol >= E->coloff + E->screencols) {
+        E->coloff = filecol - E->screencols + 1;
+    }
+}
+
+static int test_scroll(void) {
+    int sizes[5];
+    sizes[0] = 80; sizes[1] = 80; sizes[2] = 80; sizes[3] = 80; sizes[4] = 80;
+    struct cursorState E;
+    E.cx = 0; E.cy = 0;
+    E.rowoff = 0; E.coloff = 0;
+    E.screenrows = 3; E.screencols = 20;
+    E.numrows = 5;
+    E.rowsizes = sizes;
+
+    /* cursor within screen → no scroll */
+    E.cy = 2;
+    editorScroll(&E);
+    if (E.rowoff != 0) return 200;
+
+    /* cursor below screen → scroll down */
+    E.cy = 3; /* filerow = 0+3 = 3, screenrows=3 → need scroll */
+    editorScroll(&E);
+    if (E.rowoff != 1) return 201;
+
+    /* horizontal: cursor past right edge */
+    E.cx = 25; /* filecol = 0+25 = 25, screencols=20 → scroll right */
+    editorScroll(&E);
+    if (E.coloff != 6) return 202; /* 25 - 20 + 1 = 6 */
+
+    /* scroll back: cursor at coloff boundary */
+    E.cx = 0; E.coloff = 6;
+    editorScroll(&E);
+    /* filecol = 6+0 = 6, coloff=6 → 6 >= 6 → no change needed (within view) */
+    if (E.coloff != 6) return 203;
+
+    return 0;
+}
+
+/* ── 21. 検索状態 — editorFind ロジック (I/O なし) ── */
+
+struct searchState {
+    int last_match;  /* last matching row, -1 = none */
+    int direction;   /* 1 = forward, -1 = backward */
+};
+
+/* Search for query in rows, starting from last_match in given direction */
+static int searchNext(char **rows, int numrows, const char *query,
+                      struct searchState *ss) {
+    if (query[0] == '\0') return -1;
+
+    int current = ss->last_match;
+    int i;
+    for (i = 0; i < numrows; i++) {
+        current += ss->direction;
+        if (current < 0) current = numrows - 1;
+        if (current >= numrows) current = 0;
+
+        char *match = strstr(rows[current], query);
+        if (match) {
+            ss->last_match = current;
+            return current;
+        }
+    }
+    return -1; /* not found */
+}
+
+static int test_search_state(void) {
+    char *rows[5];
+    rows[0] = "Hello World";
+    rows[1] = "foo bar baz";
+    rows[2] = "Hello again";
+    rows[3] = "nothing here";
+    rows[4] = "World cup";
+    int numrows = 5;
+
+    struct searchState ss;
+    ss.last_match = -1;
+    ss.direction = 1;
+
+    /* Forward search for "Hello" → row 0 */
+    int r = searchNext(rows, numrows, "Hello", &ss);
+    if (r != 0) return 210;
+
+    /* Continue forward → row 2 */
+    r = searchNext(rows, numrows, "Hello", &ss);
+    if (r != 2) return 211;
+
+    /* Continue forward → wraps to row 0 */
+    r = searchNext(rows, numrows, "Hello", &ss);
+    if (r != 0) return 212;
+
+    /* Backward search for "World" */
+    ss.last_match = -1;
+    ss.direction = -1;
+    r = searchNext(rows, numrows, "World", &ss);
+    /* Starting from -1, -1+(-1)=-2 → wraps to 4. rows[4]="World cup" → match */
+    if (r != 4) return 213;
+
+    /* Continue backward → row 0 */
+    r = searchNext(rows, numrows, "World", &ss);
+    if (r != 0) return 214;
+
+    /* Search for nonexistent → -1 */
+    ss.last_match = -1;
+    ss.direction = 1;
+    r = searchNext(rows, numrows, "NOTFOUND", &ss);
+    if (r != -1) return 215;
+
+    return 0;
+}
+
 /* ── メインテストランナー ── */
 
 int main(void) {
@@ -862,6 +1116,15 @@ int main(void) {
     if (r != 0) return r;
 
     r = test_file_write();
+    if (r != 0) return r;
+
+    r = test_cursor_move();
+    if (r != 0) return r;
+
+    r = test_scroll();
+    if (r != 0) return r;
+
+    r = test_search_state();
     if (r != 0) return r;
 
     /* 全テスト通過 */
