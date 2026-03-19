@@ -599,6 +599,212 @@ static int test_file_read(void) {
     return 0;
 }
 
+/* ── 16. 行分割 — editorInsertNewline 相当 ── */
+
+struct editBuf {
+    int numrows;
+    char **rows;
+    int *sizes;
+};
+
+static void editBufInit(struct editBuf *eb) {
+    eb->numrows = 0;
+    eb->rows = NULL;
+    eb->sizes = NULL;
+}
+
+static void editBufInsertRow(struct editBuf *eb, int at, const char *s, int len) {
+    eb->rows = realloc(eb->rows, sizeof(char *) * (eb->numrows + 1));
+    eb->sizes = realloc(eb->sizes, sizeof(int) * (eb->numrows + 1));
+    if (at < eb->numrows) {
+        memmove(&eb->rows[at + 1], &eb->rows[at],
+                sizeof(char *) * (eb->numrows - at));
+        memmove(&eb->sizes[at + 1], &eb->sizes[at],
+                sizeof(int) * (eb->numrows - at));
+    }
+    eb->rows[at] = malloc(len + 1);
+    memcpy(eb->rows[at], s, len);
+    eb->rows[at][len] = '\0';
+    eb->sizes[at] = len;
+    eb->numrows++;
+}
+
+static void editBufDelRow(struct editBuf *eb, int at) {
+    free(eb->rows[at]);
+    if (at < eb->numrows - 1) {
+        memmove(&eb->rows[at], &eb->rows[at + 1],
+                sizeof(char *) * (eb->numrows - at - 1));
+        memmove(&eb->sizes[at], &eb->sizes[at + 1],
+                sizeof(int) * (eb->numrows - at - 1));
+    }
+    eb->numrows--;
+}
+
+static void editBufFree(struct editBuf *eb) {
+    int i;
+    for (i = 0; i < eb->numrows; i++)
+        free(eb->rows[i]);
+    free(eb->rows);
+    free(eb->sizes);
+}
+
+/* Split row 'at' at column 'col' — like editorInsertNewline mid-line */
+static void editBufSplitRow(struct editBuf *eb, int at, int col) {
+    char *row = eb->rows[at];
+    int size = eb->sizes[at];
+    if (col > size) col = size;
+
+    /* Insert new row with the right half */
+    editBufInsertRow(eb, at + 1, row + col, size - col);
+    /* Truncate original row to left half */
+    eb->rows[at][col] = '\0';
+    eb->sizes[at] = col;
+}
+
+static int test_insert_newline(void) {
+    struct editBuf eb;
+    editBufInit(&eb);
+
+    editBufInsertRow(&eb, 0, "Hello World", 11);
+    if (eb.numrows != 1) return 150;
+
+    /* Split "Hello World" at col 5 → "Hello" + " World" */
+    editBufSplitRow(&eb, 0, 5);
+    if (eb.numrows != 2) return 151;
+    if (strcmp(eb.rows[0], "Hello") != 0) return 152;
+    if (strcmp(eb.rows[1], " World") != 0) return 153;
+    if (eb.sizes[0] != 5) return 154;
+    if (eb.sizes[1] != 6) return 155;
+
+    /* Split at beginning of line → empty + original */
+    editBufInsertRow(&eb, 2, "Third", 5);
+    editBufSplitRow(&eb, 2, 0);
+    if (eb.numrows != 4) return 156;
+    if (strcmp(eb.rows[2], "") != 0) return 157;
+    if (strcmp(eb.rows[3], "Third") != 0) return 158;
+
+    /* Split at end of line → original + empty */
+    editBufSplitRow(&eb, 0, 5);
+    if (eb.numrows != 5) return 159;
+    if (strcmp(eb.rows[0], "Hello") != 0) return 160;
+    if (strcmp(eb.rows[1], "") != 0) return 161;
+
+    editBufFree(&eb);
+    return 0;
+}
+
+/* ── 17. 行削除 + 行結合 — editorDelChar 相当 ── */
+
+/* Append string to row (like editorRowAppendString) */
+static void editBufRowAppend(struct editBuf *eb, int at, const char *s, int len) {
+    eb->rows[at] = realloc(eb->rows[at], eb->sizes[at] + len + 1);
+    memcpy(eb->rows[at] + eb->sizes[at], s, len);
+    eb->sizes[at] += len;
+    eb->rows[at][eb->sizes[at]] = '\0';
+}
+
+/* Delete char at col in row, or merge with previous row if col==0 */
+static void editBufDelChar(struct editBuf *eb, int row, int col) {
+    if (row < 0 || row >= eb->numrows) return;
+    if (col == 0 && row == 0) return;
+
+    if (col == 0) {
+        /* Merge current row onto end of previous */
+        editBufRowAppend(eb, row - 1, eb->rows[row], eb->sizes[row]);
+        editBufDelRow(eb, row);
+    } else {
+        /* Delete single char */
+        char *r = eb->rows[row];
+        int size = eb->sizes[row];
+        if (col > size) return;
+        memmove(r + col - 1, r + col, size - col);
+        eb->sizes[row]--;
+        eb->rows[row][eb->sizes[row]] = '\0';
+    }
+}
+
+static int test_del_char(void) {
+    struct editBuf eb;
+    editBufInit(&eb);
+
+    editBufInsertRow(&eb, 0, "Hello", 5);
+    editBufInsertRow(&eb, 1, "World", 5);
+
+    /* Delete char in middle: "Hello" → "Hllo" */
+    editBufDelChar(&eb, 0, 2);
+    if (strcmp(eb.rows[0], "Hllo") != 0) return 170;
+    if (eb.sizes[0] != 4) return 171;
+
+    /* Delete at col 0 on row 1 → merge: "Hllo" + "World" = "HlloWorld" */
+    editBufDelChar(&eb, 1, 0);
+    if (eb.numrows != 1) return 172;
+    if (strcmp(eb.rows[0], "HlloWorld") != 0) return 173;
+    if (eb.sizes[0] != 9) return 174;
+
+    /* Delete last char */
+    editBufDelChar(&eb, 0, 9);
+    if (strcmp(eb.rows[0], "HlloWorl") != 0) return 175;
+
+    editBufFree(&eb);
+    return 0;
+}
+
+/* ── 18. ファイル書き込み — editorSave 相当 ── */
+
+static int test_file_write(void) {
+    struct editBuf eb;
+    editBufInit(&eb);
+
+    editBufInsertRow(&eb, 0, "Line one", 8);
+    editBufInsertRow(&eb, 1, "Line two", 8);
+    editBufInsertRow(&eb, 2, "Line three", 10);
+
+    /* Serialize to string (like editorRowsToString) */
+    int totlen = 0;
+    int i;
+    for (i = 0; i < eb.numrows; i++)
+        totlen += eb.sizes[i] + 1; /* +1 for \n */
+
+    char *buf = malloc(totlen + 1);
+    char *p = buf;
+    for (i = 0; i < eb.numrows; i++) {
+        memcpy(p, eb.rows[i], eb.sizes[i]);
+        p += eb.sizes[i];
+        *p = '\n';
+        p++;
+    }
+    *p = '\0';
+
+    if (totlen != 29) { free(buf); editBufFree(&eb); return 180; }
+
+    /* Write to temp file */
+    const char *tmppath = "/tmp/kilo_unit_write_test.txt";
+    FILE *fp = fopen(tmppath, "w");
+    if (!fp) { free(buf); editBufFree(&eb); return 181; }
+    int written = fwrite(buf, 1, totlen, fp);
+    fclose(fp);
+    free(buf);
+
+    if (written != totlen) { editBufFree(&eb); return 182; }
+
+    /* Read back and verify */
+    fp = fopen(tmppath, "r");
+    if (!fp) { editBufFree(&eb); return 183; }
+    char readbuf[256];
+    int n = fread(readbuf, 1, sizeof(readbuf) - 1, fp);
+    fclose(fp);
+    readbuf[n] = '\0';
+
+    if (strcmp(readbuf, "Line one\nLine two\nLine three\n") != 0) {
+        editBufFree(&eb); return 184;
+    }
+
+    /* Cleanup */
+    remove(tmppath);
+    editBufFree(&eb);
+    return 0;
+}
+
 /* ── メインテストランナー ── */
 
 int main(void) {
@@ -647,6 +853,15 @@ int main(void) {
     if (r != 0) return r;
 
     r = test_file_read();
+    if (r != 0) return r;
+
+    r = test_insert_newline();
+    if (r != 0) return r;
+
+    r = test_del_char();
+    if (r != 0) return r;
+
+    r = test_file_write();
     if (r != 0) return r;
 
     /* 全テスト通過 */
