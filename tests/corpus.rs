@@ -7,6 +7,11 @@
 //! - **jsmn**: JSON parser (~500 行) — 最小の自己完結コーパス
 //! - **inih**: INI parser (~200 行) — 文字列処理 + コールバック
 //! - **sds**: 動的文字列ライブラリ (~1200 行) — ポインタ演算 + 可変長引数
+//! - **pdjson**: JSON parser (~1000 行) — union + 関数ポインタ in struct
+//!
+//! ## Tier 2 (回帰・CI 経路)
+//! - **kilo**: テキストエディタ (~1300 行) — smoke + unit 21 テストグループ
+//! - **sbase-cat**: cat(1) from sbase — argv, file I/O, pipe, error handling
 //!
 //! 各コーパスは normal + obfuscated の両モードでテストする。
 //! 各 corpus ディレクトリの ORIGIN ファイルに upstream 由来情報を記載。
@@ -573,6 +578,39 @@ fn sds_compile_and_run_obfuscated() {
         return;
     }
     assert_eq!(compile_and_run_corpus("corpus/sds/test_sds.c", true), 42);
+}
+
+// ── sbase-cat (Tier 2) ──
+
+#[test]
+fn sbase_cat_compile_and_run() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, _stderr) = compile_and_run_corpus_ex(
+        "corpus/sbase-cat/test_sbase_cat.c",
+        false,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[],
+    );
+    assert_eq!(code, 42, "sbase-cat test failed with exit code {code}");
+}
+
+#[test]
+fn sbase_cat_compile_and_run_obfuscated() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, _stderr) = compile_and_run_corpus_ex(
+        "corpus/sbase-cat/test_sbase_cat.c",
+        true,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[],
+    );
+    assert_eq!(
+        code, 42,
+        "sbase-cat obfuscated test failed with exit code {code}"
+    );
 }
 
 // ── jsmn (Tier 1) ──

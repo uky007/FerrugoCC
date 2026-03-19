@@ -1,0 +1,15 @@
+sbase/cat — minimalist cat(1) from sbase
+Source: https://git.suckless.org/sbase/
+License: MIT
+Retrieved: 2026-03-19
+
+Local patches:
+- test_sbase_cat.c: FerrugoCC test harness (exit 42 on success)
+- cat_util.h: minimal subset of util.h + arg.h for cat only
+  (removes regex.h, compat.h, and unused declarations)
+
+Files from upstream (unmodified):
+- cat.c
+- libutil/concat.c
+- libutil/writeall.c
+- libutil/eprintf.c
