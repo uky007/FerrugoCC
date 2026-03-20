@@ -1,0 +1,16 @@
+sbase/printf — minimalist printf(1) from sbase
+Source: https://git.suckless.org/sbase/
+License: MIT
+Retrieved: 2026-03-20
+
+Local patches:
+- test_sbase_printf.c: FerrugoCC test harness (exit 42 on success)
+- printf_util.h: minimal subset of utf.h + util.h for printf only
+  (no regex.h, reduced libutf — skips %b/%c rune handling)
+
+Files from upstream (unmodified except include paths):
+- printf.c (main not used — test driver exercises format logic directly)
+- unescape.c (libutil)
+- ealloc.c (libutil)
+- strtonum.c (libutil)
+- estrtod.c (libutil)

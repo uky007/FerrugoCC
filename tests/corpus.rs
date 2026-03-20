@@ -614,6 +614,39 @@ fn sbase_wc_compile_and_run_obfuscated() {
     );
 }
 
+// ── sbase-printf (Tier 2) ──
+
+#[test]
+fn sbase_printf_compile_and_run() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, _stderr) = compile_and_run_corpus_ex(
+        "corpus/sbase-printf/test_sbase_printf.c",
+        false,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[],
+    );
+    assert_eq!(code, 42, "sbase-printf test failed with exit code {code}");
+}
+
+#[test]
+fn sbase_printf_compile_and_run_obfuscated() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, _stderr) = compile_and_run_corpus_ex(
+        "corpus/sbase-printf/test_sbase_printf.c",
+        true,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[],
+    );
+    assert_eq!(
+        code, 42,
+        "sbase-printf obfuscated test failed with exit code {code}"
+    );
+}
+
 // ── sbase-cat (Tier 2) ──
 
 #[test]
