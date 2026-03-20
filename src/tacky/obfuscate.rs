@@ -3022,8 +3022,11 @@ fn wrap_with_opaque_predicate(
 ) -> Vec<TackyInstruction> {
     let mut instrs = Vec::new();
 
-    let label_real = ctx.fresh_label();
-    let label_end = ctx.fresh_label();
+    // Use ".Lpred_" prefix so CFF treats these as block-internal labels
+    let label_real = format!(".Lpred_{}", ctx.label_counter);
+    ctx.label_counter += 1;
+    let label_end = format!(".Lpred_{}", ctx.label_counter);
+    ctx.label_counter += 1;
 
     // パターン選択（label_counter をローテーション）
     let pattern = ctx.label_counter % 4;
@@ -3864,13 +3867,29 @@ fn split_into_blocks(instrs: &[TackyInstruction]) -> Vec<Vec<TackyInstruction>> 
     let mut blocks: Vec<Vec<TackyInstruction>> = Vec::new();
     let mut current_block: Vec<TackyInstruction> = Vec::new();
 
+    // Helper: check if a jump/label is an opaque predicate internal target
+    let is_pred_label = |label: &str| label.starts_with(".Lpred_");
+
     for instr in instrs {
         match instr {
+            TackyInstruction::Label(label) if is_pred_label(label) => {
+                // Opaque predicate internal label — keep in current block
+                current_block.push(instr.clone());
+            }
             TackyInstruction::Label(_) => {
                 // ラベルは新しいブロックの先頭
                 if !current_block.is_empty() {
                     blocks.push(std::mem::take(&mut current_block));
                 }
+                current_block.push(instr.clone());
+            }
+            TackyInstruction::Jump(target) if is_pred_label(target) => {
+                current_block.push(instr.clone());
+            }
+            TackyInstruction::JumpIfZero { target, .. } if is_pred_label(target) => {
+                current_block.push(instr.clone());
+            }
+            TackyInstruction::JumpIfNotZero { target, .. } if is_pred_label(target) => {
                 current_block.push(instr.clone());
             }
             TackyInstruction::Jump(_)

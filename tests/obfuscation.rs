@@ -2183,7 +2183,6 @@ int main(void) {
 /// More complex than the standalone case — the combination of getline,
 /// while loop, and &&-as-arithmetic triggers the bug in some contexts.
 #[test]
-#[ignore] // CFF breaks getline loop with &&-as-arithmetic — tracked separately
 fn test_obfuscate_logical_and_in_getline_loop() {
     if !can_run_x86_64() {
         return;
