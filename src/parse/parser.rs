@@ -1561,20 +1561,82 @@ impl<'a> Parser<'a> {
     fn parse_compound_init(&mut self) -> Result<Expr> {
         self.expect(&TokenKind::OpenBrace)?;
         let mut inits = Vec::new();
+        // designated initializer 用: sparse → dense 展開
+        let mut max_index: Option<usize> = None;
+        let mut designated: Vec<(usize, Expr)> = Vec::new();
+        let mut has_designated = false;
+        let mut pos_index = 0usize;
+
         while self.peek()?.kind != TokenKind::CloseBrace {
-            if self.peek()?.kind == TokenKind::OpenBrace {
-                // ネスト初期化子: `{ { ... }, { ... } }`
+            if self.peek()?.kind == TokenKind::OpenBracket {
+                // designated initializer: [expr] = val
+                has_designated = true;
+                self.advance()?; // consume '['
+                let index_expr = self.parse_conditional()?;
+                let index = Self::eval_const_expr(&index_expr)? as usize;
+                self.expect(&TokenKind::CloseBracket)?;
+                self.expect(&TokenKind::Assign)?;
+                let val = if self.peek()?.kind == TokenKind::OpenBrace {
+                    self.parse_compound_init()?
+                } else {
+                    self.parse_assignment()?
+                };
+                designated.push((index, val));
+                if max_index.is_none() || index > max_index.unwrap() {
+                    max_index = Some(index);
+                }
+                pos_index = index + 1;
+            } else if self.peek()?.kind == TokenKind::Dot {
+                // struct field designator: .field = val (skip for now)
+                self.advance()?; // consume '.'
+                self.advance()?; // consume field name
+                self.expect(&TokenKind::Assign)?;
+                let val = if self.peek()?.kind == TokenKind::OpenBrace {
+                    self.parse_compound_init()?
+                } else {
+                    self.parse_assignment()?
+                };
+                // Treat as positional for now
+                inits.push(val);
+                pos_index += 1;
+            } else if self.peek()?.kind == TokenKind::OpenBrace {
                 inits.push(self.parse_compound_init()?);
+                pos_index += 1;
             } else {
-                inits.push(self.parse_assignment()?);
+                let val = self.parse_assignment()?;
+                if has_designated {
+                    designated.push((pos_index, val));
+                    if max_index.is_none() || pos_index > max_index.unwrap() {
+                        max_index = Some(pos_index);
+                    }
+                } else {
+                    inits.push(val);
+                }
+                pos_index += 1;
             }
             if self.peek()?.kind == TokenKind::Comma {
-                self.advance()?; // consume ','
+                self.advance()?;
             } else {
                 break;
             }
         }
         self.expect(&TokenKind::CloseBrace)?;
+
+        // designated → dense array 展開
+        if has_designated {
+            let size = max_index.map(|m| m + 1).unwrap_or(0);
+            let mut dense = Vec::new();
+            for _ in 0..size {
+                dense.push(Expr::Constant(0)); // zero-fill
+            }
+            for (idx, val) in designated {
+                if idx < dense.len() {
+                    dense[idx] = val;
+                }
+            }
+            return Ok(Expr::CompoundInit(dense));
+        }
+
         Ok(Expr::CompoundInit(inits))
     }
 

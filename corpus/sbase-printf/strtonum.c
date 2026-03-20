@@ -34,16 +34,15 @@ strtonum(const char *numstr, long long minval, long long maxval,
 	long long ll = 0;
 	int error = 0;
 	char *ep;
-	/* Local struct array init rewritten for FerrugoCC compatibility */
 	struct errval {
 		const char *errstr;
 		int err;
+	} ev[4] = {
+		{ NULL,		0 },
+		{ "invalid",	EINVAL },
+		{ "too small",	ERANGE },
+		{ "too large",	ERANGE },
 	};
-	struct errval ev[4];
-	ev[0].errstr = 0;       ev[0].err = 0;
-	ev[1].errstr = "invalid";  ev[1].err = EINVAL;
-	ev[2].errstr = "too small"; ev[2].err = ERANGE;
-	ev[3].errstr = "too large"; ev[3].err = ERANGE;
 
 	ev[0].err = errno;
 	errno = 0;

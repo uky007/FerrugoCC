@@ -304,6 +304,23 @@ fn typecheck_local_declaration(
                     )));
                 }
                 for init_expr in inits.iter_mut() {
+                    // struct 配列の要素が CompoundInit なら struct 初期化として検査
+                    if let Expr::CompoundInit(sub_inits) = init_expr
+                        && let Type::Struct { ref members, .. } = **elem_type
+                    {
+                        for (sub_init, member) in sub_inits.iter_mut().zip(members.iter()) {
+                            let sub_type = typecheck_expr(sub_init, symbols)?;
+                            if sub_type != member.member_type {
+                                let old = std::mem::replace(sub_init, Expr::Constant(0));
+                                *sub_init = Expr::Cast {
+                                    target_type: member.member_type.clone(),
+                                    source_type: sub_type,
+                                    expr: Box::new(old),
+                                };
+                            }
+                        }
+                        continue;
+                    }
                     let init_type = typecheck_expr(init_expr, symbols)?;
                     if init_type != **elem_type {
                         let old = std::mem::replace(init_expr, Expr::Constant(0));

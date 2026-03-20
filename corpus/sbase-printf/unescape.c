@@ -1,5 +1,4 @@
 /* See LICENSE file for copyright and license details. */
-/* Modified: replaced designated initializer with switch (FerrugoCC compat) */
 #include <ctype.h>
 #include <string.h>
 
@@ -7,27 +6,23 @@
 
 #define is_odigit(c)  ('0' <= c && c <= '7')
 
-static char escape_char(char c) {
-	switch (c) {
-	case '"':  return '"';
-	case '\'': return '\'';
-	case '\\': return '\\';
-	case 'a':  return '\a';
-	case 'b':  return '\b';
-	case 'E':  return 033;
-	case 'e':  return 033;
-	case 'f':  return '\f';
-	case 'n':  return '\n';
-	case 'r':  return '\r';
-	case 't':  return '\t';
-	case 'v':  return '\v';
-	default:   return 0;
-	}
-}
-
 size_t
 unescape(char *s)
 {
+	static const char escapes[256] = {
+		['"'] = '"',
+		['\''] = '\'',
+		['\\'] = '\\',
+		['a'] = '\a',
+		['b'] = '\b',
+		['E'] = 033,
+		['e'] = 033,
+		['f'] = '\f',
+		['n'] = '\n',
+		['r'] = '\r',
+		['t'] = '\t',
+		['v'] = '\v'
+	};
 	size_t m, q;
 	char *r, *w;
 
@@ -39,8 +34,8 @@ unescape(char *s)
 		r++;
 		if (!*r) {
 			eprintf("null escape sequence\n");
-		} else if (escape_char(*r)) {
-			*w++ = escape_char(*r++);
+		} else if (escapes[(unsigned char)*r]) {
+			*w++ = escapes[(unsigned char)*r++];
 		} else if (is_odigit(*r)) {
 			for (q = 0, m = 4; m && is_odigit(*r); m--, r++)
 				q = q * 8 + (*r - '0');

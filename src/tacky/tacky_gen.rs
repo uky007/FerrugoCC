@@ -2987,6 +2987,30 @@ impl TackyGenerator {
 
         // 明示的な要素を CopyToOffset で書き込み
         for (i, init_expr) in init_exprs.iter().enumerate() {
+            if let Expr::CompoundInit(sub_inits) = init_expr
+                && let Type::Struct { ref members, .. } = **elem_type
+            {
+                // struct 配列要素: 各メンバを個別に CopyToOffset
+                let base_offset = i * elem_size;
+                let mut member_offset = 0usize;
+                for (j, sub_init) in sub_inits.iter().enumerate() {
+                    if j >= members.len() {
+                        break;
+                    }
+                    let align = members[j].member_type.alignment();
+                    if !member_offset.is_multiple_of(align) {
+                        member_offset += align - (member_offset % align);
+                    }
+                    let (val, _) = self.generate_expr(sub_init, instrs, func_table)?;
+                    instrs.push(TackyInstruction::CopyToOffset {
+                        src: val,
+                        dst: resolved_dst.clone(),
+                        offset: base_offset + member_offset,
+                    });
+                    member_offset += members[j].member_type.size();
+                }
+                continue;
+            }
             let (val, _) = self.generate_expr(init_expr, instrs, func_table)?;
             instrs.push(TackyInstruction::CopyToOffset {
                 src: val,
