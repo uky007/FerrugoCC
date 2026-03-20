@@ -631,7 +631,6 @@ fn sbase_head_compile_and_run() {
 }
 
 #[test]
-#[ignore] // obfuscation corrupts head output — needs investigation
 fn sbase_head_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;
