@@ -2152,3 +2152,72 @@ int main(void) {
 "#;
     assert_eq!(compile_and_run(source, false), 42);
 }
+
+/// Regression: += with && result in arithmetic context under obfuscation.
+///
+/// `count += (a > 0 && b > 0)` uses the boolean result of && (0 or 1) as
+/// an integer addend. Under obfuscation, the arithmetic substitution or
+/// constant encoding pass corrupts this pattern.
+#[test]
+fn test_obfuscate_logical_and_in_arithmetic() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int main(void) {
+    int a = 5;
+    int b = 10;
+    int count = 0;
+    count += (a > 0 && b > 0);   /* 1 */
+    count += (a > 0 && b < 0);   /* 0 */
+    count += (a > 0 && b == 10); /* 1 */
+    if (count == 2) return 42;
+    return count + 100;
+}
+"#;
+    assert_eq!(compile_and_run(source, true), 42);
+}
+
+/// Regression: += (expr && expr) inside getline loop under obfuscation.
+///
+/// More complex than the standalone case — the combination of getline,
+/// while loop, and &&-as-arithmetic triggers the bug in some contexts.
+#[test]
+#[ignore] // CFF breaks getline loop with &&-as-arithmetic — tracked separately
+fn test_obfuscate_logical_and_in_getline_loop() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int getline(char **, unsigned long *, void *);
+int pipe(int *);
+long write(int, const void *, unsigned long);
+int close(int);
+void *fdopen(int, const char *);
+int fclose(void *);
+void free(void *);
+
+int main(void) {
+    int pipefd[2];
+    pipe(pipefd);
+    write(pipefd[1], "a\nb\nc\n", 6);
+    close(pipefd[1]);
+    void *fp = fdopen(pipefd[0], "r");
+
+    char *buf = 0;
+    unsigned long size = 0;
+    unsigned long i = 0;
+    long len;
+
+    while (i < 2 && (len = getline(&buf, &size, fp)) > 0) {
+        i += (len && (buf[len - 1] == '\n'));
+    }
+    free(buf);
+    fclose(fp);
+
+    if (i == 2) return 42;
+    return (int)i + 100;
+}
+"#;
+    assert_eq!(compile_and_run(source, true), 42);
+}
