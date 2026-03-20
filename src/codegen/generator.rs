@@ -464,6 +464,7 @@ fn generate_function(
             double_constants,
             &var_types,
             &mut va_label_counter,
+            &func.return_type,
         )?;
     }
 
@@ -558,6 +559,7 @@ fn load_double_val(
 }
 
 /// 単一の TACKY 命令をアセンブリ命令列に変換する
+#[allow(clippy::too_many_arguments)]
 fn generate_instruction(
     instr: &TackyInstruction,
     static_vars: &HashMap<String, String>,
@@ -566,6 +568,7 @@ fn generate_instruction(
     double_constants: &mut HashMap<u64, (String, usize)>,
     var_types: &HashMap<String, Type>,
     va_label_counter: &mut usize,
+    func_return_type: &Type,
 ) -> Result<()> {
     let mut const_counter: usize = double_constants.len();
 
@@ -586,6 +589,28 @@ fn generate_instruction(
                     src,
                     dst: Operand::Register(Reg::XMM0),
                 });
+            } else if func_return_type.is_struct() && func_return_type.size() <= 16 {
+                // System V ABI: struct ≤ 16 bytes returned in RAX (+ RDX)
+                // The TACKY value is a Pointer(Struct) (address of local struct).
+                let src = val_to_operand(val, static_vars, stack_vars)?;
+                let struct_size = func_return_type.size();
+                instrs.push(Instruction::Mov {
+                    asm_type: AsmType::Quadword,
+                    src: src.clone(),
+                    dst: Operand::Register(Reg::CX),
+                });
+                instrs.push(Instruction::Mov {
+                    asm_type: AsmType::Quadword,
+                    src: Operand::Memory(Reg::CX),
+                    dst: Operand::Register(Reg::AX),
+                });
+                if struct_size > 8 {
+                    instrs.push(Instruction::Mov {
+                        asm_type: AsmType::Quadword,
+                        src: Operand::MemoryOffset(Reg::CX, 8),
+                        dst: Operand::Register(Reg::DX),
+                    });
+                }
             } else {
                 let src = val_to_operand(val, static_vars, stack_vars)?;
                 let asm_type = safe_asm_type(&ty);
@@ -2010,6 +2035,24 @@ fn generate_function_call(
                 src: Operand::Register(Reg::XMM0),
                 dst: dst_op,
             });
+        } else if dst_type.is_struct() && dst_type.size() <= 16 {
+            // System V ABI: struct ≤ 16 bytes returned in RAX (+ RDX)
+            instrs.push(Instruction::Lea {
+                src: dst_op.clone(),
+                dst: Operand::Register(Reg::CX),
+            });
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Memory(Reg::CX),
+            });
+            if dst_type.size() > 8 {
+                instrs.push(Instruction::Mov {
+                    asm_type: AsmType::Quadword,
+                    src: Operand::Register(Reg::DX),
+                    dst: Operand::MemoryOffset(Reg::CX, 8),
+                });
+            }
         } else {
             let asm_type = safe_asm_type(dst_type);
             instrs.push(Instruction::Mov {
