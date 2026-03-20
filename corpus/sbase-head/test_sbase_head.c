@@ -70,7 +70,7 @@ head(FILE *fp, const char *fname, unsigned long n)
 
     while (i < n && (len = getline(&buf, &size, fp)) > 0) {
         fwrite(buf, 1, len, stdout);
-        if (len && buf[len - 1] == '\n') i++;
+        i += (len && (buf[len - 1] == '\n'));
     }
     free(buf);
 }
