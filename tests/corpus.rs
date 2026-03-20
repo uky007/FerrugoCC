@@ -598,7 +598,6 @@ fn sbase_wc_compile_and_run() {
 }
 
 #[test]
-#[ignore] // obfuscation corrupts byte count — separate bug
 fn sbase_wc_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;
