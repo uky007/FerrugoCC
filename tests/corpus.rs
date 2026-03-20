@@ -12,6 +12,7 @@
 //! ## Tier 2 (回帰・CI 経路)
 //! - **kilo**: テキストエディタ (~1300 行) — smoke + unit 21 テストグループ
 //! - **sbase-cat**: cat(1) from sbase — argv, file I/O, pipe, error handling
+//! - **sbase-wc**: wc(1) from sbase — UTF-8 rune decoding, bsearch, counting
 //!
 //! 各コーパスは normal + obfuscated の両モードでテストする。
 //! 各 corpus ディレクトリの ORIGIN ファイルに upstream 由来情報を記載。
@@ -578,6 +579,41 @@ fn sds_compile_and_run_obfuscated() {
         return;
     }
     assert_eq!(compile_and_run_corpus("corpus/sds/test_sds.c", true), 42);
+}
+
+// ── sbase-wc (Tier 2) ──
+
+#[test]
+#[ignore] // blocked on static 2D array element access bug
+fn sbase_wc_compile_and_run() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, _stderr) = compile_and_run_corpus_ex(
+        "corpus/sbase-wc/test_sbase_wc.c",
+        false,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[],
+    );
+    assert_eq!(code, 42, "sbase-wc test failed with exit code {code}");
+}
+
+#[test]
+#[ignore] // blocked on static 2D array element access bug
+fn sbase_wc_compile_and_run_obfuscated() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, _stderr) = compile_and_run_corpus_ex(
+        "corpus/sbase-wc/test_sbase_wc.c",
+        true,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[],
+    );
+    assert_eq!(
+        code, 42,
+        "sbase-wc obfuscated test failed with exit code {code}"
+    );
 }
 
 // ── sbase-cat (Tier 2) ──

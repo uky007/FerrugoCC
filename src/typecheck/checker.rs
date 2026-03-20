@@ -1286,6 +1286,12 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                 return Ok(Type::Pointer(Box::new(Type::Array(elem.clone(), *size))));
             }
             let inner_type = typecheck_expr(inner, symbols)?;
+            // &func_name: 関数はすでに Pointer(Function) に decay しているので
+            // 二重ポインタにならないようそのまま返す（C 標準: &f == f）
+            if matches!(inner_type, Type::Pointer(ref t) if matches!(t.as_ref(), Type::Function { .. }))
+            {
+                return Ok(inner_type);
+            }
             if !is_lvalue(inner) {
                 return Err(CompileError::TypeError(
                     "cannot take address of non-lvalue expression".to_string(),
@@ -1477,11 +1483,14 @@ fn typecheck_call_args(
         let arg_type = typecheck_expr(arg, symbols)?;
         if arg_type != *expected_type {
             // void ポインタ暗黙変換チェック: 一方が void* なら許可
+            // 関数ポインタ同士は互換として許可（bsearch/qsort comparator 等）
+            let is_fn_ptr = |t: &Type| matches!(t, Type::Pointer(inner) if matches!(inner.as_ref(), Type::Function { .. }));
             if expected_type.is_pointer()
                 && arg_type.is_pointer()
                 && *expected_type != arg_type
                 && !is_void_pointer(expected_type)
                 && !is_void_pointer(&arg_type)
+                && !(is_fn_ptr(expected_type) && is_fn_ptr(&arg_type))
             {
                 return Err(CompileError::TypeError(format!(
                     "incompatible pointer types in argument to function '{}'",
