@@ -584,7 +584,6 @@ fn sds_compile_and_run_obfuscated() {
 // ── sbase-wc (Tier 2) ──
 
 #[test]
-#[ignore] // blocked on static 2D array element access bug
 fn sbase_wc_compile_and_run() {
     if !can_run_x86_64() {
         return;
@@ -599,7 +598,7 @@ fn sbase_wc_compile_and_run() {
 }
 
 #[test]
-#[ignore] // blocked on static 2D array element access bug
+#[ignore] // obfuscation corrupts byte count — separate bug
 fn sbase_wc_compile_and_run_obfuscated() {
     if !can_run_x86_64() {
         return;

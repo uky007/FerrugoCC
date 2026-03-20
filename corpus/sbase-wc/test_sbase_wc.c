@@ -3,8 +3,8 @@
  * Single-file compilation: include all sbase-wc .c files directly.
  * Tests line/word/char counting via pipes (no argv parsing).
  *
- * Known issue: static 2D array element access (sp[i][j]) crashes
- * under FerrugoCC. Tests will be enabled once that bug is fixed.
+ * Note: uses output parameter instead of struct return (FerrugoCC
+ * does not yet support struct return by value for structs > 8 bytes).
  */
 
 #define _FORTIFY_SOURCE 0
@@ -54,38 +54,30 @@ void weprintf(const char *fmt, ...) {
 #include "isspacerune.c"
 #include "fshut.c"
 
-/* wc core logic (extracted from wc.c) */
-struct wc_result {
-    unsigned long nc;
-    unsigned long nl;
-    unsigned long nw;
-};
-
-static struct wc_result do_wc(FILE *fp, const char *name, char cmode) {
-    struct wc_result res;
-    res.nc = 0;
-    res.nl = 0;
-    res.nw = 0;
+/* wc core logic (extracted from wc.c, uses output parameter) */
+static void do_wc(FILE *fp, const char *name, char cmode,
+                  unsigned long *out_nc, unsigned long *out_nl, unsigned long *out_nw) {
+    *out_nc = 0;
+    *out_nl = 0;
+    *out_nw = 0;
 
     int word = 0;
     int rlen;
     Rune c;
 
     while ((rlen = efgetrune(&c, fp, name))) {
-        res.nc += (cmode == 'c') ? rlen : (c != Runeerror);
+        *out_nc += (cmode == 'c') ? rlen : (c != Runeerror);
         if (c == '\n')
-            res.nl++;
+            (*out_nl)++;
         if (!isspacerune(c))
             word = 1;
         else if (word) {
             word = 0;
-            res.nw++;
+            (*out_nw)++;
         }
     }
     if (word)
-        res.nw++;
-
-    return res;
+        (*out_nw)++;
 }
 
 static FILE *make_pipe_fp(const char *data, int len) {
@@ -101,62 +93,64 @@ static int test_wc_basic(void) {
     FILE *fp = make_pipe_fp(text, strlen(text));
     if (!fp) return 1;
 
-    struct wc_result r = do_wc(fp, "test", 'c');
+    unsigned long nc, nl, nw;
+    do_wc(fp, "test", 'c', &nc, &nl, &nw);
     fclose(fp);
 
-    if (r.nl != 2) return 2;
-    if (r.nw != 5) return 3;
-    if (r.nc != 24) return 4;
+    if (nl != 2) return 2;
+    if (nw != 5) return 3;
+    if (nc != 24) return 4;
     return 0;
 }
 
 static int test_wc_empty(void) {
-    const char *text = "";
-    FILE *fp = make_pipe_fp(text, 0);
+    FILE *fp = make_pipe_fp("", 0);
     if (!fp) return 10;
 
-    struct wc_result r = do_wc(fp, "test", 'c');
+    unsigned long nc, nl, nw;
+    do_wc(fp, "test", 'c', &nc, &nl, &nw);
     fclose(fp);
 
-    if (r.nl != 0) return 11;
-    if (r.nw != 0) return 12;
-    if (r.nc != 0) return 13;
+    if (nl != 0) return 11;
+    if (nw != 0) return 12;
+    if (nc != 0) return 13;
     return 0;
 }
 
 static int test_wc_single_line(void) {
-    const char *text = "hello";
-    FILE *fp = make_pipe_fp(text, strlen(text));
+    FILE *fp = make_pipe_fp("hello", 5);
     if (!fp) return 20;
 
-    struct wc_result r = do_wc(fp, "test", 'c');
+    unsigned long nc, nl, nw;
+    do_wc(fp, "test", 'c', &nc, &nl, &nw);
     fclose(fp);
 
-    if (r.nl != 0) return 21;
-    if (r.nw != 1) return 22;
-    if (r.nc != 5) return 23;
+    if (nl != 0) return 21;
+    if (nw != 1) return 22;
+    if (nc != 5) return 23;
     return 0;
 }
 
 static int test_wc_utf8(void) {
     /* "café\n" in UTF-8: c a f 0xc3 0xa9 \n = 6 bytes, 5 runes */
     const char text[7] = { 'c', 'a', 'f', '\xc3', '\xa9', '\n', '\0' };
+    unsigned long nc, nl, nw;
+
     FILE *fp = make_pipe_fp(text, 6);
     if (!fp) return 30;
-
-    struct wc_result r = do_wc(fp, "test", 'c');
+    do_wc(fp, "test", 'c', &nc, &nl, &nw);
     fclose(fp);
-    if (r.nl != 1) return 31;
-    if (r.nw != 1) return 32;
-    if (r.nc != 6) return 33;
+    if (nl != 1) return 31;
+    if (nw != 1) return 32;
+    if (nc != 6) return 33;
 
     fp = make_pipe_fp(text, 6);
     if (!fp) return 34;
-    r = do_wc(fp, "test", 'm');
+    do_wc(fp, "test", 'm', &nc, &nl, &nw);
     fclose(fp);
-    if (r.nl != 1) return 35;
-    if (r.nw != 1) return 36;
-    if (r.nc != 5) return 37;
+    if (nl != 1) return 35;
+    if (nw != 1) return 36;
+    if (nc != 5) return 37;
     return 0;
 }
 
@@ -165,11 +159,12 @@ static int test_wc_spaces(void) {
     FILE *fp = make_pipe_fp(text, strlen(text));
     if (!fp) return 40;
 
-    struct wc_result r = do_wc(fp, "test", 'c');
+    unsigned long nc, nl, nw;
+    do_wc(fp, "test", 'c', &nc, &nl, &nw);
     fclose(fp);
 
-    if (r.nl != 1) return 41;
-    if (r.nw != 2) return 42;
+    if (nl != 1) return 41;
+    if (nw != 2) return 42;
     return 0;
 }
 

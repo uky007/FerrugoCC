@@ -131,8 +131,14 @@ pub fn generate(
             let asm_type = if sv.var_type.is_struct() || is_struct_array {
                 AsmType::Quadword
             } else if sv.var_type.is_array() {
-                // 配列の asm_type は要素型を使用（初期値ディレクティブの選択に必要）
-                type_to_asm(elem_type.unwrap())
+                // 配列の asm_type は末端要素型を使用（多次元配列対応）
+                {
+                    let mut t = elem_type.unwrap();
+                    while let Type::Array(inner, _) = t {
+                        t = inner;
+                    }
+                    type_to_asm(t)
+                }
             } else {
                 type_to_asm(&sv.var_type)
             };
