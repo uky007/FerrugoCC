@@ -1,0 +1,12 @@
+sbase/head — minimalist head(1) from sbase
+Source: https://git.suckless.org/sbase/
+License: MIT
+Retrieved: 2026-03-20
+
+Local patches:
+- test_sbase_head.c: FerrugoCC test harness (exit 42 on success)
+- head_util.h: minimal subset of util.h + arg.h for head only
+- head() reimplemented with compatible types (size_t → unsigned long)
+
+Files from upstream (include path patched only):
+- head.c
