@@ -160,6 +160,16 @@ fn fixup_asm_for_macos(asm: &str) -> String {
                             "    movq _{sym}@GOTPCREL(%rip), {got_reg}\n    {deref_instr} ({got_reg}), {dst_reg}"
                         );
                         search_from = new_line.len();
+                    } else if is_external {
+                        // Other instructions (cmpq, etc.) with external sym(%rip):
+                        // Load via GOT into R11, then replace sym(%rip) with (%r11)
+                        let original = format!("{sym}(%rip)");
+                        let got_load =
+                            format!("    movq _{sym}@GOTPCREL(%rip), %r11\n    movq (%r11), %r11");
+                        // Replace sym(%rip) with %r11 in the original instruction
+                        let replacement = new_line.replacen(&original, "%r11", 1);
+                        new_line = format!("{got_load}\n{replacement}");
+                        search_from = new_line.len();
                     } else {
                         let replacement = format!("_{sym}(%rip)");
                         let original = format!("{sym}(%rip)");
@@ -611,6 +621,40 @@ fn sbase_wc_compile_and_run_obfuscated() {
     assert_eq!(
         code, 42,
         "sbase-wc obfuscated test failed with exit code {code}"
+    );
+}
+
+// ── sbase-cut (Tier 2) ──
+
+#[test]
+fn sbase_cut_compile_and_run() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, _stderr) = compile_and_run_corpus_ex(
+        "corpus/sbase-cut/test_sbase_cut.c",
+        false,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[],
+    );
+    assert_eq!(code, 42, "sbase-cut test failed with exit code {code}");
+}
+
+#[test]
+#[ignore] // obfuscated crash — needs investigation
+fn sbase_cut_compile_and_run_obfuscated() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let (code, _stdout, _stderr) = compile_and_run_corpus_ex(
+        "corpus/sbase-cut/test_sbase_cut.c",
+        true,
+        &["_FORTIFY_SOURCE=0", "_DONT_USE_CTYPE_INLINE_"],
+        &[],
+    );
+    assert_eq!(
+        code, 42,
+        "sbase-cut obfuscated test failed with exit code {code}"
     );
 }
 

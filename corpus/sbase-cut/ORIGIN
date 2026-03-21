@@ -1,0 +1,12 @@
+sbase/cut — minimalist cut(1) from sbase
+Source: https://git.suckless.org/sbase/
+License: MIT
+Retrieved: 2026-03-21
+
+Local patches:
+- test_sbase_cut.c: FerrugoCC test harness (exit 42 on success)
+- cut_util.h: minimal subset of text.h + utf.h + util.h for cut only
+
+Files from upstream (include path patched only):
+- cut.c
+- memmem.c (libutil)
