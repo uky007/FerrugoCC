@@ -2220,3 +2220,26 @@ int main(void) {
 "#;
     assert_eq!(compile_and_run(source, true), 42);
 }
+
+/// Regression: OPSEC rename must update var_types for global pointer variables.
+///
+/// Without the fix, OPSEC renames `gptr` to `_vN` in instructions but not
+/// in var_types. The codegen looks up `_vN` in var_types, finds nothing,
+/// defaults to Int (32-bit), and generates `movl` instead of `movq` for
+/// the pointer store/load → truncated pointer → crash on dereference.
+#[test]
+fn test_obfuscate_opsec_global_ptr() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+static int *gptr = 0;
+int main(void) {
+    int x = 42;
+    gptr = &x;
+    int y = *gptr;
+    return y;
+}
+"#;
+    assert_eq!(compile_and_run(source, true), 42);
+}

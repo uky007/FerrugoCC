@@ -4108,6 +4108,13 @@ fn opsec_sanitize(program: &mut TackyProgram, ctx: &mut ObfCtx, strip: bool) {
         }
     }
 
+    // グローバル変数名の集合（var_types rename 時にローカル変数を除外するため）
+    let static_var_names: HashSet<String> = program
+        .static_vars
+        .iter()
+        .map(|sv| sv.name.clone())
+        .collect();
+
     // 関数名をリネーム
     for func in &mut program.functions {
         if let Some(new_name) = rename_map.get(&func.name) {
@@ -4115,6 +4122,14 @@ fn opsec_sanitize(program: &mut TackyProgram, ctx: &mut ObfCtx, strip: bool) {
         }
         // body 内の全命令を走査してリネーム
         opsec_rename_body(&mut func.body, &rename_map, &defined_funcs);
+        // var_types のキーもリネーム（グローバル変数のみ — ローカル変数を誤 rename しない）
+        for sv_name in static_var_names.iter() {
+            if let Some(new_name) = rename_map.get(sv_name)
+                && let Some(ty) = func.var_types.remove(sv_name)
+            {
+                func.var_types.insert(new_name.clone(), ty);
+            }
+        }
     }
 
     // グローバル変数名をリネーム
