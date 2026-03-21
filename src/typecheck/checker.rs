@@ -294,7 +294,20 @@ fn typecheck_local_declaration(
                     }
                 }
                 return Ok(());
-            } else if let Type::Array(ref elem_type, count) = decl.var_type {
+            } else if let Type::Array(_, count) = &decl.var_type {
+                // 暗黙の配列サイズ: int arr[] = {1,2,3} → arr[3]
+                let count = *count;
+                if count == 0
+                    && !inits.is_empty()
+                    && let Type::Array(ref elem_type, _) = decl.var_type
+                {
+                    let et = (**elem_type).clone();
+                    decl.var_type = Type::Array(Box::new(et), inits.len());
+                }
+                let (elem_type, count) = match &decl.var_type {
+                    Type::Array(e, c) => (e.clone(), *c),
+                    _ => unreachable!(),
+                };
                 // 配列初期化子リスト: 要素数チェック + 各要素の型チェック
                 if inits.len() > count {
                     return Err(CompileError::TypeError(format!(
@@ -306,7 +319,7 @@ fn typecheck_local_declaration(
                 for init_expr in inits.iter_mut() {
                     // struct 配列の要素が CompoundInit なら struct 初期化として検査
                     if let Expr::CompoundInit(sub_inits) = init_expr
-                        && let Type::Struct { ref members, .. } = **elem_type
+                        && let Type::Struct { ref members, .. } = *elem_type
                     {
                         for (sub_init, member) in sub_inits.iter_mut().zip(members.iter()) {
                             let sub_type = typecheck_expr(sub_init, symbols)?;
@@ -322,10 +335,10 @@ fn typecheck_local_declaration(
                         continue;
                     }
                     let init_type = typecheck_expr(init_expr, symbols)?;
-                    if init_type != **elem_type {
+                    if init_type != *elem_type {
                         let old = std::mem::replace(init_expr, Expr::Constant(0));
                         *init_expr = Expr::Cast {
-                            target_type: (**elem_type).clone(),
+                            target_type: (*elem_type).clone(),
                             source_type: init_type,
                             expr: Box::new(old),
                         };

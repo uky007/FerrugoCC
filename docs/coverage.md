@@ -50,6 +50,7 @@
 | Bitwise operators (`& \| ^ ~ << >>`) | ✓ |
 | Logical operators (`&& \|\| !`) | ✓ (including short-circuit) |
 | Designated array initializers (`[N] = val`) | ✓ |
+| Designated struct initializers (`.field = val`) | ✓ |
 | Local struct array compound init | ✓ |
 | String literal array init (`char s[] = "..."`) | ✓ |
 
@@ -125,8 +126,7 @@ pointer arithmetic, enum, long arithmetic, nested structs, do-while/break.
 1. **Struct return > 16 bytes**: Not implemented (hidden pointer parameter ABI). Current corpora only use ≤ 16 byte struct returns.
 2. **`__builtin_ctz/clz/popcount/abs`**: Pass-through first argument (not correctly lowered). Only appears in dead code from system headers.
 3. **`float` precision**: Treated as `double` — no single-precision IEEE 754.
-4. **Designated struct initializers** (`.field = val`): Not supported.
-5. **Implicit array size** (`int arr[] = {1,2,3}`): Not supported at local scope.
+4. **Implicit array size** (`int arr[] = {1,2,3}`): Not supported at local scope.
 
 ## Platform Support
 

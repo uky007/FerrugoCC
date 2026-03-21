@@ -632,3 +632,80 @@ int main(void) {
 "#;
     assert_meaning_preserved(source, "do_while_break");
 }
+
+/// Implicit array size + designated initializers
+#[test]
+fn mp_initializers() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int main(void) {
+    /* implicit array size */
+    int arr[] = {5, 10, 15, 20};
+    int i, sum = 0;
+    for (i = 0; i < 4; i++) sum += arr[i];
+    printf("sum=%d\n", sum);
+
+    /* designated array initializer */
+    char table[128];
+    int j;
+    for (j = 0; j < 128; j++) table[j] = 0;
+    table['A'] = 1;
+    table['Z'] = 26;
+    printf("A=%d Z=%d\n", table['A'], table['Z']);
+
+    /* designated struct initializer */
+    struct { int x; int y; int z; } pt = { .z = 30, .x = 10, .y = 20 };
+    printf("xyz=%d %d %d\n", pt.x, pt.y, pt.z);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "initializers");
+}
+
+/// Linked list operations
+#[test]
+fn mp_linked_list() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+void *malloc(unsigned long);
+void free(void *);
+
+struct node { int val; struct node *next; };
+
+struct node *push(struct node *head, int val) {
+    struct node *n = (struct node *)malloc(sizeof(struct node));
+    n->val = val;
+    n->next = head;
+    return n;
+}
+
+void print_list(struct node *head) {
+    struct node *p;
+    for (p = head; p; p = p->next)
+        printf("%d ", p->val);
+    printf("\n");
+}
+
+void free_list(struct node *head) {
+    struct node *p;
+    while (head) { p = head; head = head->next; free(p); }
+}
+
+int main(void) {
+    struct node *list = 0;
+    list = push(list, 10);
+    list = push(list, 20);
+    list = push(list, 30);
+    print_list(list);
+    free_list(list);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "linked_list");
+}
