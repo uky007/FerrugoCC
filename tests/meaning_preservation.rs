@@ -436,3 +436,199 @@ int main(void) {
 "#;
     assert_meaning_preserved(source, "globals");
 }
+
+/// Variadic functions (multiple printf formats)
+#[test]
+fn mp_variadic() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int snprintf(char *, unsigned long, const char *, ...);
+int strcmp(const char *, const char *);
+int main(void) {
+    printf("%d %ld %s %c\n", 42, 100L, "hello", 'X');
+    char buf[64];
+    snprintf(buf, 64, "val=%d", 123);
+    printf("%s\n", buf);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "variadic");
+}
+
+/// Bitwise operations
+#[test]
+fn mp_bitwise() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int main(void) {
+    int a = 0xFF00;
+    int b = 0x0F0F;
+    printf("and=%x or=%x xor=%x not=%x\n", a & b, a | b, a ^ b, ~a & 0xFFFF);
+    printf("shl=%x shr=%x\n", b << 4, a >> 4);
+    /* flag manipulation */
+    unsigned int flags = 0;
+    flags |= (1 << 3);
+    flags |= (1 << 7);
+    flags &= ~(1 << 3);
+    printf("flags=%x\n", flags);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "bitwise");
+}
+
+/// Logical operators in complex expressions
+#[test]
+fn mp_logical() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int main(void) {
+    int a = 5, b = 0, c = 10;
+    printf("%d %d %d\n", a && c, a && b, b || c);
+    printf("%d %d\n", !a, !b);
+    /* short-circuit: b is 0 so c/b should not execute */
+    int x = (b != 0) && (c / b > 0);
+    printf("short=%d\n", x);
+    /* ternary */
+    printf("t1=%d t2=%d\n", a > 0 ? 1 : 0, b > 0 ? 1 : 0);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "logical");
+}
+
+/// Pointer arithmetic + casting
+#[test]
+fn mp_pointer_arith() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int main(void) {
+    int arr[5];
+    arr[0] = 10; arr[1] = 20; arr[2] = 30; arr[3] = 40; arr[4] = 50;
+    int *p = arr;
+    printf("%d %d %d\n", *p, *(p+2), *(p+4));
+    p += 3;
+    printf("offset=%d\n", *p);
+    /* pointer difference */
+    int *q = &arr[1];
+    long diff = p - q;
+    printf("diff=%ld\n", diff);
+    /* cast to char* and back */
+    char *cp = (char *)arr;
+    int val = *(int *)(cp + 8); /* arr[2] */
+    printf("cast=%d\n", val);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "pointer_arith");
+}
+
+/// Enum constants
+#[test]
+fn mp_enum() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+enum color { RED = 1, GREEN = 2, BLUE = 4 };
+const char *color_name(enum color c) {
+    switch (c) {
+    case RED: return "red";
+    case GREEN: return "green";
+    case BLUE: return "blue";
+    default: return "unknown";
+    }
+}
+int main(void) {
+    printf("%s %s %s\n", color_name(RED), color_name(GREEN), color_name(BLUE));
+    int flags = RED | BLUE;
+    printf("flags=%d has_red=%d has_green=%d\n", flags, !!(flags & RED), !!(flags & GREEN));
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "enum");
+}
+
+/// Long arithmetic + unsigned overflow
+#[test]
+fn mp_long_arithmetic() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int main(void) {
+    long a = 1000000000L;
+    long b = 3000000000L;
+    printf("sum=%ld\n", a + b);
+    printf("prod=%ld\n", a * 4L);
+    unsigned int u = 0xFFFFFFFF;
+    u += 1;
+    printf("overflow=%u\n", u);
+    unsigned long ul = 0xFFFFFFFFFFFFFFFFUL;
+    printf("max=%lu\n", ul);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "long_arithmetic");
+}
+
+/// Nested struct + array of struct
+#[test]
+fn mp_nested_struct() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+struct inner { int x; int y; };
+struct outer { struct inner pos; int id; };
+int main(void) {
+    struct outer items[3];
+    items[0].pos.x = 1; items[0].pos.y = 2; items[0].id = 100;
+    items[1].pos.x = 3; items[1].pos.y = 4; items[1].id = 200;
+    items[2].pos.x = 5; items[2].pos.y = 6; items[2].id = 300;
+    int i;
+    for (i = 0; i < 3; i++)
+        printf("id=%d x=%d y=%d\n", items[i].id, items[i].pos.x, items[i].pos.y);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "nested_struct");
+}
+
+/// Do-while + break + continue
+#[test]
+fn mp_do_while_break() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int main(void) {
+    int i = 0, sum = 0;
+    do {
+        i++;
+        if (i == 3) continue;
+        if (i == 7) break;
+        sum += i;
+    } while (i < 10);
+    printf("i=%d sum=%d\n", i, sum);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "do_while_break");
+}
