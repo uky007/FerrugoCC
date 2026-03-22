@@ -50,3 +50,27 @@
 | sbase-uniq | suckless/sbase | MIT | ~150 | 5 | POSIX uniq(1) |
 
 **Total**: ~5,150 lines of real-world C code, 62 test groups.
+
+## Symbol Exposure (OPSEC)
+
+| Corpus | Normal .globl | Obf .globl | Reduction |
+|--------|---------------|------------|-----------|
+| jsmn | 1 | 1 | — |
+| inih | 8 | 1 | 87.5% |
+| sds | 50 | 1 | 98.0% |
+| pdjson | 24 | 1 | 95.8% |
+| sbase-cat | 13 | 1 | 92.3% |
+| sbase-wc | 23 | 1 | 95.7% |
+
+OPSEC strip reduces all exported symbols to `main` only.
+
+## String Literal Exposure
+
+| Corpus | Normal | Obfuscated | Encrypted |
+|--------|--------|------------|-----------|
+| jsmn | 1 | 0 | 100% |
+| inih | 8 | 0 | 100% |
+| sds | 21 | 0 | 100% |
+| pdjson | 79 | 0 | 100% |
+
+Level 3 string encryption eliminates all readable string literals.
