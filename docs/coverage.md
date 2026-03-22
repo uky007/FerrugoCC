@@ -1,5 +1,7 @@
 # FerrugoCC — Coverage & Status
 
+> **Version**: v0.3.0 (2026-03-22)
+
 ## C Language Coverage
 
 ### Fully Supported Types

@@ -1,5 +1,7 @@
 # FerrugoCC — Evaluation Methodology
 
+> **Baseline version**: v0.3.0 (tag `v0.3.0`, 2026-03-22)
+
 ## 1. Correctness Evaluation
 
 ### 1.1 Corpus Pass Rate

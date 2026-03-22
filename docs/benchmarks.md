@@ -1,5 +1,9 @@
 # FerrugoCC — Benchmark Results
 
+> **Measured at**: v0.3.0 (tag `v0.3.0`, commit `110afd4`, 2026-03-22)
+> **Platform**: macOS (Apple Silicon via Rosetta 2, x86_64 output)
+> **Compiler**: `rustc 1.87.0`, `gcc (Apple clang)`
+
 ## Code Size (Assembly Lines)
 
 | Corpus | C Lines | Normal | Level 1 | Level 2 | Level 3 | L3/Normal |
