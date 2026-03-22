@@ -2101,21 +2101,238 @@ impl TackyGenerator {
             return self.generate_bswap(name, val, instrs);
         }
 
+        // __builtin_abs / __builtin_labs: val < 0 ? -val : val
+        if name == "__builtin_abs" || name == "__builtin_labs" {
+            let is_long = name == "__builtin_labs";
+            let (val, _) = self.generate_expr(&args[0], instrs, func_table)?;
+            let ty = if is_long { Type::Long } else { Type::Int };
+            let zero = if is_long {
+                TackyVal::Constant(TackyConst::Long(0))
+            } else {
+                TackyVal::Constant(TackyConst::Int(0))
+            };
+            let cmp = self.new_temp(Type::Int);
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::LessThan,
+                left: val.clone(),
+                right: zero,
+                dst: cmp.clone(),
+            });
+            let neg = self.new_temp(ty.clone());
+            instrs.push(TackyInstruction::Unary {
+                op: TackyUnaryOp::Negate,
+                src: val.clone(),
+                dst: neg.clone(),
+            });
+            let result = self.new_temp(ty.clone());
+            let else_label = self.new_label("abs_else");
+            let end_label = self.new_label("abs_end");
+            instrs.push(TackyInstruction::JumpIfZero {
+                condition: cmp,
+                target: else_label.clone(),
+            });
+            instrs.push(TackyInstruction::Copy {
+                src: neg,
+                dst: result.clone(),
+            });
+            instrs.push(TackyInstruction::Jump(end_label.clone()));
+            instrs.push(TackyInstruction::Label(else_label));
+            instrs.push(TackyInstruction::Copy {
+                src: val,
+                dst: result.clone(),
+            });
+            instrs.push(TackyInstruction::Label(end_label));
+            return Ok((result, ty));
+        }
+
+        // __builtin_popcount / __builtin_popcountl: count set bits
+        // loop: count=0; while(val) { count += val & 1; val >>= 1; }
+        if name == "__builtin_popcount" || name == "__builtin_popcountl" {
+            let is_long = name == "__builtin_popcountl";
+            let (val, _) = self.generate_expr(&args[0], instrs, func_table)?;
+            let ty = if is_long { Type::ULong } else { Type::UInt };
+            let v = self.new_temp(ty.clone());
+            instrs.push(TackyInstruction::Copy {
+                src: val,
+                dst: v.clone(),
+            });
+            let count = self.new_temp(Type::Int);
+            instrs.push(TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Int(0)),
+                dst: count.clone(),
+            });
+            let loop_start = self.new_label("popcnt_loop");
+            let loop_end = self.new_label("popcnt_end");
+            instrs.push(TackyInstruction::Label(loop_start.clone()));
+            instrs.push(TackyInstruction::JumpIfZero {
+                condition: v.clone(),
+                target: loop_end.clone(),
+            });
+            let one = if is_long {
+                TackyVal::Constant(TackyConst::ULong(1))
+            } else {
+                TackyVal::Constant(TackyConst::UInt(1))
+            };
+            let bit = self.new_temp(ty.clone());
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::BitwiseAnd,
+                left: v.clone(),
+                right: one.clone(),
+                dst: bit.clone(),
+            });
+            let bit_int = self.new_temp(Type::Int);
+            if is_long {
+                instrs.push(TackyInstruction::Truncate {
+                    src: bit,
+                    dst: bit_int.clone(),
+                });
+            } else {
+                instrs.push(TackyInstruction::Copy {
+                    src: bit,
+                    dst: bit_int.clone(),
+                });
+            }
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::Add,
+                left: count.clone(),
+                right: bit_int,
+                dst: count.clone(),
+            });
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::ShiftRight,
+                left: v.clone(),
+                right: one,
+                dst: v.clone(),
+            });
+            instrs.push(TackyInstruction::Jump(loop_start));
+            instrs.push(TackyInstruction::Label(loop_end));
+            return Ok((count, Type::Int));
+        }
+
+        // __builtin_ctz / __builtin_ctzl: count trailing zeros
+        // loop: count=0; while(!(val & 1)) { count++; val >>= 1; }
+        if name == "__builtin_ctz" || name == "__builtin_ctzl" {
+            let is_long = name == "__builtin_ctzl";
+            let (val, _) = self.generate_expr(&args[0], instrs, func_table)?;
+            let ty = if is_long { Type::ULong } else { Type::UInt };
+            let v = self.new_temp(ty.clone());
+            instrs.push(TackyInstruction::Copy {
+                src: val,
+                dst: v.clone(),
+            });
+            let count = self.new_temp(Type::Int);
+            instrs.push(TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Int(0)),
+                dst: count.clone(),
+            });
+            let one = if is_long {
+                TackyVal::Constant(TackyConst::ULong(1))
+            } else {
+                TackyVal::Constant(TackyConst::UInt(1))
+            };
+            let loop_start = self.new_label("ctz_loop");
+            let loop_end = self.new_label("ctz_end");
+            instrs.push(TackyInstruction::Label(loop_start.clone()));
+            let bit = self.new_temp(ty.clone());
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::BitwiseAnd,
+                left: v.clone(),
+                right: one.clone(),
+                dst: bit.clone(),
+            });
+            instrs.push(TackyInstruction::JumpIfNotZero {
+                condition: bit,
+                target: loop_end.clone(),
+            });
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::Add,
+                left: count.clone(),
+                right: TackyVal::Constant(TackyConst::Int(1)),
+                dst: count.clone(),
+            });
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::ShiftRight,
+                left: v.clone(),
+                right: one.clone(),
+                dst: v.clone(),
+            });
+            instrs.push(TackyInstruction::Jump(loop_start));
+            instrs.push(TackyInstruction::Label(loop_end));
+            return Ok((count, Type::Int));
+        }
+
+        // __builtin_clz / __builtin_clzl: count leading zeros
+        // Use shift loop: count=0; mask = 1<<(bits-1); while(!(val & mask)) { count++; mask >>= 1; }
+        if name == "__builtin_clz" || name == "__builtin_clzl" {
+            let is_long = name == "__builtin_clzl";
+            let (val, _) = self.generate_expr(&args[0], instrs, func_table)?;
+            let ty = if is_long { Type::ULong } else { Type::UInt };
+            let bits = if is_long { 64 } else { 32 };
+            let mask = self.new_temp(ty.clone());
+            let top_bit = if is_long {
+                TackyVal::Constant(TackyConst::ULong(1u64 << 63))
+            } else {
+                TackyVal::Constant(TackyConst::UInt(1u32 << 31))
+            };
+            instrs.push(TackyInstruction::Copy {
+                src: top_bit,
+                dst: mask.clone(),
+            });
+            let count = self.new_temp(Type::Int);
+            instrs.push(TackyInstruction::Copy {
+                src: TackyVal::Constant(TackyConst::Int(0)),
+                dst: count.clone(),
+            });
+            let one = if is_long {
+                TackyVal::Constant(TackyConst::ULong(1))
+            } else {
+                TackyVal::Constant(TackyConst::UInt(1))
+            };
+            let loop_start = self.new_label("clz_loop");
+            let loop_end = self.new_label("clz_end");
+            instrs.push(TackyInstruction::Label(loop_start.clone()));
+            // Check if count >= bits (val was 0)
+            let count_check = self.new_temp(Type::Int);
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::GreaterOrEqual,
+                left: count.clone(),
+                right: TackyVal::Constant(TackyConst::Int(bits)),
+                dst: count_check.clone(),
+            });
+            instrs.push(TackyInstruction::JumpIfNotZero {
+                condition: count_check,
+                target: loop_end.clone(),
+            });
+            let bit = self.new_temp(ty.clone());
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::BitwiseAnd,
+                left: val.clone(),
+                right: mask.clone(),
+                dst: bit.clone(),
+            });
+            instrs.push(TackyInstruction::JumpIfNotZero {
+                condition: bit,
+                target: loop_end.clone(),
+            });
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::Add,
+                left: count.clone(),
+                right: TackyVal::Constant(TackyConst::Int(1)),
+                dst: count.clone(),
+            });
+            instrs.push(TackyInstruction::Binary {
+                op: TackyBinaryOp::ShiftRight,
+                left: mask.clone(),
+                right: one,
+                dst: mask.clone(),
+            });
+            instrs.push(TackyInstruction::Jump(loop_start));
+            instrs.push(TackyInstruction::Label(loop_end));
+            return Ok((count, Type::Int));
+        }
+
         // GCC builtins (whitelist): evaluate args, return first arg value.
-        // __builtin_expect is handled separately in the checker.
-        if matches!(
-            name,
-            "__builtin_expect"
-                | "__builtin_object_size"
-                | "__builtin_ctz"
-                | "__builtin_ctzl"
-                | "__builtin_clz"
-                | "__builtin_clzl"
-                | "__builtin_popcount"
-                | "__builtin_popcountl"
-                | "__builtin_abs"
-                | "__builtin_labs"
-        ) {
+        if matches!(name, "__builtin_expect" | "__builtin_object_size") {
             let (val, ty) = self.generate_expr(&args[0], instrs, func_table)?;
             for arg in args.iter().skip(1) {
                 let _ = self.generate_expr(arg, instrs, func_table)?;

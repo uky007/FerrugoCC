@@ -68,6 +68,10 @@
 | `__builtin_va_list` | → `va_list` |
 | `__builtin_va_start/end/arg/copy` | correctly lowered |
 | `__builtin_bswap{16,32,64}` | lowered to shift/mask/or |
+| `__builtin_abs/labs` | lowered to conditional negate |
+| `__builtin_popcount/popcountl` | lowered to bit-count loop |
+| `__builtin_ctz/ctzl` | lowered to trailing-zero loop |
+| `__builtin_clz/clzl` | lowered to leading-zero loop |
 | `__builtin_expect` | returns first arg (hint ignored) |
 | `_Nonnull`/`_Nullable` | skipped |
 | `const`/`volatile`/`restrict` | parsed, semantically ignored |
@@ -124,7 +128,7 @@ pointer arithmetic, enum, long arithmetic, nested structs, do-while/break.
 ## Known Limitations
 
 1. **Struct return > 16 bytes**: Not implemented (hidden pointer parameter ABI). Current corpora only use ≤ 16 byte struct returns.
-2. **`__builtin_ctz/clz/popcount/abs`**: Pass-through first argument (not correctly lowered). Only appears in dead code from system headers.
+2. ~~`__builtin_ctz/clz/popcount/abs`~~: Now correctly lowered (conditional negate, bit-count/trailing-zero/leading-zero loops).
 3. **`float` precision**: Treated as `double` — no single-precision IEEE 754.
 4. **Implicit array size** (`int arr[] = {1,2,3}`): Not supported at local scope.
 

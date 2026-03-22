@@ -709,3 +709,48 @@ int main(void) {
 "#;
     assert_meaning_preserved(source, "linked_list");
 }
+
+/// Builtin abs/labs
+#[test]
+fn mp_builtin_abs() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int __builtin_abs(int);
+long __builtin_labs(long);
+int main(void) {
+    printf("%d %d %d\n", __builtin_abs(5), __builtin_abs(-5), __builtin_abs(0));
+    printf("%ld %ld\n", __builtin_labs(100L), __builtin_labs(-100L));
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "builtin_abs");
+}
+
+/// Builtin popcount/ctz/clz
+#[test]
+fn mp_builtin_bits() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int __builtin_popcount(unsigned int);
+int __builtin_popcountl(unsigned long);
+int __builtin_ctz(unsigned int);
+int __builtin_clz(unsigned int);
+int main(void) {
+    printf("pop=%d\n", __builtin_popcount(0xFF));  /* 8 */
+    printf("pop=%d\n", __builtin_popcount(0x0));   /* 0 */
+    printf("pop=%d\n", __builtin_popcount(0x1));   /* 1 */
+    printf("ctz=%d\n", __builtin_ctz(8));           /* 3 */
+    printf("ctz=%d\n", __builtin_ctz(1));           /* 0 */
+    printf("clz=%d\n", __builtin_clz(1));           /* 31 */
+    printf("clz=%d\n", __builtin_clz(0x80000000));  /* 0 */
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "builtin_bits");
+}
