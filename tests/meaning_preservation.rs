@@ -754,3 +754,51 @@ int main(void) {
 "#;
     assert_meaning_preserved(source, "builtin_bits");
 }
+
+/// Struct return > 16 bytes (hidden sret pointer)
+#[test]
+fn mp_large_struct_return() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+struct big { long a; long b; long c; };
+struct big make(long x, long y, long z) {
+    struct big b;
+    b.a = x; b.b = y; b.c = z;
+    return b;
+}
+int main(void) {
+    struct big b = make(10, 20, 30);
+    printf("a=%ld b=%ld c=%ld\n", b.a, b.b, b.c);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "large_struct_return");
+}
+
+/// Struct return > 16 bytes via function pointer (indirect call)
+#[test]
+fn mp_large_struct_return_indirect() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+struct big { long a; long b; long c; };
+struct big make_impl(long x, long y, long z) {
+    struct big b;
+    b.a = x; b.b = y; b.c = z;
+    return b;
+}
+typedef struct big (*maker_fn)(long, long, long);
+int main(void) {
+    maker_fn fp = make_impl;
+    struct big b = fp(100, 200, 300);
+    printf("a=%ld b=%ld c=%ld\n", b.a, b.b, b.c);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "large_struct_return_indirect");
+}

@@ -129,7 +129,7 @@ pointer arithmetic, enum, long arithmetic, nested structs, do-while/break.
 
 ## Known Limitations
 
-1. **Struct return > 16 bytes**: Not implemented (hidden pointer parameter ABI). Current corpora only use ≤ 16 byte struct returns.
+1. ~~**Struct return > 16 bytes**~~: Now implemented (hidden sret pointer parameter, System V ABI).
 2. ~~`__builtin_ctz/clz/popcount/abs`~~: Now correctly lowered (conditional negate, bit-count/trailing-zero/leading-zero loops).
 3. **`float` precision**: Treated as `double` — no single-precision IEEE 754.
 4. **Implicit array size** (`int arr[] = {1,2,3}`): Not supported at local scope.

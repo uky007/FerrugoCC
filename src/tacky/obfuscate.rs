@@ -387,6 +387,7 @@ fn generate_strlen(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
@@ -517,6 +518,7 @@ fn generate_strcmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
@@ -621,6 +623,7 @@ fn generate_strcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
@@ -727,6 +730,7 @@ fn generate_memcpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
@@ -825,6 +829,7 @@ fn generate_memset(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
@@ -950,6 +955,7 @@ fn generate_memcmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
@@ -1082,6 +1088,7 @@ fn generate_strncmp(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
@@ -1236,6 +1243,7 @@ fn generate_strncpy(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
@@ -1349,6 +1357,7 @@ fn generate_strchr(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
@@ -1489,6 +1498,7 @@ fn generate_strcat(ctx: &mut ObfCtx, name: &str) -> TackyFunction {
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
@@ -2242,6 +2252,7 @@ fn build_outlined_function(
         var_types,
         is_variadic: false,
         static_var_names: HashSet::new(),
+        has_sret: false,
     }
 }
 
