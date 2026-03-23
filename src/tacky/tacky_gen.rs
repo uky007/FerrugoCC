@@ -633,7 +633,7 @@ impl TackyGenerator {
         self.var_map = global_var_map.clone();
         self.current_func_params = func.params.iter().map(|(t, _)| t.clone()).collect();
 
-        let params: Vec<String> = func.params.iter().map(|(_, name)| name.clone()).collect();
+        let mut params: Vec<String> = func.params.iter().map(|(_, name)| name.clone()).collect();
 
         // パラメータを変数マップに登録
         for (param_type, param_name) in &func.params {
@@ -696,6 +696,32 @@ impl TackyGenerator {
             )
             .collect();
 
+        // System V ABI: struct > 16 bytes は hidden sret pointer で返す
+        let has_sret = func.return_type.is_struct() && func.return_type.size() > 16;
+        if has_sret {
+            params.insert(0, "__sret_ptr".to_string());
+            self.var_types.insert(
+                "__sret_ptr".to_string(),
+                Type::Pointer(Box::new(func.return_type.clone())),
+            );
+            let struct_size = func.return_type.size();
+            let mut new_body = Vec::new();
+            for instr in instrs {
+                match instr {
+                    TackyInstruction::Return(val) => {
+                        new_body.push(TackyInstruction::CopyStruct {
+                            src: val,
+                            dst: TackyVal::Var("__sret_ptr".to_string()),
+                            size: struct_size,
+                        });
+                        new_body.push(TackyInstruction::ReturnVoid);
+                    }
+                    other => new_body.push(other),
+                }
+            }
+            instrs = new_body;
+        }
+
         Ok(TackyFunction {
             name: func.name.clone(),
             global,
@@ -705,6 +731,7 @@ impl TackyGenerator {
             var_types: self.var_types.clone(),
             is_variadic: func.is_variadic,
             static_var_names,
+            has_sret,
         })
     }
 
@@ -2380,16 +2407,51 @@ impl TackyGenerator {
             fn_ptr_is_variadic(self.var_map.get(name))
         };
 
-        let dst = self.new_temp(return_type.clone());
+        // System V ABI: struct > 16 bytes → hidden sret pointer as first arg
+        let needs_sret = return_type.is_struct() && return_type.size() > 16;
+        let dst = if needs_sret {
+            let sret_buf = format!("__sret_buf.{}", self.temp_counter);
+            self.temp_counter += 1;
+            self.var_types.insert(sret_buf.clone(), return_type.clone());
+            let sret_ptr = self.new_temp(Type::Pointer(Box::new(return_type.clone())));
+            instrs.push(TackyInstruction::GetAddress {
+                src: TackyVal::Var(sret_buf.clone()),
+                dst: sret_ptr.clone(),
+            });
+            arg_vals.insert(0, sret_ptr);
+            TackyVal::Var(sret_buf)
+        } else {
+            self.new_temp(return_type.clone())
+        };
+
+        let call_dst = if needs_sret {
+            self.new_temp(Type::Void)
+        } else {
+            dst.clone()
+        };
+
         instrs.push(TackyInstruction::FunCall {
             name: name.to_string(),
             args: arg_vals,
-            dst: dst.clone(),
-            dst_type: return_type.clone(),
+            dst: call_dst,
+            dst_type: if needs_sret {
+                Type::Void
+            } else {
+                return_type.clone()
+            },
             is_variadic,
         });
 
-        Ok((dst, return_type))
+        if needs_sret {
+            let addr = self.new_temp(Type::Pointer(Box::new(return_type.clone())));
+            instrs.push(TackyInstruction::GetAddress {
+                src: dst.clone(),
+                dst: addr.clone(),
+            });
+            Ok((addr, Type::Pointer(Box::new(return_type))))
+        } else {
+            Ok((dst, return_type))
+        }
     }
 
     /// 式経由の間接呼び出し: ops[0](a, b), s.callback(x) など。
@@ -2435,16 +2497,51 @@ impl TackyGenerator {
             arg_vals.push(val);
         }
 
-        let dst = self.new_temp(return_type.clone());
+        // System V ABI: struct > 16 bytes → hidden sret pointer as first arg
+        let needs_sret = return_type.is_struct() && return_type.size() > 16;
+        let dst = if needs_sret {
+            let sret_buf = format!("__sret_buf.{}", self.temp_counter);
+            self.temp_counter += 1;
+            self.var_types.insert(sret_buf.clone(), return_type.clone());
+            let sret_ptr = self.new_temp(Type::Pointer(Box::new(return_type.clone())));
+            instrs.push(TackyInstruction::GetAddress {
+                src: TackyVal::Var(sret_buf.clone()),
+                dst: sret_ptr.clone(),
+            });
+            arg_vals.insert(0, sret_ptr);
+            TackyVal::Var(sret_buf)
+        } else {
+            self.new_temp(return_type.clone())
+        };
+
+        let call_dst = if needs_sret {
+            self.new_temp(Type::Void)
+        } else {
+            dst.clone()
+        };
+
         instrs.push(TackyInstruction::FunCall {
             name: tmp_name,
             args: arg_vals,
-            dst: dst.clone(),
-            dst_type: return_type.clone(),
+            dst: call_dst,
+            dst_type: if needs_sret {
+                Type::Void
+            } else {
+                return_type.clone()
+            },
             is_variadic,
         });
 
-        Ok((dst, return_type))
+        if needs_sret {
+            let addr = self.new_temp(Type::Pointer(Box::new(return_type.clone())));
+            instrs.push(TackyInstruction::GetAddress {
+                src: dst.clone(),
+                dst: addr.clone(),
+            });
+            Ok((addr, Type::Pointer(Box::new(return_type))))
+        } else {
+            Ok((dst, return_type))
+        }
     }
 
     /// __builtin_bswap{16,32,64} を shift+mask+or に lowering する。

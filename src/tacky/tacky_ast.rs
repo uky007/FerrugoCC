@@ -37,6 +37,8 @@ pub struct TackyFunction {
     pub is_variadic: bool,
     /// グローバル/静的変数の名前セット（最適化で書き込み削除を防止）
     pub static_var_names: HashSet<String>,
+    /// System V ABI: struct > 16 bytes の返却に hidden sret pointer を使う
+    pub has_sret: bool,
 }
 
 /// TACKY 三アドレスコード命令

@@ -624,6 +624,19 @@ fn generate_instruction(
         }
 
         TackyInstruction::ReturnVoid => {
+            // sret 関数: sret pointer を %rax に返す (System V ABI)
+            if func_return_type.is_struct() && func_return_type.size() > 16 {
+                let sret_op = val_to_operand(
+                    &TackyVal::Var("__sret_ptr".to_string()),
+                    static_vars,
+                    stack_vars,
+                )?;
+                instrs.push(Instruction::Mov {
+                    asm_type: AsmType::Quadword,
+                    src: sret_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+            }
             instrs.push(Instruction::Ret);
         }
 
