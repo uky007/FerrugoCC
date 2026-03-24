@@ -33,9 +33,7 @@
 - Variable-length arrays (VLA)
 - `_Generic`, `_Atomic`, `_Thread_local`, `_Alignas`/`_Alignof`
 - Flexible array members (`struct { int n; char data[]; }`)
-- Struct return by value > 16 bytes (hidden pointer parameter)
 - Compound literals in expression context (`(type){init}`)
-- Designated struct member initializers (`.field = val`)
 
 ### Statements & Expressions
 | Feature | Status |
@@ -101,10 +99,12 @@
 | sbase-uniq | 5 | ✓ | ✓ | Line dedup, memcmp, realloc |
 
 ### Meaning-Preservation Tests
-16 categories verifying `normal.stdout == obfuscated.stdout`:
+22 categories verifying `normal.stdout == obfuscated.stdout`:
 arithmetic, strings, loops/arrays, struct/pointer, function pointers,
 switch/case, recursion, globals, variadic, bitwise, logical/ternary,
-pointer arithmetic, enum, long arithmetic, nested structs, do-while/break.
+pointer arithmetic, enum, long arithmetic, nested structs, do-while/break,
+initializers, linked list, builtin abs, builtin bits,
+large struct return (direct), large struct return (indirect).
 
 ## Obfuscation Passes
 
@@ -129,10 +129,7 @@ pointer arithmetic, enum, long arithmetic, nested structs, do-while/break.
 
 ## Known Limitations
 
-1. ~~**Struct return > 16 bytes**~~: Now implemented (hidden sret pointer parameter, System V ABI).
-2. ~~`__builtin_ctz/clz/popcount/abs`~~: Now correctly lowered (conditional negate, bit-count/trailing-zero/leading-zero loops).
-3. **`float` precision**: Treated as `double` — no single-precision IEEE 754.
-4. **Implicit array size** (`int arr[] = {1,2,3}`): Not supported at local scope.
+1. **`float` precision**: Treated as `double` — no single-precision IEEE 754. This does not affect any current corpus (none use `float`-specific precision).
 
 ## Platform Support
 
