@@ -16,16 +16,17 @@
 
 FerrugoCC is an experimental C compiler with integrated multi-pass
 obfuscation, implemented in Rust. It compiles a practical subset of C
-to x86_64 assembly and applies up to 16 obfuscation transformations
-(control flow flattening, string encryption, opaque predicates, function
-outlining/inlining, VM virtualization, etc.) while preserving program
-semantics. We evaluate correctness on 11 real-world open-source C
-programs totaling ~5,150 lines, demonstrating 100% meaning preservation
-between normal and obfuscated compilation. At the default obfuscation
-level, code size increases by 10.1x on average, exported symbols are
-reduced by 95%+, and all string literals are encrypted — making reverse
-engineering substantially more difficult while maintaining functional
-equivalence.
+(not full ISO C — see §3 and §7 for scope and limitations) to x86_64
+assembly and applies up to 16 obfuscation transformations while
+preserving program semantics. We evaluate correctness on 11 real-world
+open-source C programs totaling ~5,150 lines, demonstrating meaning
+preservation between normal and obfuscated compilation across 22 test
+categories. At the default obfuscation level (Level 3), code size
+increases by 10.1x on average, exported symbols are reduced by 95%+,
+and all string literals are encrypted. These results suggest that
+integrated source-level obfuscation can provide meaningful resistance
+to static reverse engineering for the supported C subset, while
+maintaining functional equivalence verified by automated testing.
 
 ## 3. Supported Coverage
 
@@ -86,24 +87,28 @@ builtin bits, large struct return direct, large struct return indirect).
 
 → Full details: [docs/eval-results.md](eval-results.md)
 
-| Metric | Value |
-|--------|-------|
-| Total tests | 121 |
-| Pass rate | 100% (0 failures, 0 ignored) |
-| Corpora (total) | 11 (5 primary + 6 supplemental) |
-| C code compiled | ~5,150 lines |
-| Level 3 code expansion | 10.1x average (8.1x–11.6x) |
-| Symbol reduction | 95%+ (all corpora → `main` only) |
-| String encryption | 100% (0 readable strings in obfuscated binaries) |
-| Meaning preservation | 22/22 categories pass |
-| Obfuscation passes | 16 (4 configurable levels) |
+| Metric | Value | Source |
+|--------|-------|--------|
+| Total tests | 121 | `cargo test` (corpus 24 + meaning-preservation 22 + obfuscation 75) |
+| Pass rate | 100% (0 failures, 0 ignored) | [eval-results.md](eval-results.md) §Test Suite |
+| Corpora (total) | 11 (5 primary + 6 supplemental) | [paper-corpus-selection.md](paper-corpus-selection.md) |
+| C code compiled | ~5,150 lines | Sum of corpus ORIGIN files |
+| Level 3 code expansion | 10.1x average (8.1x–11.6x) | [eval-results.md](eval-results.md) §Code Size |
+| Symbol reduction | 95%+ (all corpora → `main` only) | [eval-results.md](eval-results.md) §Symbol Exposure |
+| String encryption | 100% (0 readable strings) | [eval-results.md](eval-results.md) §String Exposure |
+| Meaning preservation | 22/22 categories pass | `cargo test --test meaning_preservation` |
+| Obfuscation passes | 16 (4 configurable levels) | [coverage.md](coverage.md) §Obfuscation Passes |
 
 ## 7. Known Limitations
 
-1. **`float` precision**: `float` is treated as `double`. No corpus uses
-   `float`-specific precision, so this does not affect evaluation results.
-   In the paper, this is stated as a design decision for the current
-   prototype ("double-only floating point").
+1. **`float` precision**: `float` is treated as `double` in the current
+   implementation. All floating-point arithmetic uses 64-bit IEEE 754
+   double-precision; single-precision 32-bit IEEE 754 (`float`) is not
+   supported. None of the 11 evaluation corpora use `float`-specific
+   precision, so this does not affect evaluation results. In the paper,
+   this is stated as a scope decision: "FerrugoCC targets integer-heavy
+   systems code; double-only floating point is sufficient for the
+   evaluated workloads."
 
 **Not limitations** (previously listed, now resolved):
 - ~~Struct return >16 bytes~~: implemented (hidden sret pointer)
