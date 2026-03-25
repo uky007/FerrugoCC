@@ -9,7 +9,7 @@ An experimental C compiler and obfuscating compiler written in Rust.
 
 Compiles a practical subset of C to x86_64 assembly (System V ABI), with an optional 16-pass obfuscation pipeline. Developed following [Writing a C Compiler](https://nostarch.com/writing-c-compiler) by Nora Sandler, then extended with real-world corpus support and obfuscation.
 
-> **Status: v0.3.0** — Experimental compiler, not production-ready. 121 tests pass across 11 real-world corpora (normal + obfuscated). See [Supported Scope](#supported-scope) and [Known Limitations](#known-limitations).
+> **Status: v0.3.0** — Experimental compiler, not production-ready. 121 paper-evaluation tests pass, including 24 corpus run tests across 11 real-world C projects (normal + obfuscated). See [Supported Scope](#supported-scope) and [Known Limitations](#known-limitations).
 
 ## Requirements
 

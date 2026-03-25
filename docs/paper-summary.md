@@ -118,30 +118,38 @@ builtin bits, large struct return direct, large struct return indirect).
 
 ## 8. Reproducibility
 
+### Reproducing code expansion metrics (v0.3.0 baseline)
+
 ```bash
-# Clone and build
 git clone https://github.com/uky007/FerrugoCC.git
 cd FerrugoCC
-git checkout v0.3.0  # evaluation baseline
-
-# Prerequisites
-rustc --version       # Rust 1.87+
-gcc --version         # GCC or Clang (for preprocessing + linking)
-
-# Run all tests
-cargo test
-
-# Run evaluation script
+git checkout v0.3.0
+cargo build --release
 ./scripts/evaluate.sh
-
-# Compile with obfuscation
-cargo run -- --fobfuscate --obf-level=3 -S source.c
-
-# Obfuscation levels: 1 (light) to 4 (maximum)
-# Default: level 3 (all passes except VM virtualization)
 ```
 
+### Reproducing correctness + meaning preservation (current main)
+
+```bash
+git clone https://github.com/uky007/FerrugoCC.git
+cd FerrugoCC
+# main branch includes all v0.3.0 + post-v0.3.0 improvements
+cargo test                               # all tests
+cargo test --test corpus                 # 24 corpus tests (normal + obfuscated)
+cargo test --test meaning_preservation   # 22 meaning-preservation tests
+cargo test --test obfuscation            # 75 obfuscation unit tests
+```
+
+### Prerequisites
+
+- Rust 1.87+ (2024 edition)
+- GCC or Clang (for `gcc -E` preprocessing and assembly/linking)
+- x86_64 target (Linux native or macOS via Rosetta 2)
+
+### Determinism
+
 Obfuscation is deterministic: same source + same level → same output.
+No random seeds or time-dependent behavior.
 No random seeds or time-dependent behavior in the obfuscation passes.
 
 ## 9. Open Risks
