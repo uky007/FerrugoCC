@@ -449,10 +449,10 @@ impl<'a> Parser<'a> {
                         self.advance()?;
                         return Ok(Type::Long);
                     }
-                    // float → Double として近似（parse-only）
+                    // float → 独立型（IEEE 754 single-precision）
                     if name == "float" {
                         self.advance()?;
-                        return Ok(Type::Double);
+                        return Ok(Type::Float);
                     }
                     // 他の型キーワードが未出現の場合のみ typedef 名として認識
                     if let Some(ty) = self.typedef_names.get(name).cloned() {

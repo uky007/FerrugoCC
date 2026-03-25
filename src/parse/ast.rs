@@ -84,6 +84,8 @@ pub enum Type {
     UInt,
     /// `unsigned long` — 64ビット符号なし整数（Chapter 12）
     ULong,
+    /// `float` — IEEE 754 単精度浮動小数点（32ビット）
+    Float,
     /// `double` — IEEE 754 倍精度浮動小数点（Chapter 13）
     Double,
     /// ポインタ型（Chapter 14）。`int *` → `Pointer(Box::new(Int))`
@@ -125,6 +127,7 @@ impl PartialEq for Type {
             (Type::Long, Type::Long) => true,
             (Type::UInt, Type::UInt) => true,
             (Type::ULong, Type::ULong) => true,
+            (Type::Float, Type::Float) => true,
             (Type::Double, Type::Double) => true,
             (Type::VaList, Type::VaList) => true,
             (Type::Pointer(a), Type::Pointer(b)) => a == b,
@@ -200,8 +203,17 @@ impl Type {
     }
 
     /// 浮動小数点型かどうかを判定する（Chapter 13）。
+    pub fn is_float(&self) -> bool {
+        matches!(self, Type::Float)
+    }
+
     pub fn is_double(&self) -> bool {
         matches!(self, Type::Double)
+    }
+
+    /// float または double かどうか
+    pub fn is_floating(&self) -> bool {
+        matches!(self, Type::Float | Type::Double)
     }
 
     /// ポインタ型かどうかを判定する（Chapter 14）。
@@ -229,7 +241,7 @@ impl Type {
             Type::Void => panic!("void has no size"),
             Type::Function { .. } => panic!("function type has no size"),
             Type::Char | Type::UChar => 1,
-            Type::Int | Type::UInt => 4,
+            Type::Int | Type::UInt | Type::Float => 4,
             Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
             Type::Array(elem, count) => elem.size() * count,
             Type::Struct {
@@ -256,7 +268,7 @@ impl Type {
             Type::Void => panic!("void has no alignment"),
             Type::Function { .. } => panic!("function type has no alignment"),
             Type::Char | Type::UChar => 1,
-            Type::Int | Type::UInt => 4,
+            Type::Int | Type::UInt | Type::Float => 4,
             Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
             Type::Array(elem, _) => elem.alignment(),
             Type::Struct { members, tag, .. } => {

@@ -39,6 +39,7 @@ fn type_to_asm(t: &Type) -> AsmType {
         Type::Char | Type::UChar => AsmType::Byte,
         Type::Int | Type::UInt => AsmType::Longword,
         Type::Long | Type::ULong => AsmType::Quadword,
+        Type::Float => AsmType::Longword, // TODO: AsmType::Float for SSE single-precision
         Type::Double => AsmType::Double,
         Type::Pointer(_) => AsmType::Quadword,
         Type::Array(_, _) => AsmType::Quadword,
