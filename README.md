@@ -9,7 +9,7 @@ An experimental C compiler and obfuscating compiler written in Rust.
 
 Compiles a practical subset of C to x86_64 assembly (System V ABI), with an optional 16-pass obfuscation pipeline. Developed following [Writing a C Compiler](https://nostarch.com/writing-c-compiler) by Nora Sandler, then extended with real-world corpus support and obfuscation.
 
-> **Status: Preview (v0.1.0)** — Not a production compiler. See [Supported Scope](#supported-scope) and [Known Limitations](#known-limitations).
+> **Status: v0.3.0** — Experimental compiler, not production-ready. 121 tests pass across 11 real-world corpora (normal + obfuscated). See [Supported Scope](#supported-scope) and [Known Limitations](#known-limitations).
 
 ## Requirements
 
@@ -35,26 +35,30 @@ cargo install --path .
 ## Supported Scope
 
 **Language features:**
-- Types: `int`, `long`, `unsigned`, `double`, `char`, `void`, pointers, arrays, structs
+- Types: `int`, `long`, `unsigned`, `double`, `char`, `void`, `_Bool`, pointers, arrays (multi-dimensional), structs (nested, self-referential), unions (proper layout), enums, `va_list`, function pointers (typedef, callbacks, struct members)
+- Struct return by value: ≤16 bytes via RAX+RDX, >16 bytes via hidden sret pointer (System V ABI)
 - Control flow: `if`/`else`, `while`, `do`/`while`, `for`, `switch`/`case`, `goto`/`label`, ternary `?:`
-- Functions: declarations, definitions, variadic (`va_list`/`va_arg`), function pointers (compositional declarator tree — arrays of fn ptrs, struct member fn ptrs, pointer-to-array)
-- Declarations: `typedef`, `enum`, `struct`, `static`, `extern`, file-scope initializers
-- Operators: arithmetic, bitwise (`& | ^ << >>`), logical, comparison, compound assignment
+- Functions: declarations, definitions, variadic (`va_list`/`va_arg`/`va_copy`), function pointers
+- Declarations: `typedef`, `enum`, `struct`, `union`, `static`, `extern`, file-scope initializers, designated array initializers (`[N] = val`), designated struct initializers (`.field = val`), implicit array size (`int arr[] = {1,2,3}`)
+- Operators: arithmetic, bitwise (`& | ^ << >>`), logical (with short-circuit), comparison, compound assignment
+- Builtins: `__builtin_va_*`, `__builtin_bswap{16,32,64}`, `__builtin_abs/labs`, `__builtin_popcount/ctz/clz` (correctly lowered)
+- GCC extensions: `__attribute__`, `__asm__`, `__extension__`, `_Nonnull`/`_Nullable` (tolerance-parsed)
 - Preprocessor: delegated to `gcc -E` (handles `#include`, `#define`, `#ifdef`, etc.)
 
 **Obfuscation (16 passes):** constant encoding, arithmetic substitution, junk code, opaque predicates, control flow flattening, string encryption, VM virtualization, library function obfuscation, OPSEC sanitization, anti-disassembly, indirect calls, register shuffle, stack frame obfuscation, instruction substitution, function inlining, function outlining
 
-**Tested corpora:** [jsmn](https://github.com/zserge/jsmn) (JSON parser), [inih](https://github.com/benhoyt/inih) (INI parser), [sds](https://github.com/antirez/sds) (dynamic strings), [kilo](https://github.com/antirez/kilo) (text editor, smoke test)
+**Tested corpora (11 projects, ~5,150 lines):**
+- **Tier 1**: [jsmn](https://github.com/zserge/jsmn) (JSON tokenizer), [inih](https://github.com/benhoyt/inih) (INI parser), [sds](https://github.com/antirez/sds) (dynamic strings), [pdjson](https://github.com/skeeto/pdjson) (streaming JSON parser)
+- **Tier 2**: [kilo](https://github.com/antirez/kilo) (text editor, 21 unit test groups), sbase-cat, sbase-wc, sbase-printf, sbase-head, sbase-cut, sbase-uniq (from [sbase](https://git.suckless.org/sbase/))
 
 ## Known Limitations
 
+- `float` treated as `double` (no single-precision IEEE 754)
 - No self-hosted preprocessor — requires `gcc` on PATH
-- No `union`, `float` (parsed as `double`), `_Bool`, bitfields (parsed but ignored)
 - No multi-file compilation (single translation unit only)
-- No `__attribute__` semantics (syntax is skipped)
-- `__builtin_bswap*` treated as identity (not lowered to byte-swap)
-- Function pointer types lose prototype information (stored as `Pointer(Void)`)
-- Register allocation may produce non-deterministic output (HashMap iteration order)
+- No `__attribute__` semantics (syntax is tolerance-skipped)
+- No VLA, `_Generic`, `_Atomic`, `_Thread_local`, flexible array members
+- See [docs/coverage.md](docs/coverage.md) for complete coverage details
 
 ## Corpus Licensing
 
@@ -62,7 +66,9 @@ The `corpus/` directory contains third-party C projects used for regression test
 - **jsmn**: MIT — [zserge/jsmn](https://github.com/zserge/jsmn)
 - **inih**: BSD-3-Clause — [benhoyt/inih](https://github.com/benhoyt/inih)
 - **sds**: BSD-2-Clause — [antirez/sds](https://github.com/antirez/sds)
+- **pdjson**: Unlicense — [skeeto/pdjson](https://github.com/skeeto/pdjson)
 - **kilo**: BSD-2-Clause — [antirez/kilo](https://github.com/antirez/kilo)
+- **sbase** (cat, wc, printf, head, cut, uniq): MIT — [suckless/sbase](https://git.suckless.org/sbase/)
 
 Each directory contains an `ORIGIN` file with provenance details.
 

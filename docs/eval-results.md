@@ -1,6 +1,7 @@
 # FerrugoCC Evaluation Results
 
-> **Tag**: v0.3.0 (baseline) + struct return >16B
+> **Version**: main branch (post-v0.3.0, includes struct return >16B)
+> **Baseline tag**: v0.3.0 (`110afd4`, 2026-03-22) — code expansion metrics measured at v0.3.0
 > **Date**: 2026-03-24
 > **Platform**: macOS arm64 (Rosetta 2), Linux x86_64 (CI)
 

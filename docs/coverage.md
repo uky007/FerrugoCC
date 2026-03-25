@@ -1,6 +1,6 @@
 # FerrugoCC — Coverage & Status
 
-> **Version**: v0.3.0 (2026-03-22)
+> **Version**: v0.3.0 baseline (2026-03-22), updated with post-v0.3.0 improvements (struct return >16B, builtin lowering, implicit array size)
 
 ## C Language Coverage
 

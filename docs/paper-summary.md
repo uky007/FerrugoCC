@@ -4,8 +4,8 @@
 
 ## 1. Project Snapshot
 
-- **Evaluation baseline**: v0.3.0 (tag `v0.3.0`, commit `110afd4`, 2026-03-22)
-- **Current development**: main branch (post-v0.3.0, adds struct return >16B)
+- **Evaluation version**: main branch post-v0.3.0 (includes all v0.3.0 features + struct return >16B, builtin lowering, implicit array size)
+- **Baseline tag**: v0.3.0 (`110afd4`, 2026-03-22) — code expansion metrics measured here; correctness metrics reflect current main
 - **Architecture**: x86_64 System V ABI (Linux glibc + macOS Rosetta)
 - **Language**: Rust implementation (~12,000 lines), compiles a practical C subset
 - **Scope**: C source → x86_64 assembly with 16 obfuscation passes
@@ -89,7 +89,7 @@ builtin bits, large struct return direct, large struct return indirect).
 
 | Metric | Value | Source |
 |--------|-------|--------|
-| Total tests | 121 | `cargo test` (corpus 24 + meaning-preservation 22 + obfuscation 75) |
+| Paper evaluation tests | 121 | 3 suites: corpus 24 + meaning-preservation 22 + obfuscation 75 |
 | Pass rate | 100% (0 failures, 0 ignored) | [eval-results.md](eval-results.md) §Test Suite |
 | Corpora (total) | 11 (5 primary + 6 supplemental) | [paper-corpus-selection.md](paper-corpus-selection.md) |
 | C code compiled | ~5,150 lines | Sum of corpus ORIGIN files |
