@@ -148,9 +148,8 @@ cargo test --test obfuscation            # 75 obfuscation unit tests
 
 ### Determinism
 
-Obfuscation is deterministic: same source + same level → same output.
-No random seeds or time-dependent behavior.
-No random seeds or time-dependent behavior in the obfuscation passes.
+Obfuscation is deterministic: same source + same obfuscation level
+produces identical output. No random seeds or time-dependent behavior.
 
 ## 9. Open Risks
 
