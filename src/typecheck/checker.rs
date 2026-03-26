@@ -535,10 +535,10 @@ fn typecheck_statement(
         Statement::Break | Statement::Continue => Ok(()),
         Statement::Switch { expr, body } => {
             let expr_type = typecheck_expr(expr, symbols)?;
-            // switch 式は整数型のみ（void/struct/double/pointer は不可）
+            // switch 式は整数型のみ（void/struct/float/double/pointer は不可）
             if expr_type.is_void()
                 || expr_type.is_struct()
-                || expr_type.is_double()
+                || expr_type.is_floating()
                 || expr_type.is_pointer()
             {
                 return Err(CompileError::TypeError(
@@ -601,15 +601,15 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     "cannot cast void expression to non-void type".to_string(),
                 ));
             }
-            // ポインタ ↔ double のキャストは禁止
-            if target_type.is_pointer() && actual_source == Type::Double {
+            // ポインタ ↔ float/double のキャストは禁止
+            if target_type.is_pointer() && actual_source.is_floating() {
                 return Err(CompileError::TypeError(
-                    "cannot cast 'double' to pointer type".to_string(),
+                    "cannot cast floating-point to pointer type".to_string(),
                 ));
             }
-            if target_type.is_double() && actual_source.is_pointer() {
+            if target_type.is_floating() && actual_source.is_pointer() {
                 return Err(CompileError::TypeError(
-                    "cannot cast pointer type to 'double'".to_string(),
+                    "cannot cast pointer type to floating-point".to_string(),
                 ));
             }
             Ok(target_type.clone())
@@ -777,9 +777,10 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                                 .to_string(),
                         ));
                     }
-                    if inner_type == Type::Double {
+                    if inner_type.is_floating() {
                         return Err(CompileError::TypeError(
-                            "bitwise complement '~' cannot be applied to double".to_string(),
+                            "bitwise complement '~' cannot be applied to floating-point"
+                                .to_string(),
                         ));
                     }
                     if inner_type.is_pointer() {
@@ -1038,9 +1039,9 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                         )));
                     }
                     let common = common_type(&left_type, &right_type);
-                    if matches!(op, BinaryOp::Remainder) && common == Type::Double {
+                    if matches!(op, BinaryOp::Remainder) && common.is_floating() {
                         return Err(CompileError::TypeError(
-                            "remainder '%' cannot be applied to double".to_string(),
+                            "remainder '%' cannot be applied to floating-point".to_string(),
                         ));
                     }
                     convert_operand(left, &left_type, &common);
@@ -1061,9 +1062,9 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                             op
                         )));
                     }
-                    if left_type == Type::Double || right_type == Type::Double {
+                    if left_type.is_floating() || right_type.is_floating() {
                         return Err(CompileError::TypeError(
-                            "bitwise operator cannot be applied to double".to_string(),
+                            "bitwise operator cannot be applied to floating-point".to_string(),
                         ));
                     }
                     let common = common_type(&left_type, &right_type);
@@ -1085,9 +1086,9 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                             "shift operator cannot be applied to pointer types".to_string(),
                         ));
                     }
-                    if left_type == Type::Double || right_type == Type::Double {
+                    if left_type.is_floating() || right_type.is_floating() {
                         return Err(CompileError::TypeError(
-                            "shift operator cannot be applied to double".to_string(),
+                            "shift operator cannot be applied to floating-point".to_string(),
                         ));
                     }
                     // 各オペランドを独立に整数昇格
@@ -1631,9 +1632,12 @@ fn common_type(a: &Type, b: &Type) -> Type {
     if a == b {
         return a.clone();
     }
-    // Double is the highest rank (Chapter 13)
+    // Floating-point promotion: double > float > integer types
     if *a == Type::Double || *b == Type::Double {
         return Type::Double;
+    }
+    if *a == Type::Float || *b == Type::Float {
+        return Type::Float;
     }
     // If either is ULong, result is ULong
     if *a == Type::ULong || *b == Type::ULong {

@@ -94,6 +94,18 @@ pub enum TackyInstruction {
     UIntToDouble { src: TackyVal, dst: TackyVal },
     /// `dst = double_to_uint(src)`
     DoubleToUInt { src: TackyVal, dst: TackyVal },
+    /// `dst = float_to_double(src)` (cvtss2sd)
+    FloatToDouble { src: TackyVal, dst: TackyVal },
+    /// `dst = double_to_float(src)` (cvtsd2ss)
+    DoubleToFloat { src: TackyVal, dst: TackyVal },
+    /// `dst = int_to_float(src)` (cvtsi2ss)
+    IntToFloat { src: TackyVal, dst: TackyVal },
+    /// `dst = float_to_int(src)` (cvttss2si)
+    FloatToInt { src: TackyVal, dst: TackyVal },
+    /// `dst = uint_to_float(src)`
+    UIntToFloat { src: TackyVal, dst: TackyVal },
+    /// `dst = float_to_uint(src)`
+    FloatToUInt { src: TackyVal, dst: TackyVal },
     /// `dst = &src`
     GetAddress { src: TackyVal, dst: TackyVal },
     /// `dst = *src_ptr`

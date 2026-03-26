@@ -1097,6 +1097,214 @@ fn generate_instruction(
             });
         }
 
+        // Float conversion instructions — for now, delegate to double equivalents
+        TackyInstruction::FloatToDouble { src, dst } => {
+            // TODO: use cvtss2sd when float AsmType is added
+            let src_op = val_to_operand(src, static_vars, stack_vars)?;
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Double,
+                src: src_op,
+                dst: dst_op,
+            });
+        }
+
+        TackyInstruction::DoubleToFloat { src, dst } => {
+            // TODO: use cvtsd2ss when float AsmType is added
+            let src_op = load_double_val(
+                src,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+            );
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Double,
+                src: src_op,
+                dst: dst_op,
+            });
+        }
+
+        TackyInstruction::IntToFloat { src, dst } => {
+            // Same as IntToDouble for now
+            let src_type = val_type(src, var_types);
+            let src_op = val_to_operand(src, static_vars, stack_vars)?;
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+
+            instrs.push(Instruction::Cvtsi2sd {
+                asm_type: safe_asm_type(&src_type),
+                src: src_op,
+                dst: dst_op,
+            });
+        }
+
+        TackyInstruction::FloatToInt { src, dst } => {
+            // Same as DoubleToInt for now
+            let dst_type = val_type(dst, var_types);
+            let src_op = load_double_val(
+                src,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+            );
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+
+            instrs.push(Instruction::Cvttsd2si {
+                asm_type: safe_asm_type(&dst_type),
+                src: src_op,
+                dst: dst_op,
+            });
+        }
+
+        TackyInstruction::UIntToFloat { src, dst } => {
+            // Same as UIntToDouble for now
+            let src_op = val_to_operand(src, static_vars, stack_vars)?;
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+
+            let large_label = format!(".Lul2d_large{}", const_counter);
+            let end_label = format!(".Lul2d_end{}", const_counter);
+            #[allow(unused_assignments)]
+            {
+                const_counter += 1;
+            }
+
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: src_op,
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Cmp {
+                asm_type: AsmType::Quadword,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::JmpCC(CondCode::L, large_label.clone()));
+            instrs.push(Instruction::Cvtsi2sd {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Register(Reg::XMM0),
+            });
+            instrs.push(Instruction::Jmp(end_label.clone()));
+            instrs.push(Instruction::Label(large_label));
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::DX),
+            });
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Imm(2),
+                dst: Operand::Register(Reg::R8),
+            });
+            instrs.push(Instruction::Div {
+                asm_type: AsmType::Quadword,
+                operand: Operand::Register(Reg::R8),
+            });
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Quadword,
+                op: AsmBinaryOp::Add,
+                src: Operand::Register(Reg::DX),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Cvtsi2sd {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Register(Reg::XMM0),
+            });
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Double,
+                op: AsmBinaryOp::Add,
+                src: Operand::Register(Reg::XMM0),
+                dst: Operand::Register(Reg::XMM0),
+            });
+            instrs.push(Instruction::Label(end_label));
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Double,
+                src: Operand::Register(Reg::XMM0),
+                dst: dst_op,
+            });
+        }
+
+        TackyInstruction::FloatToUInt { src, dst } => {
+            // Same as DoubleToUInt for now
+            let src_op = load_double_val(
+                src,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+            );
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+
+            let out_of_range_label = format!(".Ld2ul_oor{}", const_counter);
+            let end_label = format!(".Ld2ul_end{}", const_counter);
+            const_counter += 1;
+
+            let bound_label = get_or_add_double_constant(
+                9223372036854775808.0f64.to_bits(),
+                8,
+                double_constants,
+                &mut const_counter,
+            );
+
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Double,
+                src: src_op,
+                dst: Operand::Register(Reg::XMM0),
+            });
+            instrs.push(Instruction::Cmp {
+                asm_type: AsmType::Double,
+                src: Operand::Data(bound_label.clone()),
+                dst: Operand::Register(Reg::XMM0),
+            });
+            instrs.push(Instruction::JmpCC(CondCode::AE, out_of_range_label.clone()));
+            instrs.push(Instruction::Cvttsd2si {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::XMM0),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Jmp(end_label.clone()));
+            instrs.push(Instruction::Label(out_of_range_label));
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Double,
+                src: Operand::Register(Reg::XMM0),
+                dst: Operand::Register(Reg::XMM14),
+            });
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Double,
+                op: AsmBinaryOp::Sub,
+                src: Operand::Data(bound_label),
+                dst: Operand::Register(Reg::XMM14),
+            });
+            instrs.push(Instruction::Cvttsd2si {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::XMM14),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Imm(i64::MIN),
+                dst: Operand::Register(Reg::CX),
+            });
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Quadword,
+                op: AsmBinaryOp::Add,
+                src: Operand::Register(Reg::CX),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Label(end_label));
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::AX),
+                dst: dst_op,
+            });
+        }
+
         TackyInstruction::GetAddress { src, dst } => {
             let src_op = if let TackyVal::Var(name) = src {
                 // If not a local/static variable, treat as global symbol (e.g. function name)

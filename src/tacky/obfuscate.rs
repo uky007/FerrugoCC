@@ -1799,6 +1799,30 @@ fn rename_instruction(
             src: rv(src),
             dst: rv(dst),
         },
+        TackyInstruction::FloatToDouble { src, dst } => TackyInstruction::FloatToDouble {
+            src: rv(src),
+            dst: rv(dst),
+        },
+        TackyInstruction::DoubleToFloat { src, dst } => TackyInstruction::DoubleToFloat {
+            src: rv(src),
+            dst: rv(dst),
+        },
+        TackyInstruction::IntToFloat { src, dst } => TackyInstruction::IntToFloat {
+            src: rv(src),
+            dst: rv(dst),
+        },
+        TackyInstruction::FloatToInt { src, dst } => TackyInstruction::FloatToInt {
+            src: rv(src),
+            dst: rv(dst),
+        },
+        TackyInstruction::UIntToFloat { src, dst } => TackyInstruction::UIntToFloat {
+            src: rv(src),
+            dst: rv(dst),
+        },
+        TackyInstruction::FloatToUInt { src, dst } => TackyInstruction::FloatToUInt {
+            src: rv(src),
+            dst: rv(dst),
+        },
         TackyInstruction::GetAddress { src, dst } => TackyInstruction::GetAddress {
             src: rv(src),
             dst: rv(dst),
@@ -2117,7 +2141,13 @@ fn instruction_all_operands(instr: &TackyInstruction) -> Vec<&TackyVal> {
         | TackyInstruction::IntToDouble { src, dst }
         | TackyInstruction::DoubleToInt { src, dst }
         | TackyInstruction::UIntToDouble { src, dst }
-        | TackyInstruction::DoubleToUInt { src, dst } => vec![src, dst],
+        | TackyInstruction::DoubleToUInt { src, dst }
+        | TackyInstruction::FloatToDouble { src, dst }
+        | TackyInstruction::DoubleToFloat { src, dst }
+        | TackyInstruction::IntToFloat { src, dst }
+        | TackyInstruction::FloatToInt { src, dst }
+        | TackyInstruction::UIntToFloat { src, dst }
+        | TackyInstruction::FloatToUInt { src, dst } => vec![src, dst],
         TackyInstruction::GetAddress { src, dst } => vec![src, dst],
         TackyInstruction::Load { src_ptr, dst } => vec![src_ptr, dst],
         TackyInstruction::Store { src, dst_ptr } => vec![src, dst_ptr],
@@ -3337,6 +3367,12 @@ fn is_vm_eligible(func: &TackyFunction) -> bool {
             | TackyInstruction::DoubleToInt { .. }
             | TackyInstruction::UIntToDouble { .. }
             | TackyInstruction::DoubleToUInt { .. }
+            | TackyInstruction::FloatToDouble { .. }
+            | TackyInstruction::DoubleToFloat { .. }
+            | TackyInstruction::IntToFloat { .. }
+            | TackyInstruction::FloatToInt { .. }
+            | TackyInstruction::UIntToFloat { .. }
+            | TackyInstruction::FloatToUInt { .. }
             | TackyInstruction::CopyToOffset { .. }
             | TackyInstruction::CopyFromOffset { .. }
             | TackyInstruction::CopyStruct { .. } => return false,
@@ -4255,7 +4291,13 @@ fn opsec_rename_body(
             | TackyInstruction::IntToDouble { src, dst }
             | TackyInstruction::DoubleToInt { src, dst }
             | TackyInstruction::UIntToDouble { src, dst }
-            | TackyInstruction::DoubleToUInt { src, dst } => {
+            | TackyInstruction::DoubleToUInt { src, dst }
+            | TackyInstruction::FloatToDouble { src, dst }
+            | TackyInstruction::DoubleToFloat { src, dst }
+            | TackyInstruction::IntToFloat { src, dst }
+            | TackyInstruction::FloatToInt { src, dst }
+            | TackyInstruction::UIntToFloat { src, dst }
+            | TackyInstruction::FloatToUInt { src, dst } => {
                 opsec_rename_val(src, rename_map);
                 opsec_rename_val(dst, rename_map);
             }

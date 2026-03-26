@@ -865,6 +865,30 @@ fn replace_uses(instr: TackyInstruction, copies: &HashMap<String, TackyVal>) -> 
             src: sub(&src, copies),
             dst,
         },
+        TackyInstruction::FloatToDouble { src, dst } => TackyInstruction::FloatToDouble {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::DoubleToFloat { src, dst } => TackyInstruction::DoubleToFloat {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::IntToFloat { src, dst } => TackyInstruction::IntToFloat {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::FloatToInt { src, dst } => TackyInstruction::FloatToInt {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::UIntToFloat { src, dst } => TackyInstruction::UIntToFloat {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::FloatToUInt { src, dst } => TackyInstruction::FloatToUInt {
+            src: sub(&src, copies),
+            dst,
+        },
         TackyInstruction::GetAddress { src, dst } => TackyInstruction::GetAddress { src, dst }, // Don't substitute address source
         TackyInstruction::AddPtr {
             ptr,
@@ -959,6 +983,30 @@ fn get_written_var(instr: &TackyInstruction) -> Option<String> {
             dst: TackyVal::Var(n),
             ..
         }
+        | TackyInstruction::FloatToDouble {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::DoubleToFloat {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::IntToFloat {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::FloatToInt {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::UIntToFloat {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::FloatToUInt {
+            dst: TackyVal::Var(n),
+            ..
+        }
         | TackyInstruction::GetAddress {
             dst: TackyVal::Var(n),
             ..
@@ -1021,6 +1069,12 @@ enum CseExpr {
     DoubleToInt(CseVal),
     UIntToDouble(CseVal),
     DoubleToUInt(CseVal),
+    FloatToDouble(CseVal),
+    DoubleToFloat(CseVal),
+    IntToFloat(CseVal),
+    FloatToInt(CseVal),
+    UIntToFloat(CseVal),
+    FloatToUInt(CseVal),
 }
 
 fn tacky_val_to_cse(val: &TackyVal) -> CseVal {
@@ -1099,6 +1153,24 @@ fn common_subexpression_elimination(instrs: Vec<TackyInstruction>) -> Vec<TackyI
             TackyInstruction::DoubleToUInt { src, dst } => {
                 Some((CseExpr::DoubleToUInt(tacky_val_to_cse(src)), dst))
             }
+            TackyInstruction::FloatToDouble { src, dst } => {
+                Some((CseExpr::FloatToDouble(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::DoubleToFloat { src, dst } => {
+                Some((CseExpr::DoubleToFloat(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::IntToFloat { src, dst } => {
+                Some((CseExpr::IntToFloat(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::FloatToInt { src, dst } => {
+                Some((CseExpr::FloatToInt(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::UIntToFloat { src, dst } => {
+                Some((CseExpr::UIntToFloat(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::FloatToUInt { src, dst } => {
+                Some((CseExpr::FloatToUInt(tacky_val_to_cse(src)), dst))
+            }
             _ => None,
         };
 
@@ -1173,7 +1245,13 @@ fn invalidate_cse_var(available: &mut HashMap<CseExpr, String>, var_name: &str) 
             | CseExpr::IntToDouble(v)
             | CseExpr::DoubleToInt(v)
             | CseExpr::UIntToDouble(v)
-            | CseExpr::DoubleToUInt(v) => !cse_val_is_var(v, var_name),
+            | CseExpr::DoubleToUInt(v)
+            | CseExpr::FloatToDouble(v)
+            | CseExpr::DoubleToFloat(v)
+            | CseExpr::IntToFloat(v)
+            | CseExpr::FloatToInt(v)
+            | CseExpr::UIntToFloat(v)
+            | CseExpr::FloatToUInt(v) => !cse_val_is_var(v, var_name),
         }
     });
 }
@@ -1369,7 +1447,13 @@ fn collect_uses(instr: &TackyInstruction, used: &mut HashSet<String>) {
         | TackyInstruction::IntToDouble { src, .. }
         | TackyInstruction::DoubleToInt { src, .. }
         | TackyInstruction::UIntToDouble { src, .. }
-        | TackyInstruction::DoubleToUInt { src, .. } => add_val(src, used),
+        | TackyInstruction::DoubleToUInt { src, .. }
+        | TackyInstruction::FloatToDouble { src, .. }
+        | TackyInstruction::DoubleToFloat { src, .. }
+        | TackyInstruction::IntToFloat { src, .. }
+        | TackyInstruction::FloatToInt { src, .. }
+        | TackyInstruction::UIntToFloat { src, .. }
+        | TackyInstruction::FloatToUInt { src, .. } => add_val(src, used),
         TackyInstruction::GetAddress { src, .. } => add_val(src, used),
         TackyInstruction::Load { src_ptr, .. } => add_val(src_ptr, used),
         TackyInstruction::Store { src, dst_ptr } => {
