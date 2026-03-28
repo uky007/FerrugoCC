@@ -133,7 +133,10 @@ def plot_perf_overhead(results_dir, rows, pass_set):
             continue
         if not is_passing(pass_set, prog, cond):
             continue
-        data[prog][cond].append(float(r["time_sec"]))
+        try:
+            data[prog][cond].append(float(r.get("avg_ms", r.get("time_sec", 0))))
+        except (ValueError, TypeError):
+            pass
 
     programs = sorted(p for p in data if "L0" in data[p])
     if not programs:
@@ -314,6 +317,146 @@ def plot_ablation(results_dir, size_rows, reverse_rows, pass_set):
     print("  fig_ablation.png")
 
 
+def plot_decompile_summary(results_dir, rows, pass_set):
+    """Fig 5: Decompile eval summary — grouped bar chart per level."""
+    METRICS = ["func_symbols", "total_instructions", "invalid_instructions", "readable_symbols"]
+    LABELS = ["Function Symbols", "Total Instructions", "Invalid Instructions", "Readable Symbols"]
+
+    data = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        prog, cond = r["program"], r["condition"]
+        if cond not in LEVEL_CONDITIONS:
+            continue
+        if not is_passing(pass_set, prog, cond):
+            continue
+        for m in METRICS:
+            try:
+                data[cond][m].append(int(r[m]))
+            except (ValueError, KeyError):
+                pass
+
+    if not data:
+        print("  WARNING: no decompile eval data")
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    for idx, (metric, label) in enumerate(zip(METRICS, LABELS)):
+        row, col = divmod(idx, 2)
+        ax = axes[row][col]
+        conds = [c for c in LEVEL_CONDITIONS if c in data]
+        avgs = [mean(data[c][metric]) for c in conds]
+        colors = [LEVEL_COLORS[LEVEL_CONDITIONS.index(c)] for c in conds]
+        bars = ax.bar(conds, avgs, color=colors, edgecolor="white")
+        ax.set_title(label, fontsize=11)
+        ax.set_ylabel("Average count")
+        # Add value labels on bars
+        for bar, val in zip(bars, avgs):
+            if val > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                        f"{val:.0f}", ha="center", va="bottom", fontsize=8)
+
+    fig.suptitle("Static Analysis Proxy Metrics by Obfuscation Level", fontsize=13)
+    fig.tight_layout()
+    fig.savefig(os.path.join(results_dir, "fig_decompile_summary.png"), dpi=150)
+    plt.close(fig)
+    print("  fig_decompile_summary.png")
+
+
+def plot_compile_time(results_dir):
+    """Fig 6: Compilation time by level."""
+    csv_path = os.path.join(results_dir, "compile_time.csv")
+    if not os.path.exists(csv_path):
+        print("  WARNING: compile_time.csv not found")
+        return
+
+    data = defaultdict(list)
+    for r in read_csv(csv_path):
+        try:
+            ms = int(r["compile_ms"])
+            if ms > 0:
+                data[r["condition"]].append(ms)
+        except (ValueError, KeyError, TypeError):
+            pass
+
+    if not data:
+        print("  WARNING: no compile time data")
+        return
+
+    conds = [c for c in LEVEL_CONDITIONS if c in data]
+    avgs = [mean(data[c]) for c in conds]
+    colors = [LEVEL_COLORS[LEVEL_CONDITIONS.index(c)] for c in conds]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars = ax.bar(conds, avgs, color=colors, edgecolor="white")
+    ax.set_ylabel("Average Compilation Time (ms)")
+    ax.set_xlabel("Obfuscation Level")
+    ax.set_title("Compilation Time Overhead")
+
+    for bar, val in zip(bars, avgs):
+        label = f"{val:.0f}ms"
+        if val > 100:
+            label = f"{val/1000:.1f}s"
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                label, ha="center", va="bottom", fontsize=9)
+
+    # Use log scale if L4 is much larger
+    if avgs and max(avgs) > 10 * min(a for a in avgs if a > 0):
+        ax.set_yscale("log")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(results_dir, "fig_compile_time.png"), dpi=150)
+    plt.close(fig)
+    print("  fig_compile_time.png")
+
+
+def plot_code_text_expansion(results_dir, rows, pass_set):
+    """Fig 7: .text section expansion by level (paper main figure)."""
+    data = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        prog, cond = r["program"], r["condition"]
+        if cond not in LEVEL_CONDITIONS:
+            continue
+        if not is_passing(pass_set, prog, cond):
+            continue
+        try:
+            data[cond]["text"].append(int(r.get("text_bytes", 0)))
+            data[cond]["total"].append(int(r.get("size_bytes", 0)))
+        except (ValueError, KeyError):
+            pass
+
+    if not data or "L0" not in data:
+        print("  WARNING: no size data with text_bytes")
+        return
+
+    l0_text = mean(data["L0"]["text"])
+    if l0_text == 0:
+        print("  WARNING: L0 text_bytes is 0")
+        return
+
+    conds = [c for c in LEVEL_CONDITIONS if c in data]
+    text_ratios = [mean(data[c]["text"]) / l0_text for c in conds]
+    colors = [LEVEL_COLORS[LEVEL_CONDITIONS.index(c)] for c in conds]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars = ax.bar(conds, text_ratios, color=colors, edgecolor="white")
+    ax.set_ylabel("Code Section Expansion (×)")
+    ax.set_xlabel("Obfuscation Level")
+    ax.set_title("Code Section (.text) Expansion vs Normal")
+    ax.axhline(y=1.0, color="gray", linestyle="--", alpha=0.5)
+
+    for bar, val in zip(bars, text_ratios):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                f"{val:.1f}×", ha="center", va="bottom", fontsize=9)
+
+    if max(text_ratios) > 20:
+        ax.set_yscale("log")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(results_dir, "fig_code_expansion.png"), dpi=150)
+    plt.close(fig)
+    print("  fig_code_expansion.png")
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <results_dir>", file=sys.stderr)
@@ -331,12 +474,14 @@ def main():
     size_csv = os.path.join(results_dir, "size.csv")
     perf_csv = os.path.join(results_dir, "performance.csv")
     reverse_csv = os.path.join(results_dir, "reverse_metrics.csv")
+    decompile_csv = os.path.join(results_dir, "decompile_eval.csv")
 
     print("=== Generating plots ===")
 
     if os.path.exists(size_csv):
         size_rows = read_csv(size_csv)
         plot_size_overhead(results_dir, size_rows, pass_set)
+        plot_code_text_expansion(results_dir, size_rows, pass_set)
     else:
         size_rows = []
         print(f"  WARNING: {size_csv} not found")
@@ -355,8 +500,16 @@ def main():
         reverse_rows = []
         print(f"  WARNING: {reverse_csv} not found")
 
+    if os.path.exists(decompile_csv):
+        decompile_rows = read_csv(decompile_csv)
+        plot_decompile_summary(results_dir, decompile_rows, pass_set)
+    else:
+        print(f"  WARNING: {decompile_csv} not found")
+
     if size_rows or reverse_rows:
         plot_ablation(results_dir, size_rows, reverse_rows, pass_set)
+
+    plot_compile_time(results_dir)
 
     print("=== Done ===")
 
