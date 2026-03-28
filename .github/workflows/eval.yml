@@ -1,0 +1,59 @@
+name: Evaluation
+
+on:
+  workflow_dispatch:  # Manual trigger only
+  push:
+    branches: [ dev/future-features ]
+    paths:
+      - 'scripts/eval/**'
+      - 'benchmark/**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  evaluate:
+    name: Run Evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc binutils
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Run tests first
+        run: cargo test
+
+      - name: Run evaluation pipeline
+        run: bash scripts/eval/run_all.sh results/ci
+
+      - name: Show results summary
+        run: |
+          echo "=== Correctness ==="
+          cat results/ci/correctness.csv 2>/dev/null || echo "(not generated)"
+          echo ""
+          echo "=== Size ==="
+          cat results/ci/size.csv 2>/dev/null || echo "(not generated)"
+          echo ""
+          echo "=== Reverse Metrics ==="
+          cat results/ci/reverse_metrics.csv 2>/dev/null || echo "(not generated)"
+          echo ""
+          echo "=== Decompiler Eval ==="
+          cat results/ci/decompile_eval.csv 2>/dev/null || echo "(not generated)"
+          echo ""
+          echo "=== Decompiler Summary ==="
+          cat results/ci/decompile_summary.md 2>/dev/null || echo "(not generated)"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-results
+          path: results/ci/
+          retention-days: 90
