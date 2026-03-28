@@ -1,12 +1,9 @@
 name: Evaluation
 
 on:
-  workflow_dispatch:  # Manual trigger only
+  workflow_dispatch:
   push:
-    branches: [ dev/future-features ]
-    paths:
-      - 'scripts/eval/**'
-      - 'benchmark/**'
+    branches: [ dev/future-features, main ]
 
 env:
   CARGO_TERM_COLOR: always
