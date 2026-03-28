@@ -142,7 +142,24 @@ L3 compilation overhead is modest (6.8x). L4 VM virtualization is expensive (445
 | L3 | ~2 ms |
 | L4 | ~2 ms |
 
-All levels produce identical ~2ms runtime on the benchmark suite. The benchmarks are too small (~50–300 lines of C, single-function workloads) to produce measurable execution time differences. This indicates that **for small programs, obfuscation runtime overhead is below measurement threshold**. Larger workloads (e.g., kilo at 1,300 lines with I/O loops) would be needed to quantify runtime overhead.
+On the small benchmark suite (~50–300 lines), all levels produce identical ~2ms runtime (below measurement threshold).
+
+### kilo_unit Runtime Benchmark (Linux x86_64, CI)
+
+> kilo_unit.c (~1,100 lines): kilo text editor core logic, non-interactive.
+> 500 iterations per level, wall-clock time.
+
+| Level | Total (500 runs) | Per-iteration | Overhead |
+|-------|-----------------|---------------|----------|
+| L0 (normal) | 447 ms | 894 μs | 1.0x |
+| L1 | 453 ms | 907 μs | 1.01x |
+| L2 | 469 ms | 938 μs | 1.05x |
+| **L3** | **481 ms** | **962 μs** | **1.08x** |
+| L4 | (timeout) | — | — |
+
+**Key finding: L3 obfuscation adds only ~8% runtime overhead despite 8.2x code expansion.** This indicates that modern x86_64 branch prediction and instruction caching effectively absorb the added complexity of CFF dispatch, junk code, and opaque predicates.
+
+L4 (VM virtualization) timed out during the 500-iteration benchmark, suggesting substantial runtime overhead. This is expected: the VM dispatch loop introduces indirect branches that defeat branch prediction, and the bytecode interpretation adds a constant multiplier per original instruction.
 
 ### Note on strings_count
 
