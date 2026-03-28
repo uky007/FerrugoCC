@@ -124,6 +124,12 @@ bash "$SCRIPT_DIR/measure_perf.sh" "$RESULTS_DIR"
 echo "=== Collecting reverse-engineering metrics ==="
 bash "$SCRIPT_DIR/collect_reverse_metrics.sh" "$RESULTS_DIR"
 
+echo "=== Decompiler evaluation (objdump) ==="
+bash "$SCRIPT_DIR/decompile_eval.sh" "$RESULTS_DIR"
+
+echo "=== Ghidra decompiler evaluation (optional) ==="
+bash "$SCRIPT_DIR/ghidra_analyze.sh" "$RESULTS_DIR"
+
 # --- Step 6: Generate plots ---
 echo "=== Generating plots ==="
 if command -v python3 &>/dev/null; then
@@ -140,4 +146,6 @@ echo "  correctness.csv"
 echo "  size.csv"
 echo "  performance.csv"
 echo "  reverse_metrics.csv"
+echo "  decompile_eval.csv"
+echo "  decompile_summary.md"
 ls "$RESULTS_DIR"/fig_*.png 2>/dev/null && echo "  (plots generated)" || echo "  (no plots)"
