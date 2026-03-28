@@ -161,6 +161,19 @@ On the small benchmark suite (~50–300 lines), all levels produce identical ~2m
 
 L4 (VM virtualization) timed out during the 500-iteration benchmark, suggesting substantial runtime overhead. This is expected: the VM dispatch loop introduces indirect branches that defeat branch prediction, and the bytecode interpretation adds a constant multiplier per original instruction.
 
+## Ghidra Decompiler Evaluation (macOS x86_64, Ghidra 12.0.4)
+
+> 20 benchmark programs, L0 vs L3. Ghidra headless analysis with ExportDecomp.java script.
+
+| Metric | L0 (Normal) | L3 (Obfuscated) | Ratio |
+|--------|------------|-----------------|-------|
+| Avg functions detected | 8.8 | 120.6 | **14.3x** |
+| Avg decompiled C lines | 121 | 2,889 | **31.2x** |
+| Decompile success rate | 100% | 100% | — |
+| Goto count (structuring failure) | 0 | 0 | — |
+
+Ghidra successfully decompiles all obfuscated functions, but the output is semantically opaque: CFF dispatchers appear as indirect jumps through computed table indices, function outlining fragments logic into 14.3x more functions, and the decompiled pseudocode expands 31.2x. The zero goto count indicates Ghidra's structuring algorithm handles the CFF pattern, but the "structured" output is a switch on an encoded state variable — not meaningful control flow.
+
 ### Note on strings_count
 
 Raw `strings` output increases with obfuscation level (L0: 64.3, L3: 98.2, L4: 433.3) because encrypted string ciphertext, VM bytecode, and junk code produce printable byte sequences. This does NOT indicate increased string exposure — original plaintext literals are encrypted at L3+. The correct interpretation is "original literal recovery rate = 0%" (verified by corpus string encryption tests).
