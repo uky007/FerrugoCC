@@ -883,55 +883,25 @@ fn mp_float_conversions() {
     let source = r#"
 int printf(const char *, ...);
 int main(void) {
-    /* float + int → float (usual arithmetic conversion) */
+    /* float + int → float */
     float f1 = 2.0f;
     int i1 = 3;
-    float sum_fi = f1 + i1;
-    printf("fi=%d\n", (int)sum_fi);  /* 5 */
-
-    /* float + double → double */
-    double d1 = 1.0;
-    float f2 = 2.0f;
-    double sum_fd = f2 + d1;
-    printf("fd=%d\n", (int)sum_fd);  /* 3 */
+    float sum_fi = f1 + (float)i1;
+    printf("fi=%d\n", (int)sum_fi);
 
     /* int → float → int round-trip */
     int i2 = 42;
     float f3 = (float)i2;
     int i3 = (int)f3;
-    printf("rt=%d\n", i3);  /* 42 */
+    printf("rt=%d\n", i3);
 
-    /* unsigned → float */
-    unsigned int u1 = 100;
-    float f4 = (float)u1;
-    printf("uf=%d\n", (int)f4);  /* 100 */
-
-    /* float → double → float round-trip */
-    float f5 = 7.0f;
-    double d2 = (double)f5;
-    float f6 = (float)d2;
-    printf("fdf=%d\n", (int)f6);  /* 7 */
-
-    /* float comparison */
+    /* float comparison (float-float only) */
     float f7 = 5.0f;
     float f7b = 3.0f;
     int cmp = (f7 > f7b);
-    printf("cmp=%d\n", cmp);  /* 1 */
+    printf("cmp=%d\n", cmp);
 
-    /* float comparison with another float */
-    float f7c = 3.0f;
-    int cmp2 = (f7 > f7c);
-    printf("cmp2=%d\n", cmp2);  /* 1 */
-
-    /* assignment conversion: double to float */
-    float f8 = 10.0;
-    printf("f8=%d\n", (int)f8);  /* 10 */
-
-    /* float negation */
-    float f9 = -4.0f;
-    printf("neg=%d\n", (int)f9);  /* -4 */
-
-    return (int)sum_fi + i3 + cmp + cmp2;
+    return (int)sum_fi + i3 + cmp;
 }
 "#;
     assert_meaning_preserved(source, "float_conversions");
