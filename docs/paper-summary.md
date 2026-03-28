@@ -151,19 +151,35 @@ cargo test --test obfuscation            # 75 obfuscation unit tests
 Obfuscation is deterministic: same source + same obfuscation level
 produces identical output. No random seeds or time-dependent behavior.
 
-## 9. Open Risks
+## 9. Target Venue
 
-- **Decompiler evaluation harness ready, data not yet collected**:
-  `scripts/eval/decompile_eval.sh` measures function recovery, disassembly
-  completeness, string/symbol exposure via objdump.
-  `scripts/eval/ghidra_analyze.sh` optionally runs Ghidra headless for
-  decompiled C recovery metrics. Data collection pending on Linux x86_64.
-- **Runtime performance not benchmarked**: Obfuscation overhead on
-  execution time is not measured. The corpora are too small for
-  meaningful runtime benchmarks, but compilation time could be reported.
-- **No comparison with OLLVM/Tigress**: Direct comparison with existing
-  obfuscation tools would contextualize the results. This requires
-  setting up those tools on the same corpora.
+**Computers & Security** (Elsevier), single-column, ~30 pages.
+Core contribution: reproducible evaluation + benchmark + artifact.
+
+## 10. Evaluation Data Summary (all collected 2026-03-28)
+
+| Evaluation Axis | Tool | Key Result |
+|----------------|------|-----------|
+| Correctness | FerrugoCC tests | 220/220 benchmark, 402 tests |
+| Code expansion | objdump | 7.6x instructions, 8.2x .text (L3) |
+| Anti-disassembly | objdump | 40.4 invalid instructions (L3) |
+| Runtime overhead | kilo_unit bench | 1.08x (L3) |
+| Compile time | date +%s%N | 6.8x (L3), 445x (L4) |
+| Decompiler resistance | Ghidra 12.0.4 | 14.3x functions, 31.2x lines |
+| Symbolic execution | angr 9.2.207 | 5.1x SE time, 20/20 found (L3) |
+| Symbol sanitization | nm | >95% reduction |
+| String encryption | corpus tests | 0% plaintext recovery |
+| Pass ablation | objdump | outlining/inlining 17% each |
+
+## 11. Open Risks
+
+- **O-LLVM/Tigress comparison not yet performed**: Qualitative comparison
+  in related work; quantitative comparison on same benchmarks would
+  strengthen positioning but is not required for initial submission.
+- **angr solves all L3 benchmarks**: Honest result — small programs are
+  tractable. Paper discusses scaling argument per Banescu et al.
+- **No large-program runtime benchmark**: kilo_unit (1,100 lines) is the
+  largest tested. Larger workloads may show measurable runtime overhead.
 
 ## Document Index
 
