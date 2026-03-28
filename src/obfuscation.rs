@@ -59,6 +59,8 @@ pub struct ObfuscationConfig {
     pub opsec_policy: OpsecPolicy,
     /// リンク後バイナリの OPSEC 監査
     pub opsec_audit: bool,
+    /// Multi-file: global シンボルを OPSEC リネームから保護する
+    pub preserve_globals: bool,
 
     // ── 頻度パラメータ ──
     /// ジャンクコード挿入頻度（N命令ごとに挿入）
@@ -124,6 +126,7 @@ impl ObfuscationConfig {
                 opsec_strip: false,
                 opsec_policy: OpsecPolicy::Warn,
                 opsec_audit: false,
+                preserve_globals: false,
                 junk_freq: 8,
                 pred_freq: 10,
                 arith_freq: 3,
@@ -158,6 +161,7 @@ impl ObfuscationConfig {
                 opsec_strip: false,
                 opsec_policy: OpsecPolicy::Warn,
                 opsec_audit: false,
+                preserve_globals: false,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 5,
@@ -192,6 +196,7 @@ impl ObfuscationConfig {
                 opsec_strip: true,
                 opsec_policy: OpsecPolicy::Warn,
                 opsec_audit: false,
+                preserve_globals: false,
                 junk_freq: 4,
                 pred_freq: 5,
                 arith_freq: 3,
@@ -227,6 +232,7 @@ impl ObfuscationConfig {
                 opsec_strip: true,
                 opsec_policy: OpsecPolicy::Warn,
                 opsec_audit: false,
+                preserve_globals: false,
                 junk_freq: 2,
                 pred_freq: 2,
                 arith_freq: 2,
