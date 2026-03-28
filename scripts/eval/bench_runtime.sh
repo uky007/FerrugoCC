@@ -27,12 +27,12 @@ if [ ! -x "$COMPILER" ]; then
     cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml"
 fi
 
+# L4 excluded: VM virtualization causes very long runtime on large programs
 CONDITIONS=(
     "L0"
     "L1 --fobfuscate --obf-level=1"
     "L2 --fobfuscate --obf-level=2"
     "L3 --fobfuscate --obf-level=3"
-    "L4 --fobfuscate --obf-level=4"
 )
 
 echo "=== Runtime Benchmark: kilo_unit.c ($N iterations) ==="

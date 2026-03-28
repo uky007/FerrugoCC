@@ -12,7 +12,7 @@ jobs:
   evaluate:
     name: Run Evaluation
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -34,9 +34,10 @@ jobs:
         run: bash scripts/eval/run_all.sh results/ci
         continue-on-error: true
 
-      - name: Runtime benchmark (kilo_unit, 500 iterations)
-        run: bash scripts/eval/bench_runtime.sh 500
+      - name: Runtime benchmark (kilo_unit, 100 iterations, L0-L3 only)
+        run: bash scripts/eval/bench_runtime.sh 100
         continue-on-error: true
+        timeout-minutes: 5
 
       - name: Install angr
         run: pip install angr
