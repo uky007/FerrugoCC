@@ -212,6 +212,7 @@ impl<'a> Parser<'a> {
             | TokenKind::KwUnsigned
             | TokenKind::KwSigned
             | TokenKind::KwDouble
+            | TokenKind::KwFloat
             | TokenKind::KwChar
             | TokenKind::KwVoid
             | TokenKind::KwStruct
@@ -405,6 +406,20 @@ impl<'a> Parser<'a> {
                     self.advance()?;
                     count += 1;
                 }
+                TokenKind::KwFloat => {
+                    if has_double || has_int || has_long || has_unsigned || has_signed || has_char || has_void {
+                        return Err(CompileError::ParseError(
+                            "cannot combine 'float' with other type specifiers".to_string(),
+                        ));
+                    }
+                    if count > 0 && has_double {
+                        return Err(CompileError::ParseError(
+                            "duplicate floating-point type specifier".to_string(),
+                        ));
+                    }
+                    self.advance()?;
+                    return Ok(Type::Float);
+                }
                 TokenKind::KwChar => {
                     if has_char {
                         return Err(CompileError::ParseError(
@@ -449,11 +464,6 @@ impl<'a> Parser<'a> {
                         self.advance()?;
                         return Ok(Type::Long);
                     }
-                    // float → 独立型（IEEE 754 single-precision）
-                    if name == "float" {
-                        self.advance()?;
-                        return Ok(Type::Float);
-                    }
                     // 他の型キーワードが未出現の場合のみ typedef 名として認識
                     if let Some(ty) = self.typedef_names.get(name).cloned() {
                         self.advance()?;
@@ -489,16 +499,14 @@ impl<'a> Parser<'a> {
             if has_long {
                 Ok(Type::ULong)
             } else if has_short {
-                // unsigned short → treat as UInt (16-bit semantics not yet supported)
-                Ok(Type::UInt)
+                Ok(Type::UShort)
             } else {
                 Ok(Type::UInt)
             }
         } else if has_long {
             Ok(Type::Long)
         } else if has_short {
-            // short / short int / signed short → treat as Int (16-bit semantics not yet)
-            Ok(Type::Int)
+            Ok(Type::Short)
         } else {
             // has_int or has_signed (or both)
             Ok(Type::Int)
@@ -1443,6 +1451,7 @@ impl<'a> Parser<'a> {
             | TokenKind::KwUnsigned
             | TokenKind::KwSigned
             | TokenKind::KwDouble
+            | TokenKind::KwFloat
             | TokenKind::KwChar
             | TokenKind::KwVoid
             | TokenKind::KwStatic
@@ -1776,6 +1785,7 @@ impl<'a> Parser<'a> {
                     | TokenKind::KwUnsigned
                     | TokenKind::KwSigned
                     | TokenKind::KwDouble
+                    | TokenKind::KwFloat
                     | TokenKind::KwChar
                     | TokenKind::KwVoid
                     | TokenKind::KwStatic
@@ -2222,7 +2232,7 @@ impl<'a> Parser<'a> {
     ///
     /// `(` の次が型キーワードならキャスト式、そうでなければ `parse_unary()` に委譲。
     fn parse_cast(&mut self) -> Result<Expr> {
-        // `(` の次が型キーワード/typedef 名ならキャスト式
+        // `(` の次が型キーワード/typedef 名ならキャスト式 or compound literal
         if self.pos < self.tokens.len()
             && self.peek()?.kind == TokenKind::OpenParen
             && self.pos + 1 < self.tokens.len()
@@ -2232,6 +2242,28 @@ impl<'a> Parser<'a> {
             let base_type = self.parse_type_specifier()?;
             let target_type = self.parse_abstract_declarator(base_type)?;
             self.expect(&TokenKind::CloseParen)?;
+
+            // Compound literal: (type){ init_list }
+            if self.pos < self.tokens.len()
+                && self.peek()?.kind == TokenKind::OpenBrace
+            {
+                let init = self.parse_compound_init()?;
+                // Infer array size from init count: (int[]){1,2,3} → Array(Int, 3)
+                let target_type = if let Type::Array(elem, 0) = &target_type {
+                    if let Expr::CompoundInit(ref inits) = init {
+                        Type::Array(elem.clone(), inits.len())
+                    } else {
+                        target_type
+                    }
+                } else {
+                    target_type
+                };
+                return Ok(Expr::CompoundLiteral {
+                    target_type,
+                    init: Box::new(init),
+                });
+            }
+
             let inner = self.parse_cast()?; // 右結合
             return Ok(Expr::Cast {
                 target_type,
@@ -2429,6 +2461,14 @@ impl<'a> Parser<'a> {
                 let token = self.advance()?;
                 if let TokenKind::DoubleLiteral(value) = &token.kind {
                     Ok(Expr::ConstantDouble(*value))
+                } else {
+                    unreachable!()
+                }
+            }
+            TokenKind::FloatLiteral(_) => {
+                let token = self.advance()?;
+                if let TokenKind::FloatLiteral(value) = &token.kind {
+                    Ok(Expr::ConstantFloat(*value))
                 } else {
                     unreachable!()
                 }

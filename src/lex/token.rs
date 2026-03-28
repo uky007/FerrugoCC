@@ -24,8 +24,10 @@ pub enum TokenKind {
     UIntLiteral(u64),
     /// unsigned long リテラル（例: `42UL`, `100ul`）（Chapter 12）。
     ULongLiteral(u64),
-    /// 浮動小数点リテラル（例: `3.14`, `.5`, `2e10`）（Chapter 13）。
+    /// 倍精度浮動小数点リテラル（例: `3.14`, `.5`, `2e10`）（Chapter 13）。
     DoubleLiteral(f64),
+    /// 単精度浮動小数点リテラル（例: `3.14f`, `1.0F`）。
+    FloatLiteral(f32),
     /// 文字リテラル（例: `'a'`, `'\n'`）（Chapter 16）。値は signed char。
     CharLiteral(i8),
     /// 文字列リテラル（例: `"hello"`）（Chapter 16）。エスケープ解決済みの内容。
@@ -68,6 +70,8 @@ pub enum TokenKind {
     KwSigned,
     /// `double` キーワード — 倍精度浮動小数点型（Chapter 13）
     KwDouble,
+    /// `float` キーワード — 単精度浮動小数点型
+    KwFloat,
     /// `sizeof` キーワード — 型/式のバイトサイズ取得（Chapter 15）
     KwSizeof,
     /// `char` キーワード — 文字型（Chapter 16）

@@ -76,6 +76,10 @@ pub enum Type {
     Char,
     /// `unsigned char` — 1バイト符号なし整数（Chapter 16）
     UChar,
+    /// `short` — 16ビット符号付き整数
+    Short,
+    /// `unsigned short` — 16ビット符号なし整数
+    UShort,
     /// `int` — 32ビット符号付き整数
     Int,
     /// `long` — 64ビット符号付き整数
@@ -123,6 +127,8 @@ impl PartialEq for Type {
             (Type::Void, Type::Void) => true,
             (Type::Char, Type::Char) => true,
             (Type::UChar, Type::UChar) => true,
+            (Type::Short, Type::Short) => true,
+            (Type::UShort, Type::UShort) => true,
             (Type::Int, Type::Int) => true,
             (Type::Long, Type::Long) => true,
             (Type::UInt, Type::UInt) => true,
@@ -194,12 +200,17 @@ impl Type {
 
     /// 符号なし型かどうかを判定する。
     pub fn is_unsigned(&self) -> bool {
-        matches!(self, Type::UInt | Type::ULong | Type::UChar)
+        matches!(self, Type::UInt | Type::ULong | Type::UChar | Type::UShort)
     }
 
     /// 文字型かどうかを判定する（Chapter 16）。
     pub fn is_character(&self) -> bool {
         matches!(self, Type::Char | Type::UChar)
+    }
+
+    /// short 型かどうかを判定する。
+    pub fn is_short(&self) -> bool {
+        matches!(self, Type::Short | Type::UShort)
     }
 
     /// 浮動小数点型かどうかを判定する（Chapter 13）。
@@ -241,6 +252,7 @@ impl Type {
             Type::Void => panic!("void has no size"),
             Type::Function { .. } => panic!("function type has no size"),
             Type::Char | Type::UChar => 1,
+            Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float => 4,
             Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
             Type::Array(elem, count) => elem.size() * count,
@@ -268,6 +280,7 @@ impl Type {
             Type::Void => panic!("void has no alignment"),
             Type::Function { .. } => panic!("function type has no alignment"),
             Type::Char | Type::UChar => 1,
+            Type::Short | Type::UShort => 2,
             Type::Int | Type::UInt | Type::Float => 4,
             Type::Long | Type::ULong | Type::Double | Type::Pointer(_) => 8,
             Type::Array(elem, _) => elem.alignment(),
@@ -505,8 +518,10 @@ pub enum Expr {
     ConstantUInt(u64),
     /// unsigned long 定数（例: `42UL`）（Chapter 12）
     ConstantULong(u64),
-    /// 浮動小数点定数（例: `3.14`）（Chapter 13）
+    /// 倍精度浮動小数点定数（例: `3.14`）（Chapter 13）
     ConstantDouble(f64),
+    /// 単精度浮動小数点定数（例: `3.14f`）
+    ConstantFloat(f32),
     /// 型変換（Chapter 11, 12）。型検査パスが挿入する。
     /// `source_type` はコード生成で符号付き/なし拡張を区別するために使う。
     Cast {
@@ -564,6 +579,11 @@ pub enum Expr {
     Dot(Box<Expr>, String),
     /// 複合初期化子（Chapter 18）。`{ expr, expr, ... }`
     CompoundInit(Vec<Expr>),
+    /// Compound literal — `(type){ init_list }`
+    CompoundLiteral {
+        target_type: Type,
+        init: Box<Expr>,
+    },
     /// `va_start(ap)` — va_list の初期化
     VaStart(Box<Expr>),
     /// `va_arg(ap, type)` — va_list から次の引数を取得

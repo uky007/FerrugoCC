@@ -583,6 +583,7 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         Expr::ConstantULong(_) => Ok(Type::ULong),
 
         Expr::ConstantDouble(_) => Ok(Type::Double),
+        Expr::ConstantFloat(_) => Ok(Type::Float),
 
         Expr::Cast {
             target_type,
@@ -1392,6 +1393,59 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
             "compound initializer not allowed in expression context".to_string(),
         )),
 
+        // Compound literal: (type){ init }
+        Expr::CompoundLiteral { target_type, init } => {
+            // Type-check the init expression (it's a CompoundInit)
+            // For structs: check each member
+            // For arrays: check each element
+            // For scalars: check the single value
+            if let Expr::CompoundInit(inits) = init.as_mut() {
+                if let Type::Struct { members, .. } = target_type {
+                    // struct compound literal: check each member
+                    for (i, init_expr) in inits.iter_mut().enumerate() {
+                        if i < members.len() {
+                            let member_type = &members[i].member_type;
+                            let init_type = typecheck_expr(init_expr, symbols)?;
+                            if init_type != *member_type {
+                                let old =
+                                    std::mem::replace(init_expr, Expr::Constant(0));
+                                *init_expr = Expr::Cast {
+                                    target_type: member_type.clone(),
+                                    source_type: init_type,
+                                    expr: Box::new(old),
+                                };
+                            }
+                        }
+                    }
+                } else if let Type::Array(elem_type, _) = target_type {
+                    // array compound literal: check each element
+                    for init_expr in inits.iter_mut() {
+                        let init_type = typecheck_expr(init_expr, symbols)?;
+                        if init_type != **elem_type {
+                            let old =
+                                std::mem::replace(init_expr, Expr::Constant(0));
+                            *init_expr = Expr::Cast {
+                                target_type: *elem_type.clone(),
+                                source_type: init_type,
+                                expr: Box::new(old),
+                            };
+                        }
+                    }
+                } else {
+                    // scalar compound literal: (int){42}
+                    if let Some(init_expr) = inits.first_mut() {
+                        typecheck_expr(init_expr, symbols)?;
+                    }
+                }
+            }
+            // Array compound literals decay to pointer in expression context
+            if let Type::Array(elem, _) = target_type {
+                Ok(Type::Pointer(elem.clone()))
+            } else {
+                Ok(target_type.clone())
+            }
+        }
+
         Expr::VaStart(ap) => {
             let ap_type = typecheck_expr(ap, symbols)?;
             if ap_type != Type::VaList {
@@ -1446,8 +1500,8 @@ fn resolve_constant(expr: &mut Expr) {
                 *expr = Expr::ConstantULong(val);
             }
         }
-        Expr::ConstantDouble(_) => {
-            // Double 定数はそのまま
+        Expr::ConstantDouble(_) | Expr::ConstantFloat(_) => {
+            // 浮動小数点定数はそのまま
         }
         _ => {}
     }
@@ -1625,9 +1679,9 @@ fn integer_promote(t: &Type) -> Type {
 }
 
 fn common_type(a: &Type, b: &Type) -> Type {
-    // Integer promotion: Char/UChar → Int（Chapter 16）
-    let a = if a.is_character() { &Type::Int } else { a };
-    let b = if b.is_character() { &Type::Int } else { b };
+    // Integer promotion: Char/UChar/Short/UShort → Int
+    let a = if a.is_character() || a.is_short() { &Type::Int } else { a };
+    let b = if b.is_character() || b.is_short() { &Type::Int } else { b };
 
     if a == b {
         return a.clone();
