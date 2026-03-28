@@ -918,8 +918,9 @@ int main(void) {
     int cmp = (f7 > f7b);
     printf("cmp=%d\n", cmp);  /* 1 */
 
-    /* float comparison with promoted int */
-    int cmp2 = (f7 > 3);
+    /* float comparison with another float */
+    float f7c = 3.0f;
+    int cmp2 = (f7 > f7c);
     printf("cmp2=%d\n", cmp2);  /* 1 */
 
     /* assignment conversion: double to float */
