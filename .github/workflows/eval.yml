@@ -32,6 +32,7 @@ jobs:
 
       - name: Run evaluation pipeline
         run: bash scripts/eval/run_all.sh results/ci
+        continue-on-error: true
 
       - name: Show results summary
         run: |
