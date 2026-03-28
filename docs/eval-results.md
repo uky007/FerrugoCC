@@ -101,6 +101,49 @@ Level 3 string encryption: 100% of string literals encrypted across all corpora.
   - Without outlining: 1,392 insns (outlining adds ~17%)
   - Without inlining: 1,400 insns (inlining adds ~17%)
 
+## Binary Size (Linux x86_64, CI)
+
+> Measured via `stat` (total), `objdump -h` (.text section), `strip` (stripped).
+
+| Level | Avg Total | Avg .text (Code) | Avg Stripped | Code Expansion |
+|-------|----------|-----------------|-------------|----------------|
+| L0 (normal) | 15.7 KB | 665 B | 14.3 KB | 1.0x |
+| L1 | 15.7 KB | 1.1 KB | 14.3 KB | 1.7x |
+| L2 | 16.2 KB | 2.4 KB | 14.8 KB | 3.6x |
+| **L3** | **20.3 KB** | **5.4 KB** | **17.9 KB** | **8.2x** |
+| L4 | 99.1 KB | 59.4 KB | 90.4 KB | 89.4x |
+
+L3 code section expands 8.2x (consistent with 7.6x instruction count expansion).
+L4 VM virtualization causes 89.4x code expansion — the VM dispatch loop and bytecode tables dominate.
+
+## Compilation Time (Linux x86_64, CI)
+
+> Measured via `date +%s%N` around `ferrugocc -S` invocation.
+
+| Level | Avg Compile Time | Range | Overhead vs L0 |
+|-------|-----------------|-------|----------------|
+| L0 | 9 ms | 7–11 ms | 1.0x |
+| L1 | 12 ms | 7–23 ms | 1.3x |
+| L2 | 35 ms | 8–104 ms | 3.9x |
+| **L3** | **61 ms** | **8–438 ms** | **6.8x** |
+| L4 | 4,006 ms | 8–45,888 ms | 445x |
+
+L3 compilation overhead is modest (6.8x). L4 VM virtualization is expensive (445x) due to bytecode generation and dispatch table construction.
+
+## Runtime Performance (Linux x86_64, CI)
+
+> Measured via bash TIMEFORMAT with 5-second timeout, 5 runs per binary.
+
+| Level | Avg Runtime |
+|-------|------------|
+| L0 | ~2 ms |
+| L1 | ~2 ms |
+| L2 | ~2 ms |
+| L3 | ~2 ms |
+| L4 | ~2 ms |
+
+All levels produce identical ~2ms runtime on the benchmark suite. The benchmarks are too small (~50–300 lines of C, single-function workloads) to produce measurable execution time differences. This indicates that **for small programs, obfuscation runtime overhead is below measurement threshold**. Larger workloads (e.g., kilo at 1,300 lines with I/O loops) would be needed to quantify runtime overhead.
+
 ### Note on strings_count
 
 Raw `strings` output increases with obfuscation level (L0: 64.3, L3: 98.2, L4: 433.3) because encrypted string ciphertext, VM bytecode, and junk code produce printable byte sequences. This does NOT indicate increased string exposure — original plaintext literals are encrypted at L3+. The correct interpretation is "original literal recovery rate = 0%" (verified by corpus string encryption tests).
