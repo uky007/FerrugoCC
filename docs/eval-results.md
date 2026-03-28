@@ -174,6 +174,20 @@ L4 (VM virtualization) timed out during the 500-iteration benchmark, suggesting 
 
 Ghidra successfully decompiles all obfuscated functions, but the output is semantically opaque: CFF dispatchers appear as indirect jumps through computed table indices, function outlining fragments logic into 14.3x more functions, and the decompiled pseudocode expands 31.2x. The zero goto count indicates Ghidra's structuring algorithm handles the CFF pattern, but the "structured" output is a switch on an encoded state variable — not meaningful control flow.
 
+## angr Symbolic Execution Evaluation (Linux x86_64, CI)
+
+> angr 9.2.207, CFGFast + symbolic execution, 30s timeout per binary, 20 benchmarks.
+
+| Metric | L0 (Normal) | L3 (Obfuscated) | Ratio |
+|--------|------------|-----------------|-------|
+| CFG nodes | 47 avg | 263 avg | 5.6x |
+| CFG functions | 21 avg | 122 avg | 5.8x |
+| SE found exit code | **20/20** | **20/20** | — |
+| SE avg time | 918 ms | 4,722 ms | **5.1x** |
+| SE timeouts | 0/20 | 0/20 | — |
+
+angr successfully finds the expected exit code for all 20 benchmarks at both L0 and L3 within the 30-second timeout. However, symbolic execution time increases 5.1x on average, and CFG complexity increases 5.6x. On larger programs with more complex control flow, the exponential nature of path exploration under CFF and opaque predicates would likely cause timeouts. This result is consistent with Banescu et al.'s finding that obfuscation increases attacker effort but does not prevent automated analysis on small programs.
+
 ### Note on strings_count
 
 Raw `strings` output increases with obfuscation level (L0: 64.3, L3: 98.2, L4: 433.3) because encrypted string ciphertext, VM bytecode, and junk code produce printable byte sequences. This does NOT indicate increased string exposure — original plaintext literals are encrypted at L3+. The correct interpretation is "original literal recovery rate = 0%" (verified by corpus string encryption tests).
