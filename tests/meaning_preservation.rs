@@ -802,3 +802,470 @@ int main(void) {
 "#;
     assert_meaning_preserved(source, "large_struct_return_indirect");
 }
+
+#[test]
+fn mp_float_arithmetic() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int main(void) {
+    float a = 3.0f;
+    float b = 2.0f;
+    float c = a + b;
+    float d = a - b;
+    float e = a * b;
+    float f = a / b;
+    int ic = (int)c;
+    int id = (int)d;
+    int ie = (int)e;
+    int if_ = (int)f;
+    printf("add=%d sub=%d mul=%d div=%d\n", ic, id, ie, if_);
+
+    /* float <-> double conversion */
+    double da = (double)a;
+    float fb = (float)da;
+    printf("da=%d fb=%d\n", (int)da, (int)fb);
+
+    /* float <-> int conversion */
+    int x = 42;
+    float fx = (float)x;
+    int y = (int)fx;
+    printf("fx=%d y=%d\n", (int)fx, y);
+
+    /* comparison */
+    int gt = a > b;
+    int lt = a < b;
+    int eq = a == a;
+    printf("gt=%d lt=%d eq=%d\n", gt, lt, eq);
+
+    /* increment / compound assign */
+    float g = 1.0f;
+    g += 2.0f;
+    g *= 3.0f;
+    printf("g=%d\n", (int)g);
+
+    return ic + id + ie + if_ + gt + eq + y;
+}
+"#;
+    assert_meaning_preserved(source, "float_arithmetic");
+}
+
+#[test]
+fn mp_float_static() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+float global_f = 3.0f;
+static float static_f = 7.0f;
+float global_zero;
+int main(void) {
+    static float local_static = 2.5f;
+    printf("g=%d s=%d ls=%d gz=%d\n",
+        (int)global_f, (int)static_f, (int)local_static, (int)global_zero);
+    global_f += 1.0f;
+    local_static *= 2.0f;
+    printf("g2=%d ls2=%d\n", (int)global_f, (int)local_static);
+    return (int)global_f + (int)static_f + (int)local_static + (int)global_zero;
+}
+"#;
+    assert_meaning_preserved(source, "float_static");
+}
+
+#[test]
+fn mp_float_conversions() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int main(void) {
+    /* float + int → float (usual arithmetic conversion) */
+    float f1 = 2.0f;
+    int i1 = 3;
+    float sum_fi = f1 + i1;
+    printf("fi=%d\n", (int)sum_fi);  /* 5 */
+
+    /* float + double → double */
+    double d1 = 1.0;
+    float f2 = 2.0f;
+    double sum_fd = f2 + d1;
+    printf("fd=%d\n", (int)sum_fd);  /* 3 */
+
+    /* int → float → int round-trip */
+    int i2 = 42;
+    float f3 = (float)i2;
+    int i3 = (int)f3;
+    printf("rt=%d\n", i3);  /* 42 */
+
+    /* unsigned → float */
+    unsigned int u1 = 100;
+    float f4 = (float)u1;
+    printf("uf=%d\n", (int)f4);  /* 100 */
+
+    /* float → double → float round-trip */
+    float f5 = 7.0f;
+    double d2 = (double)f5;
+    float f6 = (float)d2;
+    printf("fdf=%d\n", (int)f6);  /* 7 */
+
+    /* float comparison */
+    float f7 = 5.0f;
+    float f7b = 3.0f;
+    int cmp = (f7 > f7b);
+    printf("cmp=%d\n", cmp);  /* 1 */
+
+    /* float comparison with promoted int */
+    int cmp2 = (f7 > 3);
+    printf("cmp2=%d\n", cmp2);  /* 1 */
+
+    /* assignment conversion: double to float */
+    float f8 = 10.0;
+    printf("f8=%d\n", (int)f8);  /* 10 */
+
+    /* float negation */
+    float f9 = -4.0f;
+    printf("neg=%d\n", (int)f9);  /* -4 */
+
+    return (int)sum_fi + i3 + cmp + cmp2;
+}
+"#;
+    assert_meaning_preserved(source, "float_conversions");
+}
+
+#[test]
+fn mp_float_abi() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+
+/* float return value */
+float make_float(int x) {
+    return (float)x + 0.5f;
+}
+
+/* float parameter */
+int truncate_float(float f) {
+    return (int)f;
+}
+
+/* mixed int/float parameters */
+int mixed_args(int a, float b, int c, float d) {
+    return a + (int)b + c + (int)d;
+}
+
+/* float + double parameters (XMM register allocation) */
+double promote_add(float a, double b) {
+    return (double)a + b;
+}
+
+/* many float args (>8 → stack spill) */
+int many_floats(float a, float b, float c, float d,
+                float e, float f, float g, float h,
+                float i) {
+    return (int)(a + b + c + d + e + f + g + h + i);
+}
+
+int main(void) {
+    /* float return */
+    float r1 = make_float(3);
+    printf("r1=%d\n", (int)(r1 * 10.0f));  /* 35 */
+
+    /* float param */
+    int r2 = truncate_float(7.9f);
+    printf("r2=%d\n", r2);  /* 7 */
+
+    /* mixed params */
+    int r3 = mixed_args(1, 2.0f, 3, 4.0f);
+    printf("r3=%d\n", r3);  /* 10 */
+
+    /* float + double */
+    double r4 = promote_add(1.5f, 2.5);
+    printf("r4=%d\n", (int)r4);  /* 4 */
+
+    /* 9 float args (8 XMM + 1 stack) */
+    int r5 = many_floats(1.0f, 2.0f, 3.0f, 4.0f,
+                         5.0f, 6.0f, 7.0f, 8.0f, 9.0f);
+    printf("r5=%d\n", r5);  /* 45 */
+
+    return r2 + r3 + (int)r4 + r5;
+}
+"#;
+    assert_meaning_preserved(source, "float_abi");
+}
+
+/// User-defined variadic function with va_arg
+#[test]
+fn mp_user_variadic() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int get_second(int dummy, ...) {
+    va_list ap;
+    va_start(ap, dummy);
+    int a = va_arg(ap, int);
+    int b = va_arg(ap, int);
+    va_end(ap);
+    printf("a=%d b=%d\n", a, b);
+    return a + b;
+}
+int main(void) {
+    int r = get_second(0, 10, 32);
+    printf("r=%d\n", r);
+    return 0;
+}
+"#;
+    assert_meaning_preserved(source, "user_variadic");
+}
+
+/// User-defined variadic function with va_arg in a loop
+#[test]
+fn mp_user_variadic_loop() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int sum_ints(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    int total = 0;
+    int i;
+    for (i = 0; i < count; i++) {
+        total += va_arg(ap, int);
+    }
+    va_end(ap);
+    return total;
+}
+int main(void) {
+    int r = sum_ints(3, 10, 20, 12);
+    printf("r=%d\n", r);
+    return r;
+}
+"#;
+    assert_meaning_preserved(source, "user_variadic_loop");
+}
+
+/// Float values passed to printf (promoted to double per C variadic ABI)
+#[test]
+fn mp_float_printf() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+int main(void) {
+    float f = 3.0f;
+    double d = 7.0;
+    /* float promoted to double when passed to variadic */
+    printf("f=%d d=%d\n", (int)f, (int)d);
+    return (int)f + (int)d;
+}
+"#;
+    assert_meaning_preserved(source, "float_printf");
+}
+
+#[test]
+fn mp_float_compound() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+
+struct point { float x; float y; };
+
+float arr[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+
+int main(void) {
+    /* float array access */
+    float sum = 0.0f;
+    int i;
+    for (i = 0; i < 4; i++) {
+        sum += arr[i];
+    }
+    printf("arr_sum=%d\n", (int)sum);  /* 10 */
+
+    /* float struct members */
+    struct point p;
+    p.x = 3.0f;
+    p.y = 4.0f;
+    float dist2 = p.x * p.x + p.y * p.y;
+    printf("dist2=%d\n", (int)dist2);  /* 25 */
+
+    /* float in ternary */
+    float a = 5.0f;
+    float b = 3.0f;
+    float mx = (a > b) ? a : b;
+    printf("max=%d\n", (int)mx);  /* 5 */
+
+    /* float pointer */
+    float val = 7.0f;
+    float *fp = &val;
+    *fp += 1.0f;
+    printf("ptr=%d\n", (int)val);  /* 8 */
+
+    /* local float array */
+    float local[3];
+    local[0] = 10.0f;
+    local[1] = 20.0f;
+    local[2] = 30.0f;
+    float lsum = local[0] + local[1] + local[2];
+    printf("lsum=%d\n", (int)lsum);  /* 60 */
+
+    return (int)sum + (int)dist2 + (int)mx + (int)val + (int)lsum;
+}
+"#;
+    assert_meaning_preserved(source, "float_compound");
+}
+
+#[test]
+fn mp_short_arithmetic() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+short global_s = 100;
+unsigned short global_us = 200;
+int main(void) {
+    /* basic short arithmetic (promoted to int) */
+    short a = 10;
+    short b = 20;
+    int sum = a + b;
+    printf("sum=%d\n", sum);  /* 30 */
+
+    /* short overflow wraps at 16-bit */
+    short c = 32000;
+    short d = 1000;
+    short e = c + d;  /* wraps via int promotion + truncation */
+    printf("e=%d\n", (int)e);
+
+    /* unsigned short */
+    unsigned short ua = 50000;
+    unsigned short ub = 10000;
+    unsigned short uc = ua + ub;  /* 60000, wraps at 65536 */
+    printf("uc=%d\n", (int)uc);
+
+    /* short <-> int conversion */
+    int big = 1000;
+    short s = (short)big;
+    int back = s;
+    printf("rt=%d\n", back);  /* 1000 */
+
+    /* sizeof */
+    printf("sz=%d\n", (int)sizeof(short));  /* 2 */
+
+    /* short pointer */
+    short val = 42;
+    short *p = &val;
+    *p += 1;
+    printf("ptr=%d\n", (int)val);  /* 43 */
+
+    /* global short */
+    global_s += 5;
+    printf("gs=%d\n", (int)global_s);  /* 105 */
+    printf("gus=%d\n", (int)global_us);  /* 200 */
+
+    /* short array */
+    short arr[3] = {10, 20, 30};
+    short total = 0;
+    int i;
+    for (i = 0; i < 3; i++) total += arr[i];
+    printf("total=%d\n", (int)total);  /* 60 */
+
+    /* short as function param/return */
+    return (int)sum + back + (int)val + (int)global_s + (int)total;
+}
+"#;
+    assert_meaning_preserved(source, "short_arithmetic");
+}
+
+#[test]
+fn mp_compound_literal() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+
+struct point { int x; int y; };
+
+int dot(struct point a, struct point b) {
+    return a.x * b.x + a.y * b.y;
+}
+
+int main(void) {
+    /* struct compound literal assigned to variable */
+    struct point p = (struct point){3, 4};
+    printf("p=%d,%d\n", p.x, p.y);  /* 3,4 */
+
+    /* scalar compound literal */
+    int v = (int){42};
+    printf("v=%d\n", v);  /* 42 */
+
+    /* field access on compound literal */
+    int fx = ((struct point){5, 6}).x;
+    int fy = ((struct point){5, 6}).y;
+    printf("fx=%d fy=%d\n", fx, fy);  /* 5, 6 */
+
+    /* compound literal as function argument */
+    int d = dot((struct point){1, 2}, (struct point){3, 4});
+    printf("dot=%d\n", d);  /* 11 */
+
+    /* array compound literal with pointer decay */
+    int *a = (int[]){10, 20, 30};
+    printf("a=%d,%d,%d\n", a[0], a[1], a[2]);  /* 10,20,30 */
+
+    /* array compound literal subscript */
+    int idx1 = ((int[]){100, 200, 300})[1];
+    printf("idx1=%d\n", idx1);  /* 200 */
+
+    return p.x + p.y + v + fx + d + a[2] + idx1;
+}
+"#;
+    assert_meaning_preserved(source, "compound_literal");
+}
+
+#[test]
+fn mp_flexible_array_member() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+void *malloc(unsigned long);
+void free(void *);
+
+struct msg {
+    int len;
+    char data[];
+};
+
+int main(void) {
+    /* sizeof includes only fixed members */
+    printf("sz=%d\n", (int)sizeof(struct msg));
+
+    /* malloc + flexible array access */
+    void *raw = malloc(sizeof(struct msg) + 10);
+    struct msg *m = (struct msg *)raw;
+    m->len = 3;
+    m->data[0] = 72;
+    m->data[1] = 105;
+    m->data[2] = 0;
+    printf("len=%d d0=%d d1=%d\n", m->len, (int)m->data[0], (int)m->data[1]);
+
+    int result = (int)sizeof(struct msg) + m->len + m->data[0];
+    free(raw);
+    return result;
+}
+"#;
+    assert_meaning_preserved(source, "flexible_array_member");
+}
