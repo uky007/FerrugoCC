@@ -1,8 +1,8 @@
 # FerrugoCC Evaluation Results
 
-> **Version**: main branch (post-v0.3.0, includes struct return >16B)
+> **Version**: main branch (post-v0.3.0, includes struct return >16B, float independent type)
 > **Baseline tag**: v0.3.0 (`110afd4`, 2026-03-22) — code expansion metrics measured at v0.3.0
-> **Date**: 2026-03-24
+> **Date**: 2026-03-27
 > **Platform**: macOS arm64 (Rosetta 2), Linux x86_64 (CI)
 
 ## Test Suite
@@ -10,9 +10,9 @@
 | Suite | Tests | Pass | Fail | Ignored |
 |-------|-------|------|------|---------|
 | corpus (normal + obfuscated) | 24 | 24 | 0 | 0 |
-| meaning-preservation | 22 | 22 | 0 | 0 |
+| meaning-preservation | 31 | 31 | 0 | 0 |
 | obfuscation unit | 75 | 75 | 0 | 0 |
-| **Total** | **121** | **121** | **0** | **0** |
+| **Total** | **130** | **130** | **0** | **0** |
 
 ## Code Size (Assembly Lines)
 
