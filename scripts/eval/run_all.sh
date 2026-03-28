@@ -118,8 +118,8 @@ bash "$SCRIPT_DIR/collect_correctness.sh" "$RESULTS_DIR" "$EXPECTED"
 echo "=== Measuring binary size ==="
 bash "$SCRIPT_DIR/measure_size.sh" "$RESULTS_DIR"
 
-echo "=== Measuring performance ==="
-bash "$SCRIPT_DIR/measure_perf.sh" "$RESULTS_DIR"
+echo "=== Measuring performance (optional) ==="
+bash "$SCRIPT_DIR/measure_perf.sh" "$RESULTS_DIR" || echo "WARNING: performance measurement failed (non-fatal)"
 
 echo "=== Collecting reverse-engineering metrics ==="
 bash "$SCRIPT_DIR/collect_reverse_metrics.sh" "$RESULTS_DIR"
