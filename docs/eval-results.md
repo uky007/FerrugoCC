@@ -1,18 +1,25 @@
 # FerrugoCC Evaluation Results
 
-> **Version**: main branch (post-v0.3.0, includes struct return >16B, float independent type)
+> **Version**: dev/future-features branch (post-v0.3.0)
 > **Baseline tag**: v0.3.0 (`110afd4`, 2026-03-22) — code expansion metrics measured at v0.3.0
-> **Date**: 2026-03-27
-> **Platform**: macOS arm64 (Rosetta 2), Linux x86_64 (CI)
+> **Date**: 2026-03-28
+> **Platform**: Linux x86_64 (GitHub Actions), macOS arm64 (Rosetta 2, dev)
 
 ## Test Suite
 
 | Suite | Tests | Pass | Fail | Ignored |
 |-------|-------|------|------|---------|
 | corpus (normal + obfuscated) | 24 | 24 | 0 | 0 |
-| meaning-preservation | 31 | 31 | 0 | 0 |
+| meaning-preservation | 33 | 33 | 0 | 0 |
 | obfuscation unit | 75 | 75 | 0 | 0 |
-| **Total** | **130** | **130** | **0** | **0** |
+| multi-file | 3 | 3 | 0 | 0 |
+| **Total** | **135** | **135** | **0** | **0** |
+
+## Benchmark Correctness (Linux x86_64, CI)
+
+20 benchmark programs × 11 obfuscation conditions = **220/220 pass** (100%).
+
+Conditions: L0 (normal), L1–L4 (obfuscation levels), L3 minus individual passes (CFF, strings, arithmetic, inlining, outlining), L4 minus VM.
 
 ## Code Size (Assembly Lines)
 
@@ -66,3 +73,34 @@ OPSEC strip: all exported symbols reduced to `main` only (95%+ average reduction
 | sbase-uniq | 25 | 0 | 100% |
 
 Level 3 string encryption: 100% of string literals encrypted across all corpora.
+
+## Static Analysis Proxy Metrics (Linux x86_64, CI)
+
+> Measured via `objdump -d`, `nm`, `strings` on benchmark binaries.
+> These are proxy metrics for reverse-engineering difficulty, not decompilation results.
+
+### Per-Level Averages (20 benchmarks)
+
+| Level | Avg Function Symbols | Avg Instructions | Avg Invalid Insns | Avg Readable Symbols |
+|-------|---------------------|-----------------|-------------------|---------------------|
+| L0 (normal) | 11.0 | 220 | 0.0 | 9.6 |
+| L1 | 11.0 | 357 | 0.0 | 9.6 |
+| L2 | 11.0 | 710 | 0.0 | 9.6 |
+| **L3** | **39.7** | **1,679** | **40.4** | **9.8** |
+| L4 | 73.8 | 15,427 | 207.0 | 11.7 |
+
+### Key Observations
+
+- **Code expansion**: L0→L3 instruction count increases 7.6x on average
+- **Anti-disassembly**: L3 produces 40.4 invalid instructions per binary (linear sweep confusion); L4 produces 207.0
+- **Function proliferation**: L3 has 3.6x more function symbols than L0 (outlining splits functions); L4 has 6.7x (VM dispatch adds handler functions)
+- **Symbol sanitization**: Readable symbols remain ~10 across all levels (toolchain-only: `_start`, `main`, `frame_dummy`, etc.). All user-defined symbols are OPSEC-renamed at L2+.
+- **Instruction expansion by pass** (L3 minus one pass):
+  - Without CFF: 1,512 insns (CFF adds ~10%)
+  - Without arithmetic substitution: 1,511 insns (~10% from arith)
+  - Without outlining: 1,392 insns (outlining adds ~17%)
+  - Without inlining: 1,400 insns (inlining adds ~17%)
+
+### Note on strings_count
+
+Raw `strings` output increases with obfuscation level (L0: 64.3, L3: 98.2, L4: 433.3) because encrypted string ciphertext, VM bytecode, and junk code produce printable byte sequences. This does NOT indicate increased string exposure — original plaintext literals are encrypted at L3+. The correct interpretation is "original literal recovery rate = 0%" (verified by corpus string encryption tests).
