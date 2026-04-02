@@ -1297,7 +1297,6 @@ int main(void) {
     assert_meaning_preserved(source, "ulong_float_cast");
 }
 
-/// FP↔short キャスト: normal のみ検証（obfuscated は既知の制限）
 #[test]
 fn mp_fp_short_cast() {
     if !can_run_x86_64() {
@@ -1310,26 +1309,30 @@ int main(void) {
     /* double -> short */
     double d = 123.9;
     short s = (short)d;
+    printf("s=%d\n", (int)s);
 
     /* float -> short */
     float f = -42.5f;
     short s2 = (short)f;
+    printf("s2=%d\n", (int)s2);
 
-    /* short -> double -> short roundtrip */
+    /* short -> double */
     short x = 300;
     double dx = (double)x;
-    short rx = (short)dx;
+    printf("dx=%.0f\n", dx);
 
-    /* short -> float -> short roundtrip */
+    /* short -> float */
     float fx = (float)x;
-    short rfx = (short)fx;
+    printf("fx=%.0f\n", (double)fx);
 
-    printf("s=%d s2=%d rx=%d rfx=%d\n", (int)s, (int)s2, (int)rx, (int)rfx);
-    return s + s2 + rx + rfx;
+    /* unsigned short -> float -> unsigned short */
+    unsigned short us = 500;
+    float fus = (float)us;
+    unsigned short back = (unsigned short)fus;
+    printf("back=%d\n", (int)back);
+
+    return s + s2 + (short)dx + back;
 }
 "#;
-    // normal-only: obfuscation との組み合わせは別途調査
-    let (code, stdout, _) = compile_and_run(source, false);
-    assert_eq!(code & 0xFF, ((123 + (-42) + 300 + 300) & 0xFF) as i32,
-        "fp_short_cast: unexpected exit code {code}, stdout: {stdout}");
+    assert_meaning_preserved(source, "fp_short_cast");
 }

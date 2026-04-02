@@ -963,12 +963,24 @@ fn generate_instruction(
         }
 
         TackyInstruction::Truncate { src, dst } => {
+            let dst_type = val_type(dst, var_types);
             let src_op = val_to_operand(src, static_vars, stack_vars)?;
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
-            instrs.push(Instruction::Truncate {
-                src: src_op,
-                dst: dst_op,
-            });
+            let dst_asm = safe_asm_type(&dst_type);
+            // 16-bit/8-bit への truncate は正しいサイズの Mov を使用
+            // (Truncate は movl 固定で 32-bit 書き込みのため、short/char dst では隣接メモリを破壊する)
+            if matches!(dst_asm, AsmType::Word | AsmType::Byte) {
+                instrs.push(Instruction::Mov {
+                    asm_type: dst_asm,
+                    src: src_op,
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Truncate {
+                    src: src_op,
+                    dst: dst_op,
+                });
+            }
         }
 
         TackyInstruction::IntToDouble { src, dst } => {
