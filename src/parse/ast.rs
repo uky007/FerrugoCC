@@ -369,6 +369,14 @@ pub fn struct_member_offset_ex(
     }
 }
 
+/// 構造体が flexible array member (C99) を持つか判定する。
+/// 最後のメンバが `Array(_, 0)` であれば FAM とみなす。
+pub fn has_fam(members: &[MemberDecl]) -> bool {
+    members
+        .last()
+        .is_some_and(|m| matches!(&m.member_type, Type::Array(_, 0)))
+}
+
 /// ストレージクラス指定子（Chapter 10）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageClass {

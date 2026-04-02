@@ -77,6 +77,13 @@ pub fn emit(program: &AsmProgram) -> Result<String> {
     for constant in &program.static_constants {
         emit_static_constant(&mut out, constant)?;
     }
+    // FerrugoCC watermark section (SHF_ALLOC: survives strip)
+    writeln!(out, "    .section .ferrugo_sig,\"a\",@note")
+        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    writeln!(out, "    .byte 0x46,0x45,0x52,0x52,0x55,0x47,0x4f")
+        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    writeln!(out, "    .byte 0x01,0x00")
+        .map_err(|e| CompileError::EmitError(e.to_string()))?;
     // スタック非実行セクション（セキュリティ慣習）
     writeln!(out, "    .section .note.GNU-stack,\"\",@progbits")
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
@@ -1170,7 +1177,7 @@ mod tests {
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
-        let expected = "    .globl main\nmain:\n    push %rbp\n    movq %rsp, %rbp\n    movl $2, %eax\n    pop %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
+        let expected = "    .globl main\nmain:\n    push %rbp\n    movq %rsp, %rbp\n    movl $2, %eax\n    pop %rbp\n    ret\n    .section .ferrugo_sig,\"a\",@note\n    .byte 0x46,0x45,0x52,0x52,0x55,0x47,0x4f\n    .byte 0x01,0x00\n    .section .note.GNU-stack,\"\",@progbits\n";
         assert_eq!(asm, expected);
     }
 
@@ -1558,7 +1565,7 @@ mod tests {
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
-        let expected = "    .globl main\nmain:\n    push %rbp\n    movq %rsp, %rbp\n    subq $16, %rsp\n    movl $5, %eax\n    movl %eax, -4(%rbp)\n    movl -4(%rbp), %eax\n    addq $16, %rsp\n    pop %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
+        let expected = "    .globl main\nmain:\n    push %rbp\n    movq %rsp, %rbp\n    subq $16, %rsp\n    movl $5, %eax\n    movl %eax, -4(%rbp)\n    movl -4(%rbp), %eax\n    addq $16, %rsp\n    pop %rbp\n    ret\n    .section .ferrugo_sig,\"a\",@note\n    .byte 0x46,0x45,0x52,0x52,0x55,0x47,0x4f\n    .byte 0x01,0x00\n    .section .note.GNU-stack,\"\",@progbits\n";
         assert_eq!(asm, expected);
     }
 

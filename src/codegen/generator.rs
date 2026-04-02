@@ -975,12 +975,38 @@ fn generate_instruction(
             let src_type = val_type(src, var_types);
             let src_op = val_to_operand(src, static_vars, stack_vars)?;
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            let asm_t = safe_asm_type(&src_type);
 
-            instrs.push(Instruction::Cvtsi2sd {
-                asm_type: safe_asm_type(&src_type),
-                src: src_op,
-                dst: dst_op,
-            });
+            // x86-64 の cvtsi2sd は 32-bit/64-bit のみ。16-bit/8-bit は 32-bit に sign-extend してから変換
+            if asm_t == AsmType::Word {
+                instrs.push(Instruction::MovsxWord {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Cvtsi2sd {
+                    asm_type: AsmType::Longword,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else if asm_t == AsmType::Byte {
+                instrs.push(Instruction::MovsxByte {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Cvtsi2sd {
+                    asm_type: AsmType::Longword,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Cvtsi2sd {
+                    asm_type: asm_t,
+                    src: src_op,
+                    dst: dst_op,
+                });
+            }
         }
 
         TackyInstruction::DoubleToInt { src, dst } => {
@@ -994,12 +1020,27 @@ fn generate_instruction(
                 &mut const_counter,
             );
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            let asm_t = safe_asm_type(&dst_type);
 
-            instrs.push(Instruction::Cvttsd2si {
-                asm_type: safe_asm_type(&dst_type),
-                src: src_op,
-                dst: dst_op,
-            });
+            // x86-64 の cvttsd2si は 32-bit/64-bit のみ。16-bit/8-bit は 32-bit 経由で truncate
+            if matches!(asm_t, AsmType::Word | AsmType::Byte) {
+                instrs.push(Instruction::Cvttsd2si {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Mov {
+                    asm_type: asm_t,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Cvttsd2si {
+                    asm_type: asm_t,
+                    src: src_op,
+                    dst: dst_op,
+                });
+            }
         }
 
         TackyInstruction::UIntToDouble { src, dst } => {
@@ -1184,12 +1225,38 @@ fn generate_instruction(
             let src_type = val_type(src, var_types);
             let src_op = val_to_operand(src, static_vars, stack_vars)?;
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            let asm_t = safe_asm_type(&src_type);
 
-            instrs.push(Instruction::Cvtsi2ss {
-                asm_type: safe_asm_type(&src_type),
-                src: src_op,
-                dst: dst_op,
-            });
+            // x86-64 の cvtsi2ss は 32-bit/64-bit のみ。16-bit/8-bit は 32-bit に sign-extend してから変換
+            if asm_t == AsmType::Word {
+                instrs.push(Instruction::MovsxWord {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Cvtsi2ss {
+                    asm_type: AsmType::Longword,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else if asm_t == AsmType::Byte {
+                instrs.push(Instruction::MovsxByte {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Cvtsi2ss {
+                    asm_type: AsmType::Longword,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Cvtsi2ss {
+                    asm_type: asm_t,
+                    src: src_op,
+                    dst: dst_op,
+                });
+            }
         }
 
         TackyInstruction::FloatToInt { src, dst } => {
@@ -1203,21 +1270,36 @@ fn generate_instruction(
                 &mut const_counter,
             );
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            let asm_t = safe_asm_type(&dst_type);
 
-            instrs.push(Instruction::Cvttss2si {
-                asm_type: safe_asm_type(&dst_type),
-                src: src_op,
-                dst: dst_op,
-            });
+            // x86-64 の cvttss2si は 32-bit/64-bit のみ。16-bit/8-bit は 32-bit 経由で truncate
+            if matches!(asm_t, AsmType::Word | AsmType::Byte) {
+                instrs.push(Instruction::Cvttss2si {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Mov {
+                    asm_type: asm_t,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Cvttss2si {
+                    asm_type: asm_t,
+                    src: src_op,
+                    dst: dst_op,
+                });
+            }
         }
 
         TackyInstruction::UIntToFloat { src, dst } => {
-            // Same as UIntToDouble for now
+            // unsigned long → float: 既存の unsigned→double 変換 + cvtsd2ss で narrowing
             let src_op = val_to_operand(src, static_vars, stack_vars)?;
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
 
-            let large_label = format!(".Lul2d_large{}", const_counter);
-            let end_label = format!(".Lul2d_end{}", const_counter);
+            let large_label = format!(".Lul2f_large{}", const_counter);
+            let end_label = format!(".Lul2f_end{}", const_counter);
             #[allow(unused_assignments)]
             {
                 const_counter += 1;
@@ -1273,15 +1355,20 @@ fn generate_instruction(
                 dst: Operand::Register(Reg::XMM0),
             });
             instrs.push(Instruction::Label(end_label));
+            // double → float に narrowing してから store
+            instrs.push(Instruction::Cvtsd2ss {
+                src: Operand::Register(Reg::XMM0),
+                dst: Operand::Register(Reg::XMM0),
+            });
             instrs.push(Instruction::Mov {
-                asm_type: AsmType::Double,
+                asm_type: AsmType::Float,
                 src: Operand::Register(Reg::XMM0),
                 dst: dst_op,
             });
         }
 
         TackyInstruction::FloatToUInt { src, dst } => {
-            // Same as DoubleToUInt for now
+            // float → unsigned long: float を double に拡張してから double→unsigned パスを使用
             let src_op = load_double_val(
                 src,
                 static_vars,
@@ -1292,8 +1379,8 @@ fn generate_instruction(
             );
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
 
-            let out_of_range_label = format!(".Ld2ul_oor{}", const_counter);
-            let end_label = format!(".Ld2ul_end{}", const_counter);
+            let out_of_range_label = format!(".Lf2ul_oor{}", const_counter);
+            let end_label = format!(".Lf2ul_end{}", const_counter);
             const_counter += 1;
 
             let bound_label = get_or_add_double_constant(
@@ -1303,11 +1390,12 @@ fn generate_instruction(
                 &mut const_counter,
             );
 
-            instrs.push(Instruction::Mov {
-                asm_type: AsmType::Double,
+            // float → double 拡張
+            instrs.push(Instruction::Cvtss2sd {
                 src: src_op,
                 dst: Operand::Register(Reg::XMM0),
             });
+            // 以降は double → unsigned long と同じロジック
             instrs.push(Instruction::Cmp {
                 asm_type: AsmType::Double,
                 src: Operand::Data(bound_label.clone()),

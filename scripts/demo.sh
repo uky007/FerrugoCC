@@ -83,8 +83,8 @@ fixup_macos_asm() {
     while IFS= read -r line; do
         trimmed=$(echo "$line" | sed 's/^[[:space:]]*//')
 
-        # Remove .note.GNU-stack
-        if echo "$trimmed" | grep -q '\.note\.GNU-stack'; then
+        # Remove .note.GNU-stack and .ferrugo_sig (ELF-only sections)
+        if echo "$trimmed" | grep -q '\.note\.GNU-stack\|\.ferrugo_sig'; then
             continue
         fi
 

@@ -128,7 +128,7 @@ fn fixup_asm_for_macos(asm: &str) -> String {
 
     for line in asm.lines() {
         let trimmed = line.trim();
-        if trimmed.contains(".note.GNU-stack") {
+        if trimmed.contains(".note.GNU-stack") || trimmed.contains(".ferrugo_sig") || trimmed.starts_with(".byte 0x46,0x45") || trimmed.starts_with(".byte 0x01,0x00") {
             continue;
         }
         if trimmed.starts_with(".section .rodata") {
@@ -1239,4 +1239,100 @@ int main(void) {
 }
 "#;
     assert_meaning_preserved(source, "flexible_array_member");
+}
+
+#[test]
+fn mp_variadic_float_short_promotion() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+
+int main(void) {
+    float f = 3.14f;
+    short s = 42;
+    unsigned short us = 100;
+
+    /* float must be promoted to double for variadic calls */
+    printf("f=%.2f\n", f);
+
+    /* short/unsigned short must be promoted to int */
+    printf("s=%d us=%d\n", s, us);
+
+    return (int)f + s + us;
+}
+"#;
+    assert_meaning_preserved(source, "variadic_float_short_promotion");
+}
+
+#[test]
+fn mp_ulong_float_cast() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+
+int main(void) {
+    /* unsigned long -> float */
+    unsigned long ul = 1000000UL;
+    float f = (float)ul;
+    printf("f=%.0f\n", (double)f);
+
+    /* float -> unsigned long */
+    float g = 42.9f;
+    unsigned long back = (unsigned long)g;
+    printf("back=%lu\n", back);
+
+    /* large value: unsigned long -> float -> unsigned long */
+    unsigned long big = 3000000000UL;
+    float fbig = (float)big;
+    unsigned long rbig = (unsigned long)fbig;
+    printf("fbig=%.0f rbig=%lu\n", (double)fbig, rbig);
+
+    return (int)f + (int)back;
+}
+"#;
+    assert_meaning_preserved(source, "ulong_float_cast");
+}
+
+#[test]
+fn mp_fp_short_cast() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+
+int main(void) {
+    /* double -> short */
+    double d = 123.9;
+    short s = (short)d;
+    printf("s=%d\n", (int)s);
+
+    /* float -> short */
+    float f = -42.5f;
+    short s2 = (short)f;
+    printf("s2=%d\n", (int)s2);
+
+    /* short -> double */
+    short x = 300;
+    double dx = (double)x;
+    printf("dx=%.0f\n", dx);
+
+    /* short -> float */
+    float fx = (float)x;
+    printf("fx=%.0f\n", (double)fx);
+
+    /* unsigned short -> float -> unsigned short */
+    unsigned short us = 500;
+    float fus = (float)us;
+    unsigned short back = (unsigned short)fus;
+    printf("back=%d\n", (int)back);
+
+    return s + s2 + (short)dx + back;
+}
+"#;
+    assert_meaning_preserved(source, "fp_short_cast");
 }

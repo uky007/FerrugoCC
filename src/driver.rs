@@ -288,6 +288,9 @@ pub fn run_multi(
 
     link_objects(&all_objects, &output_path)?;
 
+    // ELF ウォーターマーク埋め込み（サイレント、常時有効）
+    apply_elf_watermark(&output_path)?;
+
     // 生成した .o を掃除（引数で渡された .o は残す）
     for asm_path in &asm_paths {
         let obj_path = asm_path.with_extension("o");
@@ -342,6 +345,44 @@ pub fn run(
 /// リンク後バイナリの OPSEC 監査
 ///
 /// `strings` コマンドでバイナリ内の文字列をスキャンし、
+/// ELF バイナリに LSB ステガノグラフィでウォーターマークを埋め込む。
+/// e_ident[9..16] (EI_PAD, 7 bytes) に "FERRUGO" の各ビットを LSB エンコードし、
+/// e_flags (offset 48..52, 4 bytes) にバージョン情報を LSB エンコードする。
+/// ELF 以外（macOS Mach-O 等）の場合はサイレントにスキップする。
+fn apply_elf_watermark(binary_path: &Path) -> Result<()> {
+    let mut data = std::fs::read(binary_path)
+        .map_err(|e| CompileError::ExternalToolError(format!("read binary: {e}")))?;
+
+    // ELF magic check: 0x7F 'E' 'L' 'F'
+    if data.len() < 64 || data[0..4] != [0x7F, b'E', b'L', b'F'] {
+        return Ok(()); // Not ELF, skip silently
+    }
+
+    // Verify 64-bit ELF (ELFCLASS64)
+    if data[4] != 2 {
+        return Ok(());
+    }
+
+    // LSB encode "FERRUGO" (7 bytes) into e_ident[9..16] (EI_PAD)
+    let magic = b"FERRUGO";
+    for (i, &byte) in magic.iter().enumerate() {
+        // Spread 8 bits of magic[i] across byte at position 9+i using LSB
+        // Since EI_PAD is normally all zeros, we write the LSB directly
+        data[9 + i] = (data[9 + i] & 0xFE) | (byte & 0x01);
+    }
+
+    // LSB encode version [0x01, 0x00, 0x00, 0x00] into e_flags (offset 48..52)
+    let version: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
+    for (i, &byte) in version.iter().enumerate() {
+        data[48 + i] = (data[48 + i] & 0xFE) | (byte & 0x01);
+    }
+
+    std::fs::write(binary_path, &data)
+        .map_err(|e| CompileError::ExternalToolError(format!("write binary: {e}")))?;
+
+    Ok(())
+}
+
 /// IP アドレス・ファイルパス・URL・デバッグキーワード・資格情報キーワードを検出する。
 /// `nm` コマンドで main/_ 以外のユーザー定義シンボルをフラグする（informational）。
 fn opsec_audit_binary(binary_path: &Path, policy: OpsecPolicy) -> Result<()> {

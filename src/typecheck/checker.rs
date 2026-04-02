@@ -60,7 +60,7 @@ use std::collections::HashMap;
 use crate::error::{CompileError, Result};
 use crate::parse::ast::{
     BinaryOp, BlockItem, Declaration, Expr, ForInit, FunctionDecl, Program, Statement,
-    TopLevelDecl, Type, UnaryOp, struct_member_offset_ex,
+    TopLevelDecl, Type, UnaryOp, has_fam, struct_member_offset_ex,
 };
 
 /// シンボルの型情報。
@@ -275,14 +275,17 @@ fn typecheck_local_declaration(
         // Chapter 18: 複合初期化子の検査
         if let Expr::CompoundInit(inits) = init {
             if let Type::Struct { ref members, .. } = decl.var_type {
-                if inits.len() != members.len() {
+                // FAM (flexible array member) は初期化子に含めない
+                let expected = if has_fam(members) { members.len() - 1 } else { members.len() };
+                if inits.len() != expected {
                     return Err(CompileError::TypeError(format!(
                         "wrong number of initializers for struct (expected {}, got {})",
-                        members.len(),
+                        expected,
                         inits.len()
                     )));
                 }
-                for (init_expr, member) in inits.iter_mut().zip(members.iter()) {
+                let init_members = if has_fam(members) { &members[..members.len() - 1] } else { members };
+                for (init_expr, member) in inits.iter_mut().zip(init_members.iter()) {
                     let init_type = typecheck_expr(init_expr, symbols)?;
                     if init_type != member.member_type {
                         let old = std::mem::replace(init_expr, Expr::Constant(0));
@@ -1507,6 +1510,28 @@ fn resolve_constant(expr: &mut Expr) {
     }
 }
 
+/// C デフォルト引数昇格（C11 6.5.2.2p6）。
+/// variadic の可変長部分および prototype-less 呼び出しの全引数に適用する。
+/// - char / unsigned char / short / unsigned short → int
+/// - float → double
+fn apply_default_argument_promotion(arg: &mut Expr, arg_type: &Type) {
+    let promoted = if arg_type.is_character() || arg_type.is_short() {
+        Some(Type::Int)
+    } else if arg_type.is_float() {
+        Some(Type::Double)
+    } else {
+        None
+    };
+    if let Some(target) = promoted {
+        let old_arg = std::mem::replace(arg, Expr::Constant(0));
+        *arg = Expr::Cast {
+            target_type: target,
+            source_type: arg_type.clone(),
+            expr: Box::new(old_arg),
+        };
+    }
+}
+
 /// 関数呼び出しのシグネチャ情報。直接呼び出しと間接呼び出しの両方で共用。
 struct CallSig {
     return_type: Type,
@@ -1527,18 +1552,10 @@ fn typecheck_call_args(
     let param_types = match &sig.param_types {
         Some(pt) => pt,
         None => {
-            // 引数未指定 — 型チェックのみ行い、引数数・型の整合性はスキップ
+            // 引数未指定 — 型チェックのみ行い、デフォルト引数昇格を適用
             for arg in args.iter_mut() {
                 let arg_type = typecheck_expr(arg, symbols)?;
-                // デフォルト引数昇格: char → int
-                if arg_type.is_character() {
-                    let old_arg = std::mem::replace(arg, Expr::Constant(0));
-                    *arg = Expr::Cast {
-                        target_type: Type::Int,
-                        source_type: arg_type,
-                        expr: Box::new(old_arg),
-                    };
-                }
+                apply_default_argument_promotion(arg, &arg_type);
             }
             return Ok(());
         }
@@ -1591,18 +1608,11 @@ fn typecheck_call_args(
         }
     }
 
-    // 可変長引数部分: デフォルト引数昇格（char → int）
+    // 可変長引数部分: デフォルト引数昇格（char/short → int, float → double）
     if sig.is_variadic {
         for arg in args.iter_mut().skip(param_types.len()) {
             let arg_type = typecheck_expr(arg, symbols)?;
-            if arg_type.is_character() {
-                let old_arg = std::mem::replace(arg, Expr::Constant(0));
-                *arg = Expr::Cast {
-                    target_type: Type::Int,
-                    source_type: arg_type,
-                    expr: Box::new(old_arg),
-                };
-            }
+            apply_default_argument_promotion(arg, &arg_type);
         }
     }
 

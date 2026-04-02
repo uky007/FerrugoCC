@@ -241,6 +241,13 @@ impl TackyGenerator {
         let mut offset = 0usize;
 
         for (i, member) in members.iter().enumerate() {
+            // FAM (flexible array member): 最後のメンバが Array(_, 0) ならスキップ
+            if i == members.len() - 1
+                && matches!(&member.member_type, crate::parse::ast::Type::Array(_, 0))
+            {
+                break;
+            }
+
             let align = member.member_type.alignment();
             // パディング挿入
             if !offset.is_multiple_of(align) {
