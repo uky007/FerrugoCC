@@ -1428,6 +1428,20 @@ impl TackyGenerator {
                             });
                             return Ok((dst, Type::UInt));
                         }
+                        Type::Short | Type::UShort | Type::Char | Type::UChar => {
+                            // float → narrow int: 32-bit 経由で truncate
+                            let tmp = self.new_temp(Type::Int);
+                            instrs.push(TackyInstruction::FloatToInt {
+                                src: src_val,
+                                dst: tmp.clone(),
+                            });
+                            let dst = self.new_temp(target_type.clone());
+                            instrs.push(TackyInstruction::Truncate {
+                                src: tmp,
+                                dst: dst.clone(),
+                            });
+                            return Ok((dst, target_type.clone()));
+                        }
                         _ => {
                             let dst = self.new_temp(target_type.clone());
                             instrs.push(TackyInstruction::FloatToInt {
@@ -1504,11 +1518,24 @@ impl TackyGenerator {
                 if source_type.is_double() && !target_type.is_double() {
                     // Double → Integer
                     match target_type {
-                        Type::Int | Type::Long | Type::Char | Type::UChar | Type::Short
-                        | Type::UShort => {
+                        Type::Int | Type::Long => {
                             let dst = self.new_temp(target_type.clone());
                             instrs.push(TackyInstruction::DoubleToInt {
                                 src: src_val,
+                                dst: dst.clone(),
+                            });
+                            Ok((dst, target_type.clone()))
+                        }
+                        Type::Char | Type::UChar | Type::Short | Type::UShort => {
+                            // double → narrow int: 32-bit 経由で truncate
+                            let tmp = self.new_temp(Type::Int);
+                            instrs.push(TackyInstruction::DoubleToInt {
+                                src: src_val,
+                                dst: tmp.clone(),
+                            });
+                            let dst = self.new_temp(target_type.clone());
+                            instrs.push(TackyInstruction::Truncate {
+                                src: tmp,
                                 dst: dst.clone(),
                             });
                             Ok((dst, target_type.clone()))
