@@ -1297,42 +1297,81 @@ int main(void) {
     assert_meaning_preserved(source, "ulong_float_cast");
 }
 
+/// FP↔short: 段階的に obfuscated テストを検証
 #[test]
 fn mp_fp_short_cast() {
     if !can_run_x86_64() {
         return;
     }
-    let source = r#"
-int printf(const char *, ...);
-
+    // Step 1: double -> short のみ (最小)
+    let src1 = r#"
 int main(void) {
-    /* double -> short */
     double d = 123.9;
     short s = (short)d;
-    printf("s=%d\n", (int)s);
+    return (int)s;
+}
+"#;
+    assert_meaning_preserved(src1, "fp_short_cast_1");
 
-    /* float -> short */
+    // Step 2: float -> short
+    let src2 = r#"
+int main(void) {
+    float f = 42.5f;
+    short s = (short)f;
+    return (int)s;
+}
+"#;
+    assert_meaning_preserved(src2, "fp_short_cast_2");
+
+    // Step 3: short -> double
+    let src3 = r#"
+int main(void) {
+    short x = 77;
+    double dx = (double)x;
+    return (int)dx;
+}
+"#;
+    assert_meaning_preserved(src3, "fp_short_cast_3");
+
+    // Step 4: short -> float
+    let src4 = r#"
+int main(void) {
+    short x = 55;
+    float fx = (float)x;
+    return (int)fx;
+}
+"#;
+    assert_meaning_preserved(src4, "fp_short_cast_4");
+
+    // Step 5: unsigned short -> float -> unsigned short
+    let src5 = r#"
+int main(void) {
+    unsigned short us = 200;
+    float fus = (float)us;
+    unsigned short back = (unsigned short)fus;
+    return (int)back;
+}
+"#;
+    assert_meaning_preserved(src5, "fp_short_cast_5");
+
+    // Step 6: 組み合わせ + printf
+    let src6 = r#"
+int printf(const char *, ...);
+int main(void) {
+    double d = 123.9;
+    short s = (short)d;
     float f = -42.5f;
     short s2 = (short)f;
-    printf("s2=%d\n", (int)s2);
-
-    /* short -> double */
     short x = 300;
     double dx = (double)x;
-    printf("dx=%.0f\n", dx);
-
-    /* short -> float */
     float fx = (float)x;
-    printf("fx=%.0f\n", (double)fx);
-
-    /* unsigned short -> float -> unsigned short */
     unsigned short us = 500;
     float fus = (float)us;
     unsigned short back = (unsigned short)fus;
-    printf("back=%d\n", (int)back);
-
+    printf("s=%d s2=%d dx=%.0f fx=%.0f back=%d\n",
+           (int)s, (int)s2, dx, (double)fx, (int)back);
     return s + s2 + (short)dx + back;
 }
 "#;
-    assert_meaning_preserved(source, "fp_short_cast");
+    assert_meaning_preserved(src6, "fp_short_cast_6");
 }
