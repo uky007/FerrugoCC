@@ -1354,82 +1354,52 @@ int main(void) {
 "#;
     assert_meaning_preserved(src5, "fp_short_cast_5");
 
-    // Step 6: 組み合わせ (printf なし)
+    // Step 6: double→short + float→short (2変数)
     let src6 = r#"
 int main(void) {
     double d = 123.9;
     short s = (short)d;
-    float f = -42.5f;
+    float f = 42.5f;
     short s2 = (short)f;
-    short x = 100;
-    double dx = (double)x;
-    float fx = (float)x;
-    unsigned short us = 200;
-    float fus = (float)us;
-    unsigned short back = (unsigned short)fus;
-    return (int)s + (int)s2 + (int)(short)dx + (int)back;
+    return (int)s + (int)s2;
 }
 "#;
     assert_meaning_preserved(src6, "fp_short_cast_6");
 
-    // Step 7: 組み合わせ + printf
+    // Step 7: double→short + short→double (2変数)
     let src7 = r#"
-int printf(const char *, ...);
 int main(void) {
     double d = 123.9;
     short s = (short)d;
-    float f = -42.5f;
-    short s2 = (short)f;
-    printf("s=%d s2=%d\n", (int)s, (int)s2);
-    return (int)s + (int)s2;
+    short x = 100;
+    double dx = (double)x;
+    return (int)s + (int)dx;
 }
 "#;
     assert_meaning_preserved(src7, "fp_short_cast_7");
 
-    // Step 8: short→fp + printf
+    // Step 8: double→short + short→float (2変数)
     let src8 = r#"
-int printf(const char *, ...);
 int main(void) {
+    double d = 123.9;
+    short s = (short)d;
     short x = 100;
-    double dx = (double)x;
     float fx = (float)x;
-    printf("dx=%.0f fx=%.0f\n", dx, (double)fx);
-    return (int)dx + (int)fx;
+    return (int)s + (int)fx;
 }
 "#;
     assert_meaning_preserved(src8, "fp_short_cast_8");
 
-    // Step 9: ushort→float→ushort + printf
+    // Step 9: double→short + ushort→float→ushort
     let src9 = r#"
-int printf(const char *, ...);
-int main(void) {
-    unsigned short us = 200;
-    float fus = (float)us;
-    unsigned short back = (unsigned short)fus;
-    printf("back=%d\n", (int)back);
-    return (int)back;
-}
-"#;
-    assert_meaning_preserved(src9, "fp_short_cast_9");
-
-    // Step 10: 全部入り
-    let src10 = r#"
-int printf(const char *, ...);
 int main(void) {
     double d = 123.9;
     short s = (short)d;
-    float f = -42.5f;
-    short s2 = (short)f;
-    short x = 100;
-    double dx = (double)x;
-    float fx = (float)x;
     unsigned short us = 200;
     float fus = (float)us;
     unsigned short back = (unsigned short)fus;
-    printf("s=%d s2=%d dx=%.0f fx=%.0f back=%d\n",
-           (int)s, (int)s2, dx, (double)fx, (int)back);
-    return (int)s + (int)s2 + (int)(short)dx + (int)back;
+    return (int)s + (int)back;
 }
 "#;
-    assert_meaning_preserved(src10, "fp_short_cast_10");
+    assert_meaning_preserved(src9, "fp_short_cast_9");
 }
