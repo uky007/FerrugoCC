@@ -1354,24 +1354,82 @@ int main(void) {
 "#;
     assert_meaning_preserved(src5, "fp_short_cast_5");
 
-    // Step 6: 組み合わせ + printf
+    // Step 6: 組み合わせ (printf なし)
     let src6 = r#"
+int main(void) {
+    double d = 123.9;
+    short s = (short)d;
+    float f = -42.5f;
+    short s2 = (short)f;
+    short x = 100;
+    double dx = (double)x;
+    float fx = (float)x;
+    unsigned short us = 200;
+    float fus = (float)us;
+    unsigned short back = (unsigned short)fus;
+    return (int)s + (int)s2 + (int)(short)dx + (int)back;
+}
+"#;
+    assert_meaning_preserved(src6, "fp_short_cast_6");
+
+    // Step 7: 組み合わせ + printf
+    let src7 = r#"
 int printf(const char *, ...);
 int main(void) {
     double d = 123.9;
     short s = (short)d;
     float f = -42.5f;
     short s2 = (short)f;
-    short x = 300;
+    printf("s=%d s2=%d\n", (int)s, (int)s2);
+    return (int)s + (int)s2;
+}
+"#;
+    assert_meaning_preserved(src7, "fp_short_cast_7");
+
+    // Step 8: short→fp + printf
+    let src8 = r#"
+int printf(const char *, ...);
+int main(void) {
+    short x = 100;
     double dx = (double)x;
     float fx = (float)x;
-    unsigned short us = 500;
+    printf("dx=%.0f fx=%.0f\n", dx, (double)fx);
+    return (int)dx + (int)fx;
+}
+"#;
+    assert_meaning_preserved(src8, "fp_short_cast_8");
+
+    // Step 9: ushort→float→ushort + printf
+    let src9 = r#"
+int printf(const char *, ...);
+int main(void) {
+    unsigned short us = 200;
+    float fus = (float)us;
+    unsigned short back = (unsigned short)fus;
+    printf("back=%d\n", (int)back);
+    return (int)back;
+}
+"#;
+    assert_meaning_preserved(src9, "fp_short_cast_9");
+
+    // Step 10: 全部入り
+    let src10 = r#"
+int printf(const char *, ...);
+int main(void) {
+    double d = 123.9;
+    short s = (short)d;
+    float f = -42.5f;
+    short s2 = (short)f;
+    short x = 100;
+    double dx = (double)x;
+    float fx = (float)x;
+    unsigned short us = 200;
     float fus = (float)us;
     unsigned short back = (unsigned short)fus;
     printf("s=%d s2=%d dx=%.0f fx=%.0f back=%d\n",
            (int)s, (int)s2, dx, (double)fx, (int)back);
-    return s + s2 + (short)dx + back;
+    return (int)s + (int)s2 + (int)(short)dx + (int)back;
 }
 "#;
-    assert_meaning_preserved(src6, "fp_short_cast_6");
+    assert_meaning_preserved(src10, "fp_short_cast_10");
 }
