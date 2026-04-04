@@ -1449,4 +1449,21 @@ int main(void) {
 }
 "#;
     assert_meaning_preserved(src12, "fp_short_cast_12");
+
+    // Step 13: 式中の (short)double キャスト + short 加算 (元の return 文パターン)
+    let src13 = r#"
+int main(void) {
+    double d = 123.9;
+    short s = (short)d;
+    float f = 42.5f;
+    short s2 = (short)f;
+    short x = 100;
+    double dx = (double)x;
+    unsigned short us = 200;
+    float fus = (float)us;
+    unsigned short back = (unsigned short)fus;
+    return s + s2 + (short)dx + back;
+}
+"#;
+    assert_meaning_preserved(src13, "fp_short_cast_13");
 }
