@@ -1466,4 +1466,28 @@ int main(void) {
 }
 "#;
     assert_meaning_preserved(src13, "fp_short_cast_13");
+
+    // Step 14: printf 付き (元のテストの完全再現)
+    let src14 = r#"
+int printf(const char *, ...);
+int main(void) {
+    double d = 123.9;
+    short s = (short)d;
+    printf("s=%d\n", (int)s);
+    float f = -42.5f;
+    short s2 = (short)f;
+    printf("s2=%d\n", (int)s2);
+    short x = 300;
+    double dx = (double)x;
+    printf("dx=%.0f\n", dx);
+    float fx = (float)x;
+    printf("fx=%.0f\n", (double)fx);
+    unsigned short us = 500;
+    float fus = (float)us;
+    unsigned short back = (unsigned short)fus;
+    printf("back=%d\n", (int)back);
+    return s + s2 + (short)dx + back;
+}
+"#;
+    assert_meaning_preserved(src14, "fp_short_cast_14");
 }
