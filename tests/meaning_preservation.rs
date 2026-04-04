@@ -1402,4 +1402,51 @@ int main(void) {
 }
 "#;
     assert_meaning_preserved(src9, "fp_short_cast_9");
+
+    // Step 10: 3変数 (double→short + float→short + short→double)
+    let src10 = r#"
+int main(void) {
+    double d = 123.9;
+    short s = (short)d;
+    float f = 42.5f;
+    short s2 = (short)f;
+    short x = 100;
+    double dx = (double)x;
+    return (int)s + (int)s2 + (int)dx;
+}
+"#;
+    assert_meaning_preserved(src10, "fp_short_cast_10");
+
+    // Step 11: 4変数 (+ short→float)
+    let src11 = r#"
+int main(void) {
+    double d = 123.9;
+    short s = (short)d;
+    float f = 42.5f;
+    short s2 = (short)f;
+    short x = 100;
+    double dx = (double)x;
+    float fx = (float)x;
+    return (int)s + (int)s2 + (int)dx + (int)fx;
+}
+"#;
+    assert_meaning_preserved(src11, "fp_short_cast_11");
+
+    // Step 12: 5変数 (+ ushort roundtrip)
+    let src12 = r#"
+int main(void) {
+    double d = 123.9;
+    short s = (short)d;
+    float f = 42.5f;
+    short s2 = (short)f;
+    short x = 100;
+    double dx = (double)x;
+    float fx = (float)x;
+    unsigned short us = 200;
+    float fus = (float)us;
+    unsigned short back = (unsigned short)fus;
+    return (int)s + (int)s2 + (int)dx + (int)fx + (int)back;
+}
+"#;
+    assert_meaning_preserved(src12, "fp_short_cast_12");
 }
