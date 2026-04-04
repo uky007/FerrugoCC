@@ -586,6 +586,11 @@ fn is_safe_shuffle_point(current: &Instruction, next: Option<&Instruction>) -> b
         if reads_r10_or_r11(next_instr) {
             return false;
         }
+        // 条件5: 次が Call/CallIndirect なら挿入しない
+        // (variadic 呼び出しの AL レジスタ設定を保護)
+        if matches!(next_instr, Instruction::Call(_) | Instruction::CallIndirect(_)) {
+            return false;
+        }
     }
     true
 }
