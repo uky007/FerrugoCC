@@ -1467,9 +1467,9 @@ int main(void) {
 "#;
     assert_meaning_preserved(src13, "fp_short_cast_13");
 
-    // Step 14: printf 付きフルテスト (obfuscated 含む)
-    // register_shuffle の Call 前ガードで修正済み
-    let src14 = r#"
+    // Step 14: L3 obfuscated (bisect 中: L1 テストを先に実行)
+    // Step 15 (L1) を先に実行して CFF が原因か切り分ける
+    let src_full = r#"
 int printf(const char *, ...);
 int main(void) {
     double d = 123.9;
@@ -1490,10 +1490,8 @@ int main(void) {
     return s + s2 + (short)dx + back;
 }
 "#;
-    assert_meaning_preserved(src14, "fp_short_cast_14");
-
-    // Step 15: 同じテストを --obf-level=1 (CFF 無し) で検証
-    let src15 = src14;
+    // Step 15 (L1) を先に実行 — CFF が原因かの切り分け
+    let src15 = src_full;
     {
         use std::process::Command;
         let dir = std::env::temp_dir();
@@ -1532,6 +1530,9 @@ int main(void) {
         let code = run.status.code().unwrap_or(-1);
         assert_eq!(code, 113, "fp_short_cast_15 (L1): expected 113, got {code}");
     }
+
+    // Step 14: L3 full obfuscation (CFF 含む)
+    assert_meaning_preserved(src_full, "fp_short_cast_14");
 }
 
 #[test]
