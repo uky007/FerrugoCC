@@ -3660,6 +3660,15 @@ fn control_flow_flattening(
         return instrs;
     }
 
+    // variadic 関数呼び出しを含む関数は CFF をスキップ
+    // (CFF の dispatch ループが variadic ABI のレジスタ設定と干渉する)
+    let has_variadic_call = instrs.iter().any(|i| {
+        matches!(i, TackyInstruction::FunCall { is_variadic: true, .. })
+    });
+    if has_variadic_call {
+        return instrs;
+    }
+
     // ラベル → ブロックインデックスのマッピングを構築
     let mut label_to_block: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();

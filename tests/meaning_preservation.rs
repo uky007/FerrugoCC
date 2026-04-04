@@ -1467,9 +1467,8 @@ int main(void) {
 "#;
     assert_meaning_preserved(src13, "fp_short_cast_13");
 
-    // Step 14: L3 obfuscated (bisect 中: L1 テストを先に実行)
-    // Step 15 (L1) を先に実行して CFF が原因か切り分ける
-    let src_full = r#"
+    // Step 14: printf 付きフルテスト (obfuscated 含む)
+    let src14 = r#"
 int printf(const char *, ...);
 int main(void) {
     double d = 123.9;
@@ -1490,49 +1489,7 @@ int main(void) {
     return s + s2 + (short)dx + back;
 }
 "#;
-    // Step 15 (L1) を先に実行 — CFF が原因かの切り分け
-    let src15 = src_full;
-    {
-        use std::process::Command;
-        let dir = std::env::temp_dir();
-        let src_path = dir.join("fp_short_15.c");
-        std::fs::write(&src_path, src15).unwrap();
-
-        // obf-level=1 (CFF 無効) でコンパイル
-        let asm_path = src_path.with_extension("s");
-        let bin_path = dir.join("fp_short_15_obf1");
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrugocc"));
-        cmd.arg("--fobfuscate").arg("--obf-level=1").arg("-S").arg(&src_path);
-        let output = cmd.output().expect("compile failed");
-        assert!(output.status.success(), "L1 compile failed: {}", String::from_utf8_lossy(&output.stderr));
-
-        if cfg!(target_os = "macos") {
-            let asm = std::fs::read_to_string(&asm_path).unwrap();
-            let asm = fixup_asm_for_macos(&asm);
-            std::fs::write(&asm_path, asm).unwrap();
-        }
-
-        let gcc = if cfg!(target_arch = "x86_64") {
-            Command::new("gcc").arg(&asm_path).arg("-o").arg(&bin_path)
-                .arg(if cfg!(target_os = "linux") { "-no-pie" } else { "" })
-                .output().expect("gcc failed")
-        } else {
-            Command::new("arch").args(["-x86_64", "gcc"]).arg(&asm_path).arg("-o").arg(&bin_path)
-                .output().expect("gcc failed")
-        };
-        assert!(gcc.status.success(), "L1 gcc failed: {}", String::from_utf8_lossy(&gcc.stderr));
-
-        let run = if cfg!(target_arch = "x86_64") {
-            Command::new(&bin_path).output().expect("run failed")
-        } else {
-            Command::new("arch").arg("-x86_64").arg(&bin_path).output().expect("run failed")
-        };
-        let code = run.status.code().unwrap_or(-1);
-        assert_eq!(code, 113, "fp_short_cast_15 (L1): expected 113, got {code}");
-    }
-
-    // Step 14: L3 full obfuscation (CFF 含む)
-    assert_meaning_preserved(src_full, "fp_short_cast_14");
+    assert_meaning_preserved(src14, "fp_short_cast_14");
 }
 
 #[test]
