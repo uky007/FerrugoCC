@@ -226,9 +226,9 @@ pub fn run_multi(
         ));
     }
 
-    // Multi-file の場合、global シンボルの OPSEC リネームを抑制
+    // Multi-file または -c（リンク用 .o 生成）の場合、global シンボルの OPSEC リネームを抑制
     let mut obf_config = obf_config;
-    if (c_files.len() + o_files.len()) > 1
+    if ((c_files.len() + o_files.len()) > 1 || compile_only)
         && let Some(ref mut config) = obf_config
     {
         config.preserve_globals = true;

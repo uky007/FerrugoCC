@@ -1351,11 +1351,36 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         }
 
         Expr::SizeOfExpr(inner) => {
-            // Var の場合は配列 decay 前の型（配列サイズを保持）をシンボルテーブルから取得
+            // sizeof の引数は配列 decay 前の型を取得する必要がある
             let actual_type = if let Expr::Var(name) = inner.as_ref() {
+                // Var: シンボルテーブルから decay 前の型を取得
                 match symbols.get(name) {
                     Some(SymbolType::Variable(t)) => t.clone(),
                     _ => typecheck_expr(inner, symbols)?,
+                }
+            } else if matches!(inner.as_ref(), Expr::Dot(..)) {
+                // Dot: struct メンバの decay 前の型を取得（sizeof(s.arr) で配列サイズ保持）
+                let Expr::Dot(struct_expr, member_name) = inner.as_mut() else {
+                    unreachable!()
+                };
+                let inner_type = typecheck_expr(struct_expr, symbols)?;
+                match &inner_type {
+                    Type::Struct {
+                        members, is_union, ..
+                    } => match struct_member_offset_ex(members, member_name, *is_union) {
+                        Some((_, member_type)) => member_type,
+                        None => {
+                            return Err(CompileError::TypeError(format!(
+                                "member access on non-existent member '{}'",
+                                member_name
+                            )))
+                        }
+                    },
+                    _ => {
+                        return Err(CompileError::TypeError(
+                            "member access on non-struct type".to_string(),
+                        ))
+                    }
                 }
             } else {
                 typecheck_expr(inner, symbols)?

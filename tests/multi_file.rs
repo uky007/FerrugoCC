@@ -289,3 +289,127 @@ int main(void) {
     assert_eq!(o_code, n_code, "exit code mismatch");
     assert_eq!(o_out, n_out, "stdout mismatch");
 }
+
+/// 個別の `-S --fobfuscate` (単一ファイル) で global シンボルが保持されることを検証。
+/// preserve_globals が compile_only 時に有効でないとシンボルが消えてリンクエラーになる。
+/// (ドライバの -c と同じ preserve_globals パスを通る)
+#[test]
+fn single_file_obfuscate_preserves_symbols() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let lib_c = r#"
+int add(int a, int b) { return a + b; }
+"#;
+    let main_c = r#"
+int add(int, int);
+int main(void) {
+    return add(40, 2);
+}
+"#;
+    let dir = TempDir::new().unwrap();
+    let lib_path = dir.path().join("lib.c");
+    let main_path = dir.path().join("main.c");
+    std::fs::write(&lib_path, lib_c).unwrap();
+    std::fs::write(&main_path, main_c).unwrap();
+
+    // Compile each file INDIVIDUALLY with -S -c --fobfuscate (single file per invocation)
+    for src in [&lib_path, &main_path] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ferrugocc"))
+            .arg("--fobfuscate")
+            .arg("-c")
+            .arg("-S")
+            .arg(src)
+            .output()
+            .expect("failed to run compiler");
+        assert!(
+            output.status.success(),
+            "-S -c --fobfuscate failed for {}:\n{}",
+            src.display(),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    // macOS fixup for all .s files
+    if cfg!(target_os = "macos") {
+        for src in [&lib_path, &main_path] {
+            let asm_path = src.with_extension("s");
+            if asm_path.exists() {
+                let asm = std::fs::read_to_string(&asm_path).unwrap();
+                let asm = fixup_asm_for_macos(&asm);
+                std::fs::write(&asm_path, asm).unwrap();
+            }
+        }
+    }
+
+    // Assemble each .s to .o
+    let mut obj_paths = Vec::new();
+    for src in [&lib_path, &main_path] {
+        let asm_path = src.with_extension("s");
+        let obj_path = src.with_extension("o");
+        let gcc = if cfg!(target_arch = "x86_64") {
+            Command::new("gcc")
+                .arg("-c")
+                .arg(&asm_path)
+                .arg("-o")
+                .arg(&obj_path)
+                .output()
+                .expect("failed to run gcc -c")
+        } else {
+            Command::new("arch")
+                .args(["-x86_64", "gcc"])
+                .arg("-c")
+                .arg(&asm_path)
+                .arg("-o")
+                .arg(&obj_path)
+                .output()
+                .expect("failed to run arch -x86_64 gcc -c")
+        };
+        assert!(
+            gcc.status.success(),
+            "gcc -c failed for {}:\n{}",
+            asm_path.display(),
+            String::from_utf8_lossy(&gcc.stderr),
+        );
+        obj_paths.push(obj_path);
+    }
+
+    // Link the two .o files
+    let bin_path = dir.path().join("test");
+    let link = if cfg!(target_arch = "x86_64") {
+        let mut cmd = Command::new("gcc");
+        for obj in &obj_paths {
+            cmd.arg(obj);
+        }
+        cmd.arg("-o").arg(&bin_path);
+        if cfg!(target_os = "linux") {
+            cmd.arg("-no-pie");
+        }
+        cmd.output().expect("failed to link")
+    } else {
+        let mut cmd = Command::new("arch");
+        cmd.args(["-x86_64", "gcc"]);
+        for obj in &obj_paths {
+            cmd.arg(obj);
+        }
+        cmd.arg("-o").arg(&bin_path);
+        cmd.output().expect("failed to link")
+    };
+    assert!(
+        link.status.success(),
+        "link failed (symbols likely renamed by OPSEC):\n{}",
+        String::from_utf8_lossy(&link.stderr),
+    );
+
+    // Run and verify
+    let run = if cfg!(target_arch = "x86_64") {
+        Command::new(&bin_path).output().expect("failed to run")
+    } else {
+        Command::new("arch")
+            .arg("-x86_64")
+            .arg(&bin_path)
+            .output()
+            .expect("failed to run")
+    };
+    assert_eq!(run.status.code().unwrap_or(-1), 42);
+}

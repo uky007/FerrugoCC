@@ -1561,3 +1561,37 @@ int main(void) {
 "#;
     assert_meaning_preserved(source, "scalar_compound_literal_cast");
 }
+
+#[test]
+fn test_sizeof_struct_array_member() {
+    let source = r#"
+int printf(const char *, ...);
+
+struct foo {
+    int x;
+    int arr[10];
+    char buf[64];
+};
+
+int main(void) {
+    struct foo s;
+    s.x = 1;
+
+    /* sizeof on struct array members — must return array size, not pointer size */
+    int sz_arr = (int)sizeof(s.arr);      /* expect 10 * 4 = 40 */
+    int sz_buf = (int)sizeof(s.buf);      /* expect 64 */
+    int sz_whole = (int)sizeof(s);        /* expect struct size (>= 108) */
+
+    printf("arr=%d buf=%d whole=%d\n", sz_arr, sz_buf, sz_whole);
+
+    /* Also test via pointer (ptr->arr) */
+    struct foo *p = &s;
+    int sz_parr = (int)sizeof(p->arr);    /* expect 40 */
+    int sz_pbuf = (int)sizeof(p->buf);    /* expect 64 */
+    printf("parr=%d pbuf=%d\n", sz_parr, sz_pbuf);
+
+    return sz_arr + sz_buf + sz_parr + sz_pbuf;
+}
+"#;
+    assert_meaning_preserved(source, "sizeof_struct_array_member");
+}
