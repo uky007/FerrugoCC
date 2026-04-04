@@ -1495,3 +1495,69 @@ int main(void) {
     let (code, _, _) = compile_and_run(src14, false);
     assert_eq!(code, 113, "fp_short_cast_14 normal: expected 113, got {code}");
 }
+
+#[test]
+fn mp_float_nan_comparison() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+
+int main(void) {
+    double nan = 0.0 / 0.0;
+    double x = 1.0;
+    int r = 0;
+
+    /* All ordered comparisons with NaN must be false */
+    if (nan < x) r += 1;
+    if (nan <= x) r += 2;
+    if (nan > x) r += 4;
+    if (nan >= x) r += 8;
+    if (nan == x) r += 16;
+
+    /* != with NaN must be true */
+    if (nan != x) r += 32;
+
+    /* NaN compared to itself */
+    if (nan == nan) r += 64;
+    if (nan != nan) r += 128;
+
+    printf("r=%d\n", r);
+    /* Expected: only != true → 32 + 128 = 160 */
+    return r;
+}
+"#;
+    assert_meaning_preserved(source, "float_nan_comparison");
+}
+
+#[test]
+fn mp_scalar_compound_literal_cast() {
+    if !can_run_x86_64() {
+        return;
+    }
+    let source = r#"
+int printf(const char *, ...);
+
+int main(void) {
+    /* int -> float compound literal */
+    float f = (float){1};
+    printf("f=%.1f\n", (double)f);
+
+    /* double -> float compound literal */
+    float g = (float){3.14};
+    printf("g=%.2f\n", (double)g);
+
+    /* float -> int compound literal */
+    int i = (int){2.9f};
+    printf("i=%d\n", i);
+
+    /* int -> short compound literal (narrowing) */
+    short s = (short){300};
+    printf("s=%d\n", (int)s);
+
+    return (int)f + (int)g + i + (int)s;
+}
+"#;
+    assert_meaning_preserved(source, "scalar_compound_literal_cast");
+}

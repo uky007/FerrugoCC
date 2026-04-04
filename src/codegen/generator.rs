@@ -1956,14 +1956,23 @@ fn generate_binary_instruction(
                     double_constants,
                     const_counter,
                 );
+                // NaN 対応: < と <= ではオペランドを入れ替えて A/AE を使う
+                // comiss/comisd の unordered (NaN) は CF=1,ZF=1,PF=1
+                // A (CF=0,ZF=0) と AE (CF=0) は NaN で false → C セマンティクスに一致
+                let swap = matches!(op, TackyBinaryOp::LessThan | TackyBinaryOp::LessOrEqual);
+                let (cmp_left, cmp_right) = if swap {
+                    (right_op, left_op)
+                } else {
+                    (left_op, right_op)
+                };
                 instrs.push(Instruction::Mov {
                     asm_type: fp_asm_type,
-                    src: left_op,
+                    src: cmp_left,
                     dst: Operand::Register(Reg::XMM14),
                 });
                 instrs.push(Instruction::Mov {
                     asm_type: fp_asm_type,
-                    src: right_op,
+                    src: cmp_right,
                     dst: Operand::Register(Reg::XMM0),
                 });
                 instrs.push(Instruction::Cmp {
@@ -1989,7 +1998,18 @@ fn generate_binary_instruction(
                 dst: dst_op.clone(),
             });
 
-            let cc = if is_fp || is_unsigned {
+            let cc = if is_fp {
+                // FP: < と <= はオペランド入れ替え済み → A/AE を使用
+                match op {
+                    TackyBinaryOp::LessThan => CondCode::A,     // swapped
+                    TackyBinaryOp::LessOrEqual => CondCode::AE, // swapped
+                    TackyBinaryOp::GreaterThan => CondCode::A,
+                    TackyBinaryOp::GreaterOrEqual => CondCode::AE,
+                    TackyBinaryOp::Equal => CondCode::E,
+                    TackyBinaryOp::NotEqual => CondCode::NE,
+                    _ => unreachable!(),
+                }
+            } else if is_unsigned {
                 match op {
                     TackyBinaryOp::LessThan => CondCode::B,
                     TackyBinaryOp::LessOrEqual => CondCode::BE,
@@ -2013,8 +2033,41 @@ fn generate_binary_instruction(
 
             instrs.push(Instruction::SetCC {
                 condition: cc,
-                operand: dst_op,
+                operand: dst_op.clone(),
             });
+
+            // FP の == と != は NaN (unordered) を追加チェック
+            if is_fp {
+                match op {
+                    TackyBinaryOp::Equal => {
+                        // sete dst; setnp %al; and %al, dst → NaN で false
+                        instrs.push(Instruction::SetCC {
+                            condition: CondCode::NP,
+                            operand: Operand::Register(Reg::AX),
+                        });
+                        instrs.push(Instruction::Binary {
+                            asm_type: AsmType::Byte,
+                            op: AsmBinaryOp::And,
+                            src: Operand::Register(Reg::AX),
+                            dst: dst_op,
+                        });
+                    }
+                    TackyBinaryOp::NotEqual => {
+                        // setne dst; setp %al; or %al, dst → NaN で true
+                        instrs.push(Instruction::SetCC {
+                            condition: CondCode::P,
+                            operand: Operand::Register(Reg::AX),
+                        });
+                        instrs.push(Instruction::Binary {
+                            asm_type: AsmType::Byte,
+                            op: AsmBinaryOp::Or,
+                            src: Operand::Register(Reg::AX),
+                            dst: dst_op,
+                        });
+                    }
+                    _ => {}
+                }
+            }
         }
 
         TackyBinaryOp::Add | TackyBinaryOp::Subtract | TackyBinaryOp::Multiply => {

@@ -1435,9 +1435,18 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                         }
                     }
                 } else {
-                    // scalar compound literal: (int){42}
+                    // scalar compound literal: (int){42}, (float){1}, etc.
                     if let Some(init_expr) = inits.first_mut() {
-                        typecheck_expr(init_expr, symbols)?;
+                        let init_type = typecheck_expr(init_expr, symbols)?;
+                        if init_type != *target_type {
+                            let old =
+                                std::mem::replace(init_expr, Expr::Constant(0));
+                            *init_expr = Expr::Cast {
+                                target_type: target_type.clone(),
+                                source_type: init_type,
+                                expr: Box::new(old),
+                            };
+                        }
                     }
                 }
             }

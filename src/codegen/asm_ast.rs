@@ -345,6 +345,10 @@ pub enum CondCode {
     B,
     /// `be` — 符号なし小なりイコール（Chapter 12）
     BE,
+    /// `p` — パリティ（unordered FP 比較で NaN 検出）
+    P,
+    /// `np` — ノーパリティ（ordered FP 比較）
+    NP,
 }
 
 /// オペランド（命令の引数）
