@@ -612,7 +612,11 @@ fn generate_instruction(
                     double_constants,
                     &mut const_counter,
                 );
-                let fp_asm = if ty.is_float() { AsmType::Float } else { AsmType::Double };
+                let fp_asm = if ty.is_float() {
+                    AsmType::Float
+                } else {
+                    AsmType::Double
+                };
                 instrs.push(Instruction::Mov {
                     asm_type: fp_asm,
                     src,
@@ -681,7 +685,11 @@ fn generate_instruction(
                     &mut const_counter,
                 );
                 let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
-                let fp_asm = if dst_type.is_float() { AsmType::Float } else { AsmType::Double };
+                let fp_asm = if dst_type.is_float() {
+                    AsmType::Float
+                } else {
+                    AsmType::Double
+                };
                 // Chapter 20: direct mov (fixup will handle if both are memory)
                 instrs.push(Instruction::Mov {
                     asm_type: fp_asm,
@@ -716,7 +724,11 @@ fn generate_instruction(
                             &mut const_counter,
                         );
                         let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
-                        let fp_asm = if dst_type.is_float() { AsmType::Float } else { AsmType::Double };
+                        let fp_asm = if dst_type.is_float() {
+                            AsmType::Float
+                        } else {
+                            AsmType::Double
+                        };
                         instrs.push(Instruction::Mov {
                             asm_type: fp_asm,
                             src: src_op,
@@ -789,7 +801,11 @@ fn generate_instruction(
                             double_constants,
                             &mut const_counter,
                         );
-                        let fp_asm = if src_type.is_float() { AsmType::Float } else { AsmType::Double };
+                        let fp_asm = if src_type.is_float() {
+                            AsmType::Float
+                        } else {
+                            AsmType::Double
+                        };
                         instrs.push(Instruction::Mov {
                             asm_type: fp_asm,
                             src: src_op,
@@ -1492,7 +1508,11 @@ fn generate_instruction(
             });
 
             if dst_type.is_floating() {
-                let fp_asm = if dst_type.is_float() { AsmType::Float } else { AsmType::Double };
+                let fp_asm = if dst_type.is_float() {
+                    AsmType::Float
+                } else {
+                    AsmType::Double
+                };
                 instrs.push(Instruction::Mov {
                     asm_type: fp_asm,
                     src: Operand::Memory(Reg::AX),
@@ -1526,7 +1546,11 @@ fn generate_instruction(
                     double_constants,
                     &mut const_counter,
                 );
-                let fp_asm = if src_type.is_float() { AsmType::Float } else { AsmType::Double };
+                let fp_asm = if src_type.is_float() {
+                    AsmType::Float
+                } else {
+                    AsmType::Double
+                };
                 instrs.push(Instruction::Mov {
                     asm_type: fp_asm,
                     src: src_op,
@@ -1607,7 +1631,11 @@ fn generate_instruction(
                     double_constants,
                     &mut const_counter,
                 );
-                let fp_asm = if src_type.is_float() { AsmType::Float } else { AsmType::Double };
+                let fp_asm = if src_type.is_float() {
+                    AsmType::Float
+                } else {
+                    AsmType::Double
+                };
                 instrs.push(Instruction::Mov {
                     asm_type: fp_asm,
                     src: src_op,
@@ -1645,7 +1673,11 @@ fn generate_instruction(
             });
 
             if dst_type.is_floating() {
-                let fp_asm = if dst_type.is_float() { AsmType::Float } else { AsmType::Double };
+                let fp_asm = if dst_type.is_float() {
+                    AsmType::Float
+                } else {
+                    AsmType::Double
+                };
                 instrs.push(Instruction::Mov {
                     asm_type: fp_asm,
                     src: Operand::MemoryOffset(Reg::AX, *offset as i32),
@@ -2251,7 +2283,11 @@ fn generate_function_call(
                 double_constants,
                 const_counter,
             );
-            let fp_asm = if arg_types[i].is_float() { AsmType::Float } else { AsmType::Double };
+            let fp_asm = if arg_types[i].is_float() {
+                AsmType::Float
+            } else {
+                AsmType::Double
+            };
             instrs.push(Instruction::Mov {
                 asm_type: fp_asm,
                 src,
@@ -2310,7 +2346,11 @@ fn generate_function_call(
             double_constants,
             const_counter,
         );
-        let fp_asm = if arg_types[arg_idx].is_float() { AsmType::Float } else { AsmType::Double };
+        let fp_asm = if arg_types[arg_idx].is_float() {
+            AsmType::Float
+        } else {
+            AsmType::Double
+        };
         instrs.push(Instruction::Mov {
             asm_type: fp_asm,
             src,
@@ -2333,7 +2373,11 @@ fn generate_function_call(
                 double_constants,
                 const_counter,
             );
-            let fp_asm = if arg_types[arg_idx].is_float() { AsmType::Float } else { AsmType::Double };
+            let fp_asm = if arg_types[arg_idx].is_float() {
+                AsmType::Float
+            } else {
+                AsmType::Double
+            };
             instrs.push(Instruction::Mov {
                 asm_type: fp_asm,
                 src,
@@ -2385,7 +2429,11 @@ fn generate_function_call(
     if !dst_type.is_void() {
         let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
         if dst_type.is_floating() {
-            let fp_asm = if dst_type.is_float() { AsmType::Float } else { AsmType::Double };
+            let fp_asm = if dst_type.is_float() {
+                AsmType::Float
+            } else {
+                AsmType::Double
+            };
             instrs.push(Instruction::Mov {
                 asm_type: fp_asm,
                 src: Operand::Register(Reg::XMM0),

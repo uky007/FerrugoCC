@@ -1272,7 +1272,11 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             op,
             ref src,
             ref dst,
-        } if asm_type != AsmType::Double && asm_type != AsmType::Float && is_memory_operand(src) && is_memory_operand(dst) => {
+        } if asm_type != AsmType::Double
+            && asm_type != AsmType::Float
+            && is_memory_operand(src)
+            && is_memory_operand(dst) =>
+        {
             // imul cannot have memory dst, so load dst into R11
             if matches!(op, AsmBinaryOp::Mult) {
                 out.push(Instruction::Mov {
@@ -1333,7 +1337,9 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             op,
             ref src,
             ref dst,
-        } if (asm_type == AsmType::Double || asm_type == AsmType::Float) && is_memory_operand(dst) => {
+        } if (asm_type == AsmType::Double || asm_type == AsmType::Float)
+            && is_memory_operand(dst) =>
+        {
             out.push(Instruction::Mov {
                 asm_type,
                 src: dst.clone(),
@@ -1358,7 +1364,10 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             op: AsmBinaryOp::Mult,
             ref src,
             ref dst,
-        } if asm_type != AsmType::Double && asm_type != AsmType::Float && is_memory_operand(dst) => {
+        } if asm_type != AsmType::Double
+            && asm_type != AsmType::Float
+            && is_memory_operand(dst) =>
+        {
             out.push(Instruction::Mov {
                 asm_type,
                 src: dst.clone(),
@@ -1382,7 +1391,11 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             asm_type,
             ref src,
             ref dst,
-        } if asm_type != AsmType::Double && asm_type != AsmType::Float && is_memory_operand(src) && is_memory_operand(dst) => {
+        } if asm_type != AsmType::Double
+            && asm_type != AsmType::Float
+            && is_memory_operand(src)
+            && is_memory_operand(dst) =>
+        {
             out.push(Instruction::Mov {
                 asm_type,
                 src: dst.clone(),

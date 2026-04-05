@@ -276,7 +276,11 @@ fn typecheck_local_declaration(
         if let Expr::CompoundInit(inits) = init {
             if let Type::Struct { ref members, .. } = decl.var_type {
                 // FAM (flexible array member) は初期化子に含めない
-                let expected = if has_fam(members) { members.len() - 1 } else { members.len() };
+                let expected = if has_fam(members) {
+                    members.len() - 1
+                } else {
+                    members.len()
+                };
                 if inits.len() != expected {
                     return Err(CompileError::TypeError(format!(
                         "wrong number of initializers for struct (expected {}, got {})",
@@ -284,7 +288,11 @@ fn typecheck_local_declaration(
                         inits.len()
                     )));
                 }
-                let init_members = if has_fam(members) { &members[..members.len() - 1] } else { members };
+                let init_members = if has_fam(members) {
+                    &members[..members.len() - 1]
+                } else {
+                    members
+                };
                 for (init_expr, member) in inits.iter_mut().zip(init_members.iter()) {
                     let init_type = typecheck_expr(init_expr, symbols)?;
                     if init_type != member.member_type {
@@ -1373,13 +1381,13 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                             return Err(CompileError::TypeError(format!(
                                 "member access on non-existent member '{}'",
                                 member_name
-                            )))
+                            )));
                         }
                     },
                     _ => {
                         return Err(CompileError::TypeError(
                             "member access on non-struct type".to_string(),
-                        ))
+                        ));
                     }
                 }
             } else {
@@ -1435,8 +1443,7 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                             let member_type = &members[i].member_type;
                             let init_type = typecheck_expr(init_expr, symbols)?;
                             if init_type != *member_type {
-                                let old =
-                                    std::mem::replace(init_expr, Expr::Constant(0));
+                                let old = std::mem::replace(init_expr, Expr::Constant(0));
                                 *init_expr = Expr::Cast {
                                     target_type: member_type.clone(),
                                     source_type: init_type,
@@ -1450,8 +1457,7 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     for init_expr in inits.iter_mut() {
                         let init_type = typecheck_expr(init_expr, symbols)?;
                         if init_type != **elem_type {
-                            let old =
-                                std::mem::replace(init_expr, Expr::Constant(0));
+                            let old = std::mem::replace(init_expr, Expr::Constant(0));
                             *init_expr = Expr::Cast {
                                 target_type: *elem_type.clone(),
                                 source_type: init_type,
@@ -1464,8 +1470,7 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     if let Some(init_expr) = inits.first_mut() {
                         let init_type = typecheck_expr(init_expr, symbols)?;
                         if init_type != *target_type {
-                            let old =
-                                std::mem::replace(init_expr, Expr::Constant(0));
+                            let old = std::mem::replace(init_expr, Expr::Constant(0));
                             *init_expr = Expr::Cast {
                                 target_type: target_type.clone(),
                                 source_type: init_type,
@@ -1724,8 +1729,16 @@ fn integer_promote(t: &Type) -> Type {
 
 fn common_type(a: &Type, b: &Type) -> Type {
     // Integer promotion: Char/UChar/Short/UShort → Int
-    let a = if a.is_character() || a.is_short() { &Type::Int } else { a };
-    let b = if b.is_character() || b.is_short() { &Type::Int } else { b };
+    let a = if a.is_character() || a.is_short() {
+        &Type::Int
+    } else {
+        a
+    };
+    let b = if b.is_character() || b.is_short() {
+        &Type::Int
+    } else {
+        b
+    };
 
     if a == b {
         return a.clone();

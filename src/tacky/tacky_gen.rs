@@ -2000,22 +2000,15 @@ impl TackyGenerator {
                 self.temp_counter += 1;
 
                 // Register the temp in var_map and var_types
-                self.var_map.insert(
-                    tmp_name.clone(),
-                    VarKind::Local(target_type.clone()),
-                );
-                self.var_types
-                    .insert(tmp_name.clone(), target_type.clone());
+                self.var_map
+                    .insert(tmp_name.clone(), VarKind::Local(target_type.clone()));
+                self.var_types.insert(tmp_name.clone(), target_type.clone());
 
                 if let Expr::CompoundInit(init_exprs) = init.as_ref() {
                     match target_type {
                         Type::Struct { members, .. } => {
                             self.generate_compound_init(
-                                init_exprs,
-                                members,
-                                &tmp_name,
-                                instrs,
-                                func_table,
+                                init_exprs, members, &tmp_name, instrs, func_table,
                             )?;
                         }
                         Type::Array(_, _) => {
@@ -2030,8 +2023,7 @@ impl TackyGenerator {
                         _ => {
                             // Scalar: (int){42}
                             if let Some(init_expr) = init_exprs.first() {
-                                let (val, _) =
-                                    self.generate_expr(init_expr, instrs, func_table)?;
+                                let (val, _) = self.generate_expr(init_expr, instrs, func_table)?;
                                 instrs.push(TackyInstruction::Copy {
                                     src: val,
                                     dst: TackyVal::Var(tmp_name.clone()),
@@ -2089,11 +2081,8 @@ impl TackyGenerator {
                 };
 
                 let is_fp = arg_type.is_floating();
-                let (offset_field, limit_val, step_val): (usize, i32, i32) = if is_fp {
-                    (4, 176, 16)
-                } else {
-                    (0, 48, 8)
-                };
+                let (offset_field, limit_val, step_val): (usize, i32, i32) =
+                    if is_fp { (4, 176, 16) } else { (0, 48, 8) };
 
                 let label_reg = self.new_label("va_reg");
                 let label_end = self.new_label("va_end");
@@ -2121,8 +2110,7 @@ impl TackyGenerator {
                 });
 
                 // === Overflow path ===
-                let t_overflow_ptr =
-                    self.new_temp(Type::Pointer(Box::new(Type::Void)));
+                let t_overflow_ptr = self.new_temp(Type::Pointer(Box::new(Type::Void)));
                 instrs.push(TackyInstruction::CopyFromOffset {
                     src: ap_name.clone(),
                     offset: 8,
@@ -2130,8 +2118,7 @@ impl TackyGenerator {
                 });
 
                 // Dereference overflow_arg_area
-                let t_overflow_val =
-                    self.new_temp(if is_fp { Type::Double } else { Type::Long });
+                let t_overflow_val = self.new_temp(if is_fp { Type::Double } else { Type::Long });
                 instrs.push(TackyInstruction::Load {
                     src_ptr: t_overflow_ptr.clone(),
                     dst: t_overflow_val.clone(),
@@ -2150,10 +2137,7 @@ impl TackyGenerator {
                             dst: dst.clone(),
                         });
                     }
-                } else if matches!(
-                    arg_type,
-                    Type::Int | Type::UInt | Type::Char | Type::UChar
-                ) {
+                } else if matches!(arg_type, Type::Int | Type::UInt | Type::Char | Type::UChar) {
                     instrs.push(TackyInstruction::Truncate {
                         src: t_overflow_val,
                         dst: dst.clone(),
@@ -2166,8 +2150,7 @@ impl TackyGenerator {
                 }
 
                 // Advance overflow_arg_area by 8
-                let t_new_overflow =
-                    self.new_temp(Type::Pointer(Box::new(Type::Void)));
+                let t_new_overflow = self.new_temp(Type::Pointer(Box::new(Type::Void)));
                 instrs.push(TackyInstruction::Binary {
                     op: TackyBinaryOp::Add,
                     left: t_overflow_ptr,
@@ -2185,8 +2168,7 @@ impl TackyGenerator {
                 instrs.push(TackyInstruction::Label(label_reg));
 
                 // Load reg_save_area pointer
-                let t_reg_base =
-                    self.new_temp(Type::Pointer(Box::new(Type::Void)));
+                let t_reg_base = self.new_temp(Type::Pointer(Box::new(Type::Void)));
                 instrs.push(TackyInstruction::CopyFromOffset {
                     src: ap_name.clone(),
                     offset: 16,
@@ -2201,8 +2183,7 @@ impl TackyGenerator {
                 });
 
                 // Compute reg_save_area + offset
-                let t_slot_ptr =
-                    self.new_temp(Type::Pointer(Box::new(Type::Void)));
+                let t_slot_ptr = self.new_temp(Type::Pointer(Box::new(Type::Void)));
                 instrs.push(TackyInstruction::Binary {
                     op: TackyBinaryOp::Add,
                     left: t_reg_base,
@@ -2211,8 +2192,7 @@ impl TackyGenerator {
                 });
 
                 // Dereference to get value
-                let t_reg_val =
-                    self.new_temp(if is_fp { Type::Double } else { Type::Long });
+                let t_reg_val = self.new_temp(if is_fp { Type::Double } else { Type::Long });
                 instrs.push(TackyInstruction::Load {
                     src_ptr: t_slot_ptr,
                     dst: t_reg_val.clone(),
@@ -2231,10 +2211,7 @@ impl TackyGenerator {
                             dst: dst.clone(),
                         });
                     }
-                } else if matches!(
-                    arg_type,
-                    Type::Int | Type::UInt | Type::Char | Type::UChar
-                ) {
+                } else if matches!(arg_type, Type::Int | Type::UInt | Type::Char | Type::UChar) {
                     instrs.push(TackyInstruction::Truncate {
                         src: t_reg_val,
                         dst: dst.clone(),
