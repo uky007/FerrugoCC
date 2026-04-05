@@ -376,10 +376,13 @@ fn apply_elf_watermark(binary_path: &Path) -> Result<()> {
         data[9 + i] = (data[9 + i] & 0xFE) | (byte & 0x01);
     }
 
-    // LSB encode version [0x04, 0x00, 0x00, 0x00] into e_flags (offset 48..52)
-    let version: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
-    for (i, &byte) in version.iter().enumerate() {
-        data[48 + i] = (data[48 + i] & 0xFE) | (byte & 0x01);
+    // LSB encode version number bits into e_flags (offset 48..52)
+    // Spread the 4 low bits of the version across 4 carrier bytes' LSBs.
+    // v0.4.0 = 4 = 0b0100 → LSBs [0, 0, 1, 0] at e_flags[48..52].
+    let ver_num: u8 = 4; // v0.4.0
+    for i in 0..4u8 {
+        let bit = (ver_num >> i) & 0x01;
+        data[48 + i as usize] = (data[48 + i as usize] & 0xFE) | bit;
     }
 
     std::fs::write(binary_path, &data)
