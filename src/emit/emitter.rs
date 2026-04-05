@@ -316,6 +316,11 @@ fn emit_static_constant(out: &mut String, constant: &AsmStaticConstant) -> Resul
         StaticInit::FloatInit(v) => {
             writeln!(out, "    .long {}", v.to_bits())
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            // xorps reads 128 bits; pad to 16 bytes when 16-byte aligned (sign mask)
+            if constant.alignment >= 16 {
+                writeln!(out, "    .zero 12")
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
         }
         StaticInit::DoubleInit(v) => {
             writeln!(out, "    .quad {}", v.to_bits())

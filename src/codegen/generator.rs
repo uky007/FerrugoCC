@@ -98,11 +98,12 @@ pub fn generate(
         }
     }
 
-    // double 定数プール: TACKY の static_constants から構築
-    let mut double_constants: HashMap<u64, (String, usize)> = HashMap::new();
+    // double/float 定数プール: TACKY の static_constants から構築
+    // value = (label, alignment, is_float)
+    let mut double_constants: HashMap<u64, (String, usize, bool)> = HashMap::new();
     for sc in &program.static_constants {
         if let TackyStaticInit::DoubleInit(v) = sc.init {
-            double_constants.insert(v.to_bits(), (sc.name.clone(), sc.alignment));
+            double_constants.insert(v.to_bits(), (sc.name.clone(), sc.alignment, false));
         }
     }
 
@@ -174,8 +175,8 @@ pub fn generate(
     // ソートして決定的な順序で出力
     let mut sorted_doubles: Vec<_> = double_constants.iter().collect();
     sorted_doubles.sort_by_key(|(bits, _)| *bits);
-    for (bits, (name, alignment)) in sorted_doubles {
-        let init = if *alignment == 4 {
+    for (bits, (name, alignment, is_float)) in sorted_doubles {
+        let init = if *is_float {
             // Float constant (key has 0x1_0000_0000 marker bit)
             StaticInit::FloatInit(f32::from_bits((*bits & 0xFFFF_FFFF) as u32))
         } else {
@@ -288,7 +289,7 @@ fn collect_forced_stack_vars(
 fn generate_function(
     func: &TackyFunction,
     static_vars: &HashMap<String, String>,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
 ) -> Result<CodegenFunctionResult> {
     let mut instructions = Vec::new();
 
@@ -551,18 +552,18 @@ fn load_double_val(
     static_vars: &HashMap<String, String>,
     stack_vars: &HashMap<String, i32>,
     _instrs: &mut Vec<Instruction>,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
     const_label_counter: &mut usize,
 ) -> Operand {
     match val {
         TackyVal::Constant(TackyConst::Double(v)) => {
             let bits = v.to_bits();
-            let label = if let Some((l, _)) = double_constants.get(&bits) {
+            let label = if let Some((l, _, _)) = double_constants.get(&bits) {
                 l.clone()
             } else {
                 let l = format!(".Lconst_{}", *const_label_counter);
                 *const_label_counter += 1;
-                double_constants.insert(bits, (l.clone(), 8));
+                double_constants.insert(bits, (l.clone(), 8, false));
                 l
             };
             Operand::Data(label)
@@ -570,12 +571,12 @@ fn load_double_val(
         TackyVal::Constant(TackyConst::Float(v)) => {
             // float は 4 バイト定数。bit パターンを u64 に拡張してキーとして使う
             let bits = v.to_bits() as u64 | 0x1_0000_0000; // 上位ビットで double と区別
-            let label = if let Some((l, _)) = double_constants.get(&bits) {
+            let label = if let Some((l, _, _)) = double_constants.get(&bits) {
                 l.clone()
             } else {
                 let l = format!(".Lconst_{}", *const_label_counter);
                 *const_label_counter += 1;
-                double_constants.insert(bits, (l.clone(), 4));
+                double_constants.insert(bits, (l.clone(), 4, true));
                 l
             };
             Operand::Data(label)
@@ -592,7 +593,7 @@ fn generate_instruction(
     static_vars: &HashMap<String, String>,
     stack_vars: &HashMap<String, i32>,
     instrs: &mut Vec<Instruction>,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
     var_types: &HashMap<String, Type>,
     _va_label_counter: &mut usize,
     func_return_type: &Type,
@@ -722,13 +723,14 @@ fn generate_instruction(
                             dst: Operand::Register(Reg::XMM0),
                         });
                         let (neg_zero_bits, neg_align) = if dst_type.is_float() {
-                            (0x80000000u64, 4)
+                            (0x1_8000_0000u64, 16) // marker bit + sign mask, 16-byte aligned for xorps
                         } else {
                             (0x8000000000000000u64, 16)
                         };
                         let neg_label = get_or_add_double_constant(
                             neg_zero_bits,
                             neg_align,
+                            dst_type.is_float(),
                             double_constants,
                             &mut const_counter,
                         );
@@ -1143,6 +1145,7 @@ fn generate_instruction(
             let bound_label = get_or_add_double_constant(
                 9223372036854775808.0f64.to_bits(),
                 8,
+                false,
                 double_constants,
                 &mut const_counter,
             );
@@ -1398,6 +1401,7 @@ fn generate_instruction(
             let bound_label = get_or_add_double_constant(
                 9223372036854775808.0f64.to_bits(),
                 8,
+                false,
                 double_constants,
                 &mut const_counter,
             );
@@ -1811,10 +1815,11 @@ fn generate_instruction(
 fn get_or_add_double_constant(
     bits: u64,
     alignment: usize,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    is_float: bool,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
     const_counter: &mut usize,
 ) -> String {
-    if let Some((label, existing_align)) = double_constants.get_mut(&bits) {
+    if let Some((label, existing_align, _)) = double_constants.get_mut(&bits) {
         if alignment > *existing_align {
             *existing_align = alignment;
         }
@@ -1822,7 +1827,7 @@ fn get_or_add_double_constant(
     } else {
         let label = format!(".Lconst_{}", *const_counter);
         *const_counter += 1;
-        double_constants.insert(bits, (label.clone(), alignment));
+        double_constants.insert(bits, (label.clone(), alignment, is_float));
         label
     }
 }
@@ -1836,7 +1841,7 @@ fn generate_binary_instruction(
     static_vars: &HashMap<String, String>,
     stack_vars: &HashMap<String, i32>,
     instrs: &mut Vec<Instruction>,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
     const_counter: &mut usize,
     var_types: &HashMap<String, Type>,
 ) -> Result<()> {
@@ -2206,7 +2211,7 @@ fn generate_function_call(
     static_vars: &HashMap<String, String>,
     stack_vars: &HashMap<String, i32>,
     instrs: &mut Vec<Instruction>,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
     const_counter: &mut usize,
     var_types: &HashMap<String, Type>,
 ) -> Result<()> {
