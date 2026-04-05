@@ -288,9 +288,6 @@ pub fn run_multi(
 
     link_objects(&all_objects, &output_path)?;
 
-    // ELF ウォーターマーク埋め込み（サイレント、常時有効）
-    apply_elf_watermark(&output_path)?;
-
     // 生成した .o を掃除（引数で渡された .o は残す）
     for asm_path in &asm_paths {
         let obj_path = asm_path.with_extension("o");
@@ -309,6 +306,9 @@ pub fn run_multi(
             }
         }
     }
+
+    // ELF ウォーターマーク埋め込み（strip の後に実行 — strip が e_ident padding をクリアするため）
+    apply_elf_watermark(&output_path)?;
 
     // OPSEC バイナリ監査
     if let Some(config) = &obf_config

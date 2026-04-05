@@ -2916,7 +2916,7 @@ impl TackyGenerator {
         }
     }
 
-    /// 式経由の間接呼び出し: ops[0](a, b), s.callback(x) など。
+    /// 式経由の間接呼び出し: ops\[0\](a, b), s.callback(x) など。
     /// callee 式を評価して一時変数に格納し、FunCall で間接呼び出しする。
     fn generate_call_expr(
         &mut self,
