@@ -11,6 +11,9 @@ results/
 # 内部レビュー資料
 review/
 
+# 論文ドラフト（ローカル専用）
+paper/
+
 # 論文作成用 TeX ファイル
 docs/*.tex
 
