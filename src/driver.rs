@@ -376,8 +376,8 @@ fn apply_elf_watermark(binary_path: &Path) -> Result<()> {
         data[9 + i] = (data[9 + i] & 0xFE) | (byte & 0x01);
     }
 
-    // LSB encode version [0x01, 0x00, 0x00, 0x00] into e_flags (offset 48..52)
-    let version: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
+    // LSB encode version [0x04, 0x00, 0x00, 0x00] into e_flags (offset 48..52)
+    let version: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
     for (i, &byte) in version.iter().enumerate() {
         data[48 + i] = (data[48 + i] & 0xFE) | (byte & 0x01);
     }
