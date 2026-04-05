@@ -42,7 +42,7 @@ pub enum PreprocessMode {
 }
 
 /// コンパイルをどのステージまで実行するかを指定する列挙型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
     /// 字句解析のみ（トークン化が成功すれば OK）
     Lex,
@@ -100,96 +100,201 @@ fn asm_output_path(source_path: &Path) -> PathBuf {
         .unwrap_or_else(|| source_path.with_extension("s"))
 }
 
-/// コンパイルパイプラインを実行する。
-///
-/// `source_path` のCソースファイルを読み込み、`stage` で指定された
-/// ステージまで処理を行う。
-///
-/// `obf_config` が Some の場合、TACKY IR 最適化の代わりに難読化パスを適用する。
-/// `preprocess` で前処理モードを指定する。
-pub fn run(
+/// 単一の .c ファイルをコンパイルパイプラインで処理する。
+/// `stage` で停止。EmitAsm/Full まで進んだ場合は .s ファイルのパスを返す。
+fn compile_one(
     source_path: &Path,
     stage: Stage,
-    obf_config: Option<ObfuscationConfig>,
+    obf_config: &Option<ObfuscationConfig>,
     preprocess: PreprocessMode,
     pp_defines: &[String],
     pp_undefs: &[String],
-) -> Result<()> {
-    // ── Stage 0: 前処理 ──
+) -> Result<Option<PathBuf>> {
     let source = match preprocess {
         PreprocessMode::None => std::fs::read_to_string(source_path)?,
         PreprocessMode::External => preprocess_external(source_path, pp_defines, pp_undefs)?,
     };
 
-    // ── Stage 1: 字句解析 ──
     let tokens = lex::lex(&source)?;
     if stage == Stage::Lex {
-        return Ok(());
+        return Ok(None);
     }
 
-    // ── Stage 2: 構文解析 ──
     let mut program = parse::parse(&tokens)?;
     if stage == Stage::Parse {
-        return Ok(());
+        return Ok(None);
     }
 
-    // ── Stage 2.5: 型検査 ──
     typecheck::typecheck(&mut program)?;
     if stage == Stage::Validate {
-        return Ok(());
+        return Ok(None);
     }
 
-    // ── Stage 3: TACKY IR 生成 ──
     let tacky_program = tacky::generate_tacky(&program)?;
     if stage == Stage::Tacky {
-        return Ok(());
+        return Ok(None);
     }
 
-    // ── Stage 3.5: TACKY 最適化 or 難読化 ──
-    let tacky_program = if let Some(ref config) = obf_config {
+    let tacky_program = if let Some(config) = obf_config.as_ref() {
         tacky::obfuscate(tacky_program, config)?
     } else {
         tacky::optimize(tacky_program)
     };
 
-    // ── Stage 4: コード生成（TACKY → Asm AST）──
     let asm_program = codegen::generate(&tacky_program, obf_config.as_ref())?;
     if stage == Stage::Codegen {
-        return Ok(());
+        return Ok(None);
     }
 
-    // ── Stage 5: アセンブリ出力 ──
     let asm_text = emit::emit(&asm_program)?;
     let asm_path = asm_output_path(source_path);
     std::fs::write(&asm_path, &asm_text)?;
+    Ok(Some(asm_path))
+}
 
+/// .s → .o にアセンブルする（gcc -c）
+fn assemble_to_object(asm_path: &Path, obj_path: &Path) -> Result<()> {
+    let mut cmd = Command::new("gcc");
+    cmd.arg("-c").arg(asm_path).arg("-o").arg(obj_path);
+    if cfg!(target_os = "linux") {
+        cmd.arg("-no-pie");
+    }
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(CompileError::ExternalToolError(format!(
+            "gcc -c failed for {}",
+            asm_path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// 複数の .o をリンクして実行ファイルを生成する
+fn link_objects(objects: &[PathBuf], output_path: &Path) -> Result<()> {
+    let mut cmd = Command::new("gcc");
+    for obj in objects {
+        cmd.arg(obj);
+    }
+    cmd.arg("-o").arg(output_path);
+    if cfg!(target_os = "linux") {
+        cmd.arg("-no-pie");
+    }
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(CompileError::ExternalToolError(format!(
+            "gcc link failed (exit {})",
+            status
+        )));
+    }
+    Ok(())
+}
+
+/// 複数ファイル対応のコンパイルパイプライン。
+///
+/// 各 .c ファイルを独立にコンパイルし、最後に gcc でリンクする。
+/// .o ファイルはそのままリンカに渡す。
+#[allow(clippy::too_many_arguments)]
+pub fn run_multi(
+    sources: &[PathBuf],
+    stage: Stage,
+    obf_config: Option<ObfuscationConfig>,
+    preprocess: PreprocessMode,
+    pp_defines: &[String],
+    pp_undefs: &[String],
+    compile_only: bool,
+    output: Option<&Path>,
+) -> Result<()> {
+    // 入力ファイルの分類
+    let mut c_files: Vec<&Path> = Vec::new();
+    let mut o_files: Vec<PathBuf> = Vec::new();
+    for source in sources {
+        match source.extension().and_then(|e| e.to_str()) {
+            Some("c") | Some("h") => c_files.push(source),
+            Some("o") => o_files.push(source.clone()),
+            _ => {
+                return Err(CompileError::ExternalToolError(format!(
+                    "unrecognized file type: {}",
+                    source.display()
+                )));
+            }
+        }
+    }
+
+    if compile_only && output.is_some() && c_files.len() > 1 {
+        return Err(CompileError::ExternalToolError(
+            "-o cannot be used with -c and multiple source files".to_string(),
+        ));
+    }
+
+    // Multi-file または -c（リンク用 .o 生成）の場合、global シンボルの OPSEC リネームを抑制
+    let mut obf_config = obf_config;
+    if ((c_files.len() + o_files.len()) > 1 || compile_only)
+        && let Some(ref mut config) = obf_config
+    {
+        config.preserve_globals = true;
+    }
+
+    // 各 .c ファイルをコンパイル
+    let mut asm_paths: Vec<PathBuf> = Vec::new();
+    for c_file in &c_files {
+        if let Some(asm_path) =
+            compile_one(c_file, stage, &obf_config, preprocess, pp_defines, pp_undefs)?
+        {
+            asm_paths.push(asm_path);
+        }
+    }
+
+    // EmitAsm 以前のステージでは .s も生成しない
+    if stage < Stage::EmitAsm {
+        return Ok(());
+    }
+    // -S: .s ファイル出力で停止
     if stage == Stage::EmitAsm {
         return Ok(());
     }
 
-    // ── Stage 6: アセンブル＆リンク ──
-    // gcc に .s ファイルを渡してバイナリを生成する。
-    // gcc は内部で as（アセンブラ）と ld（リンカ）を呼び出す。
-    let output_path = source_path.with_extension("");
-    let mut link_cmd = Command::new("gcc");
-    link_cmd.arg(&asm_path).arg("-o").arg(&output_path);
-    // FerrugoCC は non-PIC コードを生成するため、Linux PIE 既定環境では -no-pie が必要
-    if cfg!(target_os = "linux") {
-        link_cmd.arg("-no-pie");
-    }
-    let status = link_cmd.status()?;
-
-    // アセンブリファイルは中間生成物なので削除
-    let _ = std::fs::remove_file(&asm_path);
-
-    if !status.success() {
-        return Err(CompileError::ExternalToolError(format!(
-            "gcc exited with status {}",
-            status
-        )));
+    // -c: .s → .o にアセンブルして停止（リンクしない）
+    if compile_only {
+        for asm_path in &asm_paths {
+            let obj_path = if let Some(out) = output {
+                out.to_path_buf()
+            } else {
+                asm_path.with_extension("o")
+            };
+            assemble_to_object(asm_path, &obj_path)?;
+            let _ = std::fs::remove_file(asm_path);
+        }
+        return Ok(());
     }
 
-    // 難読化の OPSEC strip が有効ならバイナリを strip
+    // Full: .s → .o → リンク
+    let mut all_objects: Vec<PathBuf> = Vec::new();
+    for asm_path in &asm_paths {
+        let obj_path = asm_path.with_extension("o");
+        assemble_to_object(asm_path, &obj_path)?;
+        let _ = std::fs::remove_file(asm_path);
+        all_objects.push(obj_path);
+    }
+    all_objects.extend(o_files);
+
+    let output_path = if let Some(out) = output {
+        out.to_path_buf()
+    } else if c_files.len() == 1 && all_objects.len() == 1 {
+        // 後方互換: 単一 .c → 拡張子なしバイナリ
+        c_files[0].with_extension("")
+    } else {
+        PathBuf::from("a.out")
+    };
+
+    link_objects(&all_objects, &output_path)?;
+
+    // 生成した .o を掃除（引数で渡された .o は残す）
+    for asm_path in &asm_paths {
+        let obj_path = asm_path.with_extension("o");
+        let _ = std::fs::remove_file(&obj_path);
+    }
+
+    // OPSEC strip
     if let Some(config) = &obf_config
         && config.opsec_strip
     {
@@ -202,7 +307,10 @@ pub fn run(
         }
     }
 
-    // OPSEC バイナリ監査（リンク後バイナリの文字列・シンボルをスキャン）
+    // ELF ウォーターマーク埋め込み（strip の後に実行 — strip が e_ident padding をクリアするため）
+    apply_elf_watermark(&output_path)?;
+
+    // OPSEC バイナリ監査
     if let Some(config) = &obf_config
         && config.opsec_audit
     {
@@ -212,9 +320,69 @@ pub fn run(
     Ok(())
 }
 
+/// 単一ファイルコンパイル（後方互換ラッパー）
+#[allow(dead_code)]
+pub fn run(
+    source_path: &Path,
+    stage: Stage,
+    obf_config: Option<ObfuscationConfig>,
+    preprocess: PreprocessMode,
+    pp_defines: &[String],
+    pp_undefs: &[String],
+) -> Result<()> {
+    run_multi(
+        &[source_path.to_path_buf()],
+        stage,
+        obf_config,
+        preprocess,
+        pp_defines,
+        pp_undefs,
+        false,
+        None,
+    )
+}
+
 /// リンク後バイナリの OPSEC 監査
 ///
 /// `strings` コマンドでバイナリ内の文字列をスキャンし、
+/// ELF バイナリに LSB ステガノグラフィでウォーターマークを埋め込む。
+/// e_ident[9..16] (EI_PAD, 7 bytes) に "FERRUGO" の各ビットを LSB エンコードし、
+/// e_flags (offset 48..52, 4 bytes) にバージョン情報を LSB エンコードする。
+/// ELF 以外（macOS Mach-O 等）の場合はサイレントにスキップする。
+fn apply_elf_watermark(binary_path: &Path) -> Result<()> {
+    let mut data = std::fs::read(binary_path)
+        .map_err(|e| CompileError::ExternalToolError(format!("read binary: {e}")))?;
+
+    // ELF magic check: 0x7F 'E' 'L' 'F'
+    if data.len() < 64 || data[0..4] != [0x7F, b'E', b'L', b'F'] {
+        return Ok(()); // Not ELF, skip silently
+    }
+
+    // Verify 64-bit ELF (ELFCLASS64)
+    if data[4] != 2 {
+        return Ok(());
+    }
+
+    // LSB encode "FERRUGO" (7 bytes) into e_ident[9..16] (EI_PAD)
+    let magic = b"FERRUGO";
+    for (i, &byte) in magic.iter().enumerate() {
+        // Spread 8 bits of magic[i] across byte at position 9+i using LSB
+        // Since EI_PAD is normally all zeros, we write the LSB directly
+        data[9 + i] = (data[9 + i] & 0xFE) | (byte & 0x01);
+    }
+
+    // LSB encode version [0x01, 0x00, 0x00, 0x00] into e_flags (offset 48..52)
+    let version: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
+    for (i, &byte) in version.iter().enumerate() {
+        data[48 + i] = (data[48 + i] & 0xFE) | (byte & 0x01);
+    }
+
+    std::fs::write(binary_path, &data)
+        .map_err(|e| CompileError::ExternalToolError(format!("write binary: {e}")))?;
+
+    Ok(())
+}
+
 /// IP アドレス・ファイルパス・URL・デバッグキーワード・資格情報キーワードを検出する。
 /// `nm` コマンドで main/_ 以外のユーザー定義シンボルをフラグする（informational）。
 fn opsec_audit_binary(binary_path: &Path, policy: OpsecPolicy) -> Result<()> {

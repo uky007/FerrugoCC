@@ -8,6 +8,15 @@ notes/
 results/
 .DS_Store
 
+# 内部レビュー資料
+review/
+
+# 論文ドラフト（ローカル専用）
+paper/
+
+# 論文作成用 TeX ファイル
+docs/*.tex
+
 # 作業用ハンドオフ文書（成果物ではない）
 docs/handoff-to-kuro.md
 docs/evaluation-workorder-for-kuro.md

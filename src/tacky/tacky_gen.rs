@@ -198,6 +198,7 @@ impl TackyGenerator {
             Expr::ConstantUInt(v) => Ok(TackyStaticInit::IntInit(*v as i64)),
             Expr::ConstantULong(v) => Ok(TackyStaticInit::IntInit(*v as i64)),
             Expr::ConstantDouble(v) => Ok(TackyStaticInit::DoubleInit(*v)),
+            Expr::ConstantFloat(v) => Ok(TackyStaticInit::FloatInit(*v)),
             // NULL pointer: cast of 0 to pointer type
             Expr::Cast {
                 target_type: _,
@@ -240,6 +241,13 @@ impl TackyGenerator {
         let mut offset = 0usize;
 
         for (i, member) in members.iter().enumerate() {
+            // FAM (flexible array member): 最後のメンバが Array(_, 0) ならスキップ
+            if i == members.len() - 1
+                && matches!(&member.member_type, crate::parse::ast::Type::Array(_, 0))
+            {
+                break;
+            }
+
             let align = member.member_type.alignment();
             // パディング挿入
             if !offset.is_multiple_of(align) {
@@ -344,6 +352,7 @@ fn expr_type(
         Expr::ConstantUInt(_) => Type::UInt,
         Expr::ConstantULong(_) => Type::ULong,
         Expr::ConstantDouble(_) => Type::Double,
+        Expr::ConstantFloat(_) => Type::Float,
         Expr::StringLiteral(_) => Type::Pointer(Box::new(Type::Char)),
         Expr::Cast { target_type, .. } => target_type.clone(),
         Expr::Var(name) => {
@@ -423,9 +432,14 @@ fn expr_type(
                 ..
             } = inner_t
             {
-                struct_member_offset_ex(members, member_name, is_union)
+                let member_type = struct_member_offset_ex(members, member_name, is_union)
                     .map(|(_, t)| t)
-                    .unwrap_or(Type::Int)
+                    .unwrap_or(Type::Int);
+                // Array members decay to pointer
+                match member_type {
+                    Type::Array(elem, _) => Type::Pointer(elem),
+                    other => other,
+                }
             } else {
                 Type::Int
             }
@@ -441,6 +455,14 @@ fn expr_type(
             }
         }
         Expr::CompoundInit(_) => Type::Int,
+        Expr::CompoundLiteral { target_type, .. } => {
+            // Array compound literals decay to pointer in expression context
+            if let Type::Array(elem, _) = target_type {
+                Type::Pointer(elem.clone())
+            } else {
+                target_type.clone()
+            }
+        }
         Expr::VaStart(_) | Expr::VaEnd(_) | Expr::VaCopy(_, _) => Type::Void,
         Expr::VaArg { arg_type, .. } => arg_type.clone(),
     }
@@ -542,6 +564,8 @@ pub fn generate_tacky(program: &Program) -> Result<TackyProgram> {
                     })?
                 } else if var_decl.var_type.is_array() || var_decl.var_type.is_struct() {
                     TackyStaticInit::ZeroInit(var_decl.var_type.size())
+                } else if var_decl.var_type == Type::Float {
+                    TackyStaticInit::FloatInit(0.0)
                 } else if var_decl.var_type == Type::Double {
                     TackyStaticInit::DoubleInit(0.0)
                 } else {
@@ -599,7 +623,12 @@ pub fn generate_tacky(program: &Program) -> Result<TackyProgram> {
         .map(|(bits, (name, alignment))| TackyStaticConstant {
             name,
             alignment,
-            init: TackyStaticInit::DoubleInit(f64::from_bits(bits)),
+            init: if alignment == 4 {
+                // Float constant (key has 0x1_0000_0000 marker bit)
+                TackyStaticInit::FloatInit(f32::from_bits((bits & 0xFFFF_FFFF) as u32))
+            } else {
+                TackyStaticInit::DoubleInit(f64::from_bits(bits))
+            },
         })
         .collect();
     for (label, content) in tgen.string_constants {
@@ -672,10 +701,14 @@ impl TackyGenerator {
         }
 
         // グローバル/extern 変数の型も var_types に追加
+        // 元の名前とユニークラベル名の両方を登録する
         for (name, kind) in &self.var_map {
-            if let VarKind::Static(_, var_type) = kind {
+            if let VarKind::Static(unique_label, var_type) = kind {
                 self.var_types
                     .entry(name.clone())
+                    .or_insert_with(|| var_type.clone());
+                self.var_types
+                    .entry(unique_label.clone())
                     .or_insert_with(|| var_type.clone());
             }
         }
@@ -795,6 +828,8 @@ impl TackyGenerator {
                 })?
             } else if decl.var_type.is_array() || is_struct {
                 TackyStaticInit::ZeroInit(decl.var_type.size())
+            } else if decl.var_type == Type::Float {
+                TackyStaticInit::FloatInit(0.0)
             } else if decl.var_type == Type::Double {
                 TackyStaticInit::DoubleInit(0.0)
             } else {
@@ -1277,12 +1312,17 @@ impl TackyGenerator {
         ty: &Type,
         instrs: &mut Vec<TackyInstruction>,
     ) -> TackyVal {
-        if ty.is_double() {
+        if ty.is_floating() {
+            let zero = if ty.is_float() {
+                TackyVal::Constant(TackyConst::Float(0.0))
+            } else {
+                TackyVal::Constant(TackyConst::Double(0.0))
+            };
             let result = self.new_temp(Type::Int);
             instrs.push(TackyInstruction::Binary {
                 op: TackyBinaryOp::NotEqual,
                 left: val,
-                right: TackyVal::Constant(TackyConst::Double(0.0)),
+                right: zero,
                 dst: result.clone(),
             });
             result
@@ -1316,6 +1356,9 @@ impl TackyGenerator {
             Expr::ConstantDouble(value) => {
                 Ok((TackyVal::Constant(TackyConst::Double(*value)), Type::Double))
             }
+            Expr::ConstantFloat(value) => {
+                Ok((TackyVal::Constant(TackyConst::Float(*value)), Type::Float))
+            }
             // 文字列リテラル: `.Lstr_N` ラベルで static_constants に StringInit として登録し、
             // GetAddress でそのアドレスを取得する。
             // 難読化時は obfuscate::string_encryption() が StringInit を暗号化 ByteArrayInit に変換する。
@@ -1343,14 +1386,156 @@ impl TackyGenerator {
                     return Ok((TackyVal::Constant(TackyConst::Int(0)), Type::Void));
                 }
 
+                // Float ↔ Double conversions
+                if source_type.is_float() && target_type.is_double() {
+                    let dst = self.new_temp(Type::Double);
+                    instrs.push(TackyInstruction::FloatToDouble {
+                        src: src_val,
+                        dst: dst.clone(),
+                    });
+                    return Ok((dst, Type::Double));
+                }
+                if source_type.is_double() && target_type.is_float() {
+                    let dst = self.new_temp(Type::Float);
+                    instrs.push(TackyInstruction::DoubleToFloat {
+                        src: src_val,
+                        dst: dst.clone(),
+                    });
+                    return Ok((dst, Type::Float));
+                }
+
+                // Float → Integer conversions
+                if source_type.is_float() && !target_type.is_floating() {
+                    match target_type {
+                        Type::ULong => {
+                            let dst = self.new_temp(Type::ULong);
+                            instrs.push(TackyInstruction::FloatToUInt {
+                                src: src_val,
+                                dst: dst.clone(),
+                            });
+                            return Ok((dst, Type::ULong));
+                        }
+                        Type::UInt => {
+                            let tmp = self.new_temp(Type::Long);
+                            instrs.push(TackyInstruction::FloatToInt {
+                                src: src_val,
+                                dst: tmp.clone(),
+                            });
+                            let dst = self.new_temp(Type::UInt);
+                            instrs.push(TackyInstruction::Truncate {
+                                src: tmp,
+                                dst: dst.clone(),
+                            });
+                            return Ok((dst, Type::UInt));
+                        }
+                        Type::Short | Type::UShort | Type::Char | Type::UChar => {
+                            // float → narrow int: 32-bit 経由で truncate
+                            let tmp = self.new_temp(Type::Int);
+                            instrs.push(TackyInstruction::FloatToInt {
+                                src: src_val,
+                                dst: tmp.clone(),
+                            });
+                            let dst = self.new_temp(target_type.clone());
+                            instrs.push(TackyInstruction::Truncate {
+                                src: tmp,
+                                dst: dst.clone(),
+                            });
+                            return Ok((dst, target_type.clone()));
+                        }
+                        _ => {
+                            let dst = self.new_temp(target_type.clone());
+                            instrs.push(TackyInstruction::FloatToInt {
+                                src: src_val,
+                                dst: dst.clone(),
+                            });
+                            return Ok((dst, target_type.clone()));
+                        }
+                    }
+                }
+
+                // Integer → Float conversions
+                if !source_type.is_floating() && target_type.is_float() {
+                    match source_type {
+                        Type::ULong => {
+                            let dst = self.new_temp(Type::Float);
+                            instrs.push(TackyInstruction::UIntToFloat {
+                                src: src_val,
+                                dst: dst.clone(),
+                            });
+                            return Ok((dst, Type::Float));
+                        }
+                        Type::UInt => {
+                            let tmp = self.new_temp(Type::Long);
+                            instrs.push(TackyInstruction::ZeroExtend {
+                                src: src_val,
+                                dst: tmp.clone(),
+                            });
+                            let dst = self.new_temp(Type::Float);
+                            instrs.push(TackyInstruction::IntToFloat {
+                                src: tmp,
+                                dst: dst.clone(),
+                            });
+                            return Ok((dst, Type::Float));
+                        }
+                        Type::UChar | Type::UShort => {
+                            let tmp = self.new_temp(Type::Int);
+                            instrs.push(TackyInstruction::ZeroExtend {
+                                src: src_val,
+                                dst: tmp.clone(),
+                            });
+                            let dst = self.new_temp(Type::Float);
+                            instrs.push(TackyInstruction::IntToFloat {
+                                src: tmp,
+                                dst: dst.clone(),
+                            });
+                            return Ok((dst, Type::Float));
+                        }
+                        Type::Char | Type::Short => {
+                            let tmp = self.new_temp(Type::Int);
+                            instrs.push(TackyInstruction::SignExtend {
+                                src: src_val,
+                                dst: tmp.clone(),
+                            });
+                            let dst = self.new_temp(Type::Float);
+                            instrs.push(TackyInstruction::IntToFloat {
+                                src: tmp,
+                                dst: dst.clone(),
+                            });
+                            return Ok((dst, Type::Float));
+                        }
+                        _ => {
+                            let dst = self.new_temp(Type::Float);
+                            instrs.push(TackyInstruction::IntToFloat {
+                                src: src_val,
+                                dst: dst.clone(),
+                            });
+                            return Ok((dst, Type::Float));
+                        }
+                    }
+                }
+
                 // Double ↔ Integer conversions
                 if source_type.is_double() && !target_type.is_double() {
                     // Double → Integer
                     match target_type {
-                        Type::Int | Type::Long | Type::Char | Type::UChar => {
+                        Type::Int | Type::Long => {
                             let dst = self.new_temp(target_type.clone());
                             instrs.push(TackyInstruction::DoubleToInt {
                                 src: src_val,
+                                dst: dst.clone(),
+                            });
+                            Ok((dst, target_type.clone()))
+                        }
+                        Type::Char | Type::UChar | Type::Short | Type::UShort => {
+                            // double → narrow int: 32-bit 経由で truncate
+                            let tmp = self.new_temp(Type::Int);
+                            instrs.push(TackyInstruction::DoubleToInt {
+                                src: src_val,
+                                dst: tmp.clone(),
+                            });
+                            let dst = self.new_temp(target_type.clone());
+                            instrs.push(TackyInstruction::Truncate {
+                                src: tmp,
                                 dst: dst.clone(),
                             });
                             Ok((dst, target_type.clone()))
@@ -1404,8 +1589,8 @@ impl TackyGenerator {
                             });
                             Ok((dst, Type::Double))
                         }
-                        Type::UChar => {
-                            // Zero-extend byte to int, then convert
+                        Type::UChar | Type::UShort => {
+                            // Zero-extend to int, then convert
                             let tmp_int = self.new_temp(Type::Int);
                             instrs.push(TackyInstruction::ZeroExtend {
                                 src: src_val,
@@ -1418,8 +1603,8 @@ impl TackyGenerator {
                             });
                             Ok((dst, Type::Double))
                         }
-                        Type::Char => {
-                            // Sign-extend byte to int, then convert
+                        Type::Char | Type::Short => {
+                            // Sign-extend to int, then convert
                             let tmp_int = self.new_temp(Type::Int);
                             instrs.push(TackyInstruction::SignExtend {
                                 src: src_val,
@@ -1733,7 +1918,12 @@ impl TackyGenerator {
 
                     if member_type.is_struct() || matches!(member_type, Type::Array(..)) {
                         // Nested struct or array member: return address + offset
-                        // (arrays decay to pointers — the address IS the value)
+                        // Arrays decay to pointers — return Pointer(elem) type
+                        let result_type = if let Type::Array(ref elem, _) = member_type {
+                            Type::Pointer(elem.clone())
+                        } else {
+                            member_type.clone()
+                        };
                         if member_off != 0 {
                             let offset_val =
                                 TackyVal::Constant(TackyConst::Long(member_off as i64));
@@ -1745,9 +1935,9 @@ impl TackyGenerator {
                                 right: offset_val,
                                 dst: result.clone(),
                             });
-                            return Ok((result, member_type));
+                            return Ok((result, result_type));
                         } else {
-                            return Ok((inner_addr, member_type));
+                            return Ok((inner_addr, result_type));
                         }
                     }
 
@@ -1804,6 +1994,67 @@ impl TackyGenerator {
                 unreachable!("CompoundInit should be handled in generate_declaration")
             }
 
+            Expr::CompoundLiteral { target_type, init } => {
+                // Create a temp variable and initialize it
+                let tmp_name = format!("__compound_lit.{}", self.temp_counter);
+                self.temp_counter += 1;
+
+                // Register the temp in var_map and var_types
+                self.var_map.insert(
+                    tmp_name.clone(),
+                    VarKind::Local(target_type.clone()),
+                );
+                self.var_types
+                    .insert(tmp_name.clone(), target_type.clone());
+
+                if let Expr::CompoundInit(init_exprs) = init.as_ref() {
+                    match target_type {
+                        Type::Struct { members, .. } => {
+                            self.generate_compound_init(
+                                init_exprs,
+                                members,
+                                &tmp_name,
+                                instrs,
+                                func_table,
+                            )?;
+                        }
+                        Type::Array(_, _) => {
+                            self.generate_array_init(
+                                init_exprs,
+                                target_type,
+                                &tmp_name,
+                                instrs,
+                                func_table,
+                            )?;
+                        }
+                        _ => {
+                            // Scalar: (int){42}
+                            if let Some(init_expr) = init_exprs.first() {
+                                let (val, _) =
+                                    self.generate_expr(init_expr, instrs, func_table)?;
+                                instrs.push(TackyInstruction::Copy {
+                                    src: val,
+                                    dst: TackyVal::Var(tmp_name.clone()),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Array compound literals decay to pointer (like array variables)
+                if let Type::Array(elem, _) = target_type {
+                    let ptr_type = Type::Pointer(elem.clone());
+                    let ptr = self.new_temp(ptr_type.clone());
+                    instrs.push(TackyInstruction::GetAddress {
+                        src: TackyVal::Var(tmp_name),
+                        dst: ptr.clone(),
+                    });
+                    Ok((ptr, ptr_type))
+                } else {
+                    Ok((TackyVal::Var(tmp_name), target_type.clone()))
+                }
+            }
+
             Expr::VaStart(ap) => {
                 let (ap_val, _) = self.generate_expr(ap, instrs, func_table)?;
 
@@ -1811,7 +2062,7 @@ impl TackyGenerator {
                 let mut named_gp_count: i32 = 0;
                 let mut named_xmm_count: i32 = 0;
                 for param_type in &self.current_func_params {
-                    if param_type.is_double() {
+                    if param_type.is_floating() {
                         if named_xmm_count < 8 {
                             named_xmm_count += 1;
                         }
@@ -1832,13 +2083,184 @@ impl TackyGenerator {
 
             Expr::VaArg { ap, arg_type } => {
                 let (ap_val, _) = self.generate_expr(ap, instrs, func_table)?;
+                let ap_name = match &ap_val {
+                    TackyVal::Var(n) => n.clone(),
+                    _ => unreachable!("va_arg ap must be a variable"),
+                };
 
+                let is_fp = arg_type.is_floating();
+                let (offset_field, limit_val, step_val): (usize, i32, i32) = if is_fp {
+                    (4, 176, 16)
+                } else {
+                    (0, 48, 8)
+                };
+
+                let label_reg = self.new_label("va_reg");
+                let label_end = self.new_label("va_end");
                 let dst = self.new_temp(arg_type.clone());
-                instrs.push(TackyInstruction::VaArg {
-                    ap: ap_val,
-                    dst: dst.clone(),
-                    arg_type: arg_type.clone(),
+
+                // Load gp/fp_offset from va_list
+                let t_offset = self.new_temp(Type::Int);
+                instrs.push(TackyInstruction::CopyFromOffset {
+                    src: ap_name.clone(),
+                    offset: offset_field,
+                    dst: t_offset.clone(),
                 });
+
+                // Compare offset < limit
+                let t_cmp = self.new_temp(Type::Int);
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::LessThan,
+                    left: t_offset.clone(),
+                    right: TackyVal::Constant(TackyConst::Int(limit_val)),
+                    dst: t_cmp.clone(),
+                });
+                instrs.push(TackyInstruction::JumpIfNotZero {
+                    condition: t_cmp,
+                    target: label_reg.clone(),
+                });
+
+                // === Overflow path ===
+                let t_overflow_ptr =
+                    self.new_temp(Type::Pointer(Box::new(Type::Void)));
+                instrs.push(TackyInstruction::CopyFromOffset {
+                    src: ap_name.clone(),
+                    offset: 8,
+                    dst: t_overflow_ptr.clone(),
+                });
+
+                // Dereference overflow_arg_area
+                let t_overflow_val =
+                    self.new_temp(if is_fp { Type::Double } else { Type::Long });
+                instrs.push(TackyInstruction::Load {
+                    src_ptr: t_overflow_ptr.clone(),
+                    dst: t_overflow_val.clone(),
+                });
+
+                // Copy/truncate to dst
+                if is_fp {
+                    if *arg_type == Type::Float {
+                        instrs.push(TackyInstruction::DoubleToFloat {
+                            src: t_overflow_val,
+                            dst: dst.clone(),
+                        });
+                    } else {
+                        instrs.push(TackyInstruction::Copy {
+                            src: t_overflow_val,
+                            dst: dst.clone(),
+                        });
+                    }
+                } else if matches!(
+                    arg_type,
+                    Type::Int | Type::UInt | Type::Char | Type::UChar
+                ) {
+                    instrs.push(TackyInstruction::Truncate {
+                        src: t_overflow_val,
+                        dst: dst.clone(),
+                    });
+                } else {
+                    instrs.push(TackyInstruction::Copy {
+                        src: t_overflow_val,
+                        dst: dst.clone(),
+                    });
+                }
+
+                // Advance overflow_arg_area by 8
+                let t_new_overflow =
+                    self.new_temp(Type::Pointer(Box::new(Type::Void)));
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: t_overflow_ptr,
+                    right: TackyVal::Constant(TackyConst::Long(8)),
+                    dst: t_new_overflow.clone(),
+                });
+                instrs.push(TackyInstruction::CopyToOffset {
+                    src: t_new_overflow,
+                    dst: ap_name.clone(),
+                    offset: 8,
+                });
+                instrs.push(TackyInstruction::Jump(label_end.clone()));
+
+                // === Register path ===
+                instrs.push(TackyInstruction::Label(label_reg));
+
+                // Load reg_save_area pointer
+                let t_reg_base =
+                    self.new_temp(Type::Pointer(Box::new(Type::Void)));
+                instrs.push(TackyInstruction::CopyFromOffset {
+                    src: ap_name.clone(),
+                    offset: 16,
+                    dst: t_reg_base.clone(),
+                });
+
+                // Sign-extend offset to 64-bit
+                let t_offset_long = self.new_temp(Type::Long);
+                instrs.push(TackyInstruction::SignExtend {
+                    src: t_offset.clone(),
+                    dst: t_offset_long.clone(),
+                });
+
+                // Compute reg_save_area + offset
+                let t_slot_ptr =
+                    self.new_temp(Type::Pointer(Box::new(Type::Void)));
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: t_reg_base,
+                    right: t_offset_long,
+                    dst: t_slot_ptr.clone(),
+                });
+
+                // Dereference to get value
+                let t_reg_val =
+                    self.new_temp(if is_fp { Type::Double } else { Type::Long });
+                instrs.push(TackyInstruction::Load {
+                    src_ptr: t_slot_ptr,
+                    dst: t_reg_val.clone(),
+                });
+
+                // Copy/truncate to dst
+                if is_fp {
+                    if *arg_type == Type::Float {
+                        instrs.push(TackyInstruction::DoubleToFloat {
+                            src: t_reg_val,
+                            dst: dst.clone(),
+                        });
+                    } else {
+                        instrs.push(TackyInstruction::Copy {
+                            src: t_reg_val,
+                            dst: dst.clone(),
+                        });
+                    }
+                } else if matches!(
+                    arg_type,
+                    Type::Int | Type::UInt | Type::Char | Type::UChar
+                ) {
+                    instrs.push(TackyInstruction::Truncate {
+                        src: t_reg_val,
+                        dst: dst.clone(),
+                    });
+                } else {
+                    instrs.push(TackyInstruction::Copy {
+                        src: t_reg_val,
+                        dst: dst.clone(),
+                    });
+                }
+
+                // Advance gp/fp_offset by step
+                let t_new_offset = self.new_temp(Type::Int);
+                instrs.push(TackyInstruction::Binary {
+                    op: TackyBinaryOp::Add,
+                    left: t_offset,
+                    right: TackyVal::Constant(TackyConst::Int(step_val)),
+                    dst: t_new_offset.clone(),
+                });
+                instrs.push(TackyInstruction::CopyToOffset {
+                    src: t_new_offset,
+                    dst: ap_name,
+                    offset: offset_field,
+                });
+
+                instrs.push(TackyInstruction::Label(label_end));
                 Ok((dst, arg_type.clone()))
             }
 
@@ -1922,6 +2344,20 @@ impl TackyGenerator {
                     ))
                 }
             }
+            // Compound literal is an lvalue — it lives in a temp variable
+            Expr::CompoundLiteral { target_type, .. } => {
+                let (val, _) = self.generate_expr(expr, instrs, func_table)?;
+                let var_name = match &val {
+                    TackyVal::Var(n) => n.clone(),
+                    _ => unreachable!(),
+                };
+                let dst = self.new_temp(Type::Pointer(Box::new(target_type.clone())));
+                instrs.push(TackyInstruction::GetAddress {
+                    src: TackyVal::Var(var_name),
+                    dst: dst.clone(),
+                });
+                Ok((dst, target_type.clone()))
+            }
             _ => Err(CompileError::CodegenError(
                 "cannot take address of non-lvalue expression".to_string(),
             )),
@@ -1978,7 +2414,20 @@ impl TackyGenerator {
         instrs: &mut Vec<TackyInstruction>,
     ) -> TackyVal {
         let result = self.new_temp(ty.clone());
-        if ty.is_double() {
+        if ty.is_float() {
+            let inc_val = TackyVal::Constant(TackyConst::Float(1.0));
+            let tacky_op = if is_increment {
+                TackyBinaryOp::AddFloat
+            } else {
+                TackyBinaryOp::SubFloat
+            };
+            instrs.push(TackyInstruction::Binary {
+                op: tacky_op,
+                left: old_val.clone(),
+                right: inc_val,
+                dst: result.clone(),
+            });
+        } else if ty.is_double() {
             let inc_val = TackyVal::Constant(TackyConst::Double(1.0));
             let tacky_op = if is_increment {
                 TackyBinaryOp::AddDouble
@@ -2067,7 +2516,20 @@ impl TackyGenerator {
         instrs: &mut Vec<TackyInstruction>,
     ) -> TackyVal {
         let new_val = self.new_temp(ty.clone());
-        if ty.is_double() {
+        if ty.is_float() {
+            let inc_val = TackyVal::Constant(TackyConst::Float(1.0));
+            let tacky_op = if is_increment {
+                TackyBinaryOp::AddFloat
+            } else {
+                TackyBinaryOp::SubFloat
+            };
+            instrs.push(TackyInstruction::Binary {
+                op: tacky_op,
+                left: old_val.clone(),
+                right: inc_val,
+                dst: new_val.clone(),
+            });
+        } else if ty.is_double() {
             let inc_val = TackyVal::Constant(TackyConst::Double(1.0));
             let tacky_op = if is_increment {
                 TackyBinaryOp::AddDouble
@@ -2454,7 +2916,7 @@ impl TackyGenerator {
         }
     }
 
-    /// 式経由の間接呼び出し: ops[0](a, b), s.callback(x) など。
+    /// 式経由の間接呼び出し: ops\[0\](a, b), s.callback(x) など。
     /// callee 式を評価して一時変数に格納し、FunCall で間接呼び出しする。
     fn generate_call_expr(
         &mut self,
@@ -2830,17 +3292,22 @@ impl TackyGenerator {
                         dst: dst.clone(),
                     });
                     Ok((dst, left_type))
-                } else if operand_type.is_double() {
+                } else if operand_type.is_floating() {
                     let (left_val, _) = self.generate_expr(left, instrs, func_table)?;
                     let (right_val, _) = self.generate_expr(right, instrs, func_table)?;
-                    let dst = self.new_temp(Type::Double);
+                    let (op, ty) = if operand_type.is_float() {
+                        (TackyBinaryOp::AddFloat, Type::Float)
+                    } else {
+                        (TackyBinaryOp::AddDouble, Type::Double)
+                    };
+                    let dst = self.new_temp(ty.clone());
                     instrs.push(TackyInstruction::Binary {
-                        op: TackyBinaryOp::AddDouble,
+                        op,
                         left: left_val,
                         right: right_val,
                         dst: dst.clone(),
                     });
-                    Ok((dst, Type::Double))
+                    Ok((dst, ty))
                 } else {
                     let (left_val, _) = self.generate_expr(left, instrs, func_table)?;
                     let (right_val, _) = self.generate_expr(right, instrs, func_table)?;
@@ -2911,17 +3378,22 @@ impl TackyGenerator {
                         dst: dst.clone(),
                     });
                     Ok((dst, left_type))
-                } else if operand_type.is_double() {
+                } else if operand_type.is_floating() {
                     let (left_val, _) = self.generate_expr(left, instrs, func_table)?;
                     let (right_val, _) = self.generate_expr(right, instrs, func_table)?;
-                    let dst = self.new_temp(Type::Double);
+                    let (op, ty) = if operand_type.is_float() {
+                        (TackyBinaryOp::SubFloat, Type::Float)
+                    } else {
+                        (TackyBinaryOp::SubDouble, Type::Double)
+                    };
+                    let dst = self.new_temp(ty.clone());
                     instrs.push(TackyInstruction::Binary {
-                        op: TackyBinaryOp::SubDouble,
+                        op,
                         left: left_val,
                         right: right_val,
                         dst: dst.clone(),
                     });
-                    Ok((dst, Type::Double))
+                    Ok((dst, ty))
                 } else {
                     let (left_val, _) = self.generate_expr(left, instrs, func_table)?;
                     let (right_val, _) = self.generate_expr(right, instrs, func_table)?;
@@ -2940,7 +3412,9 @@ impl TackyGenerator {
                 let (left_val, _) = self.generate_expr(left, instrs, func_table)?;
                 let (right_val, _) = self.generate_expr(right, instrs, func_table)?;
                 let dst = self.new_temp(result_type.clone());
-                let tacky_op = if operand_type.is_double() {
+                let tacky_op = if operand_type.is_float() {
+                    TackyBinaryOp::MulFloat
+                } else if operand_type.is_double() {
                     TackyBinaryOp::MulDouble
                 } else {
                     TackyBinaryOp::Multiply
@@ -2958,7 +3432,9 @@ impl TackyGenerator {
                 let (left_val, _) = self.generate_expr(left, instrs, func_table)?;
                 let (right_val, _) = self.generate_expr(right, instrs, func_table)?;
                 let dst = self.new_temp(result_type.clone());
-                let tacky_op = if operand_type.is_double() {
+                let tacky_op = if operand_type.is_float() {
+                    TackyBinaryOp::DivFloat
+                } else if operand_type.is_double() {
                     TackyBinaryOp::DivDouble
                 } else {
                     TackyBinaryOp::Divide
@@ -3109,7 +3585,20 @@ impl TackyGenerator {
             let (rhs_val, _) = self.generate_expr(rhs, instrs, func_table)?;
             let dst = self.new_temp(var_type.clone());
 
-            let tacky_op = if var_type.is_double() {
+            let tacky_op = if var_type.is_float() {
+                match op {
+                    BinaryOp::Add => TackyBinaryOp::AddFloat,
+                    BinaryOp::Subtract => TackyBinaryOp::SubFloat,
+                    BinaryOp::Multiply => TackyBinaryOp::MulFloat,
+                    BinaryOp::Divide => TackyBinaryOp::DivFloat,
+                    _ => {
+                        return Err(CompileError::CodegenError(format!(
+                            "unsupported compound assignment operator for float: {:?}",
+                            op
+                        )));
+                    }
+                }
+            } else if var_type.is_double() {
                 match op {
                     BinaryOp::Add => TackyBinaryOp::AddDouble,
                     BinaryOp::Subtract => TackyBinaryOp::SubDouble,
@@ -3168,7 +3657,20 @@ impl TackyGenerator {
             let (rhs_val, _) = self.generate_expr(rhs, instrs, func_table)?;
             let dst = self.new_temp(var_type.clone());
 
-            let tacky_op = if var_type.is_double() {
+            let tacky_op = if var_type.is_float() {
+                match op {
+                    BinaryOp::Add => TackyBinaryOp::AddFloat,
+                    BinaryOp::Subtract => TackyBinaryOp::SubFloat,
+                    BinaryOp::Multiply => TackyBinaryOp::MulFloat,
+                    BinaryOp::Divide => TackyBinaryOp::DivFloat,
+                    _ => {
+                        return Err(CompileError::CodegenError(format!(
+                            "unsupported compound assignment operator for float: {:?}",
+                            op
+                        )));
+                    }
+                }
+            } else if var_type.is_double() {
                 match op {
                     BinaryOp::Add => TackyBinaryOp::AddDouble,
                     BinaryOp::Subtract => TackyBinaryOp::SubDouble,

@@ -301,7 +301,24 @@ fn simplify_binary(
             }
             None
         }
-        // Self-comparisons (integer only, not double)
+        // Float Multiply: x*1.0→x, 1.0*x→x
+        TackyBinaryOp::MulFloat => {
+            if is_one_float(right) {
+                return Some(make_copy(left, dst));
+            }
+            if is_one_float(left) {
+                return Some(make_copy(right, dst));
+            }
+            None
+        }
+        // Float Divide: x/1.0→x
+        TackyBinaryOp::DivFloat => {
+            if is_one_float(right) {
+                return Some(make_copy(left, dst));
+            }
+            None
+        }
+        // Self-comparisons (integer only, not double/float)
         TackyBinaryOp::Equal => {
             if same_var && !is_double_var_val(left, var_types) {
                 return Some(TackyInstruction::Copy {
@@ -409,6 +426,10 @@ fn is_one_double(val: &TackyVal) -> bool {
     matches!(val, TackyVal::Constant(TackyConst::Double(v)) if *v == 1.0)
 }
 
+fn is_one_float(val: &TackyVal) -> bool {
+    matches!(val, TackyVal::Constant(TackyConst::Float(v)) if *v == 1.0)
+}
+
 fn is_same_var(a: &TackyVal, b: &TackyVal) -> bool {
     match (a, b) {
         (TackyVal::Var(na), TackyVal::Var(nb)) => na == nb,
@@ -418,7 +439,7 @@ fn is_same_var(a: &TackyVal, b: &TackyVal) -> bool {
 
 fn is_double_var_val(val: &TackyVal, var_types: &HashMap<String, Type>) -> bool {
     match val {
-        TackyVal::Var(name) => matches!(var_types.get(name), Some(Type::Double)),
+        TackyVal::Var(name) => matches!(var_types.get(name), Some(Type::Double) | Some(Type::Float)),
         _ => false,
     }
 }
@@ -438,6 +459,7 @@ fn make_zero_typed(val: &TackyVal, var_types: &HashMap<String, Type>) -> TackyCo
             TackyConst::UInt(_) => TackyConst::UInt(0),
             TackyConst::ULong(_) => TackyConst::ULong(0),
             TackyConst::Double(_) => TackyConst::Double(0.0),
+            TackyConst::Float(_) => TackyConst::Float(0.0),
             TackyConst::Char(_) => TackyConst::Char(0),
             TackyConst::UChar(_) => TackyConst::UChar(0),
         },
@@ -447,6 +469,7 @@ fn make_zero_typed(val: &TackyVal, var_types: &HashMap<String, Type>) -> TackyCo
             Some(Type::UInt) => TackyConst::UInt(0),
             Some(Type::ULong) => TackyConst::ULong(0),
             Some(Type::Double) => TackyConst::Double(0.0),
+            Some(Type::Float) => TackyConst::Float(0.0),
             Some(Type::Char) => TackyConst::Char(0),
             Some(Type::UChar) => TackyConst::UChar(0),
             _ => TackyConst::Int(0),
@@ -535,6 +558,7 @@ fn is_zero_const(c: &TackyConst) -> bool {
         TackyConst::UInt(0) => true,
         TackyConst::ULong(0) => true,
         TackyConst::Double(v) => *v == 0.0,
+        TackyConst::Float(v) => *v == 0.0,
         TackyConst::Char(0) => true,
         TackyConst::UChar(0) => true,
         _ => false,
@@ -556,6 +580,7 @@ fn fold_binary(op: TackyBinaryOp, left: &TackyConst, right: &TackyConst) -> Opti
             fold_uint_binary(op, *l, *r).map(TackyConst::ULong)
         }
         (TackyConst::Double(l), TackyConst::Double(r)) => fold_double_binary(op, *l, *r),
+        (TackyConst::Float(l), TackyConst::Float(r)) => fold_float_binary(op, *l, *r),
         _ => None,
     }
 }
@@ -650,11 +675,34 @@ fn fold_double_binary(op: TackyBinaryOp, l: f64, r: f64) -> Option<TackyConst> {
     }
 }
 
+fn fold_float_binary(op: TackyBinaryOp, l: f32, r: f32) -> Option<TackyConst> {
+    match op {
+        TackyBinaryOp::AddFloat => Some(TackyConst::Float(l + r)),
+        TackyBinaryOp::SubFloat => Some(TackyConst::Float(l - r)),
+        TackyBinaryOp::MulFloat => Some(TackyConst::Float(l * r)),
+        TackyBinaryOp::DivFloat => {
+            if r != 0.0 {
+                Some(TackyConst::Float(l / r))
+            } else {
+                None
+            }
+        }
+        TackyBinaryOp::Equal => Some(TackyConst::Int(if l == r { 1 } else { 0 })),
+        TackyBinaryOp::NotEqual => Some(TackyConst::Int(if l != r { 1 } else { 0 })),
+        TackyBinaryOp::LessThan => Some(TackyConst::Int(if l < r { 1 } else { 0 })),
+        TackyBinaryOp::LessOrEqual => Some(TackyConst::Int(if l <= r { 1 } else { 0 })),
+        TackyBinaryOp::GreaterThan => Some(TackyConst::Int(if l > r { 1 } else { 0 })),
+        TackyBinaryOp::GreaterOrEqual => Some(TackyConst::Int(if l >= r { 1 } else { 0 })),
+        _ => None,
+    }
+}
+
 fn fold_unary(op: TackyUnaryOp, c: &TackyConst) -> Option<TackyConst> {
     match (op, c) {
         (TackyUnaryOp::Negate, TackyConst::Int(v)) => Some(TackyConst::Int(v.wrapping_neg())),
         (TackyUnaryOp::Negate, TackyConst::Long(v)) => Some(TackyConst::Long(v.wrapping_neg())),
         (TackyUnaryOp::Negate, TackyConst::Double(v)) => Some(TackyConst::Double(-v)),
+        (TackyUnaryOp::Negate, TackyConst::Float(v)) => Some(TackyConst::Float(-v)),
         (TackyUnaryOp::Complement, TackyConst::Int(v)) => Some(TackyConst::Int(!v)),
         (TackyUnaryOp::Complement, TackyConst::Long(v)) => Some(TackyConst::Long(!v)),
         (TackyUnaryOp::Complement, TackyConst::UInt(v)) => Some(TackyConst::UInt(!v)),
@@ -672,6 +720,9 @@ fn fold_unary(op: TackyUnaryOp, c: &TackyConst) -> Option<TackyConst> {
             Some(TackyConst::Int(if *v == 0 { 1 } else { 0 }))
         }
         (TackyUnaryOp::Not, TackyConst::Double(v)) => {
+            Some(TackyConst::Int(if *v == 0.0 { 1 } else { 0 }))
+        }
+        (TackyUnaryOp::Not, TackyConst::Float(v)) => {
             Some(TackyConst::Int(if *v == 0.0 { 1 } else { 0 }))
         }
         _ => None,
@@ -865,6 +916,30 @@ fn replace_uses(instr: TackyInstruction, copies: &HashMap<String, TackyVal>) -> 
             src: sub(&src, copies),
             dst,
         },
+        TackyInstruction::FloatToDouble { src, dst } => TackyInstruction::FloatToDouble {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::DoubleToFloat { src, dst } => TackyInstruction::DoubleToFloat {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::IntToFloat { src, dst } => TackyInstruction::IntToFloat {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::FloatToInt { src, dst } => TackyInstruction::FloatToInt {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::UIntToFloat { src, dst } => TackyInstruction::UIntToFloat {
+            src: sub(&src, copies),
+            dst,
+        },
+        TackyInstruction::FloatToUInt { src, dst } => TackyInstruction::FloatToUInt {
+            src: sub(&src, copies),
+            dst,
+        },
         TackyInstruction::GetAddress { src, dst } => TackyInstruction::GetAddress { src, dst }, // Don't substitute address source
         TackyInstruction::AddPtr {
             ptr,
@@ -959,6 +1034,30 @@ fn get_written_var(instr: &TackyInstruction) -> Option<String> {
             dst: TackyVal::Var(n),
             ..
         }
+        | TackyInstruction::FloatToDouble {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::DoubleToFloat {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::IntToFloat {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::FloatToInt {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::UIntToFloat {
+            dst: TackyVal::Var(n),
+            ..
+        }
+        | TackyInstruction::FloatToUInt {
+            dst: TackyVal::Var(n),
+            ..
+        }
         | TackyInstruction::GetAddress {
             dst: TackyVal::Var(n),
             ..
@@ -1005,6 +1104,7 @@ enum CseVal {
     UInt(u32),
     ULong(u64),
     DoubleBits(u64),
+    FloatBits(u32),
     Char(i8),
     UChar(u8),
 }
@@ -1021,6 +1121,12 @@ enum CseExpr {
     DoubleToInt(CseVal),
     UIntToDouble(CseVal),
     DoubleToUInt(CseVal),
+    FloatToDouble(CseVal),
+    DoubleToFloat(CseVal),
+    IntToFloat(CseVal),
+    FloatToInt(CseVal),
+    UIntToFloat(CseVal),
+    FloatToUInt(CseVal),
 }
 
 fn tacky_val_to_cse(val: &TackyVal) -> CseVal {
@@ -1032,6 +1138,7 @@ fn tacky_val_to_cse(val: &TackyVal) -> CseVal {
             TackyConst::UInt(v) => CseVal::UInt(*v),
             TackyConst::ULong(v) => CseVal::ULong(*v),
             TackyConst::Double(v) => CseVal::DoubleBits(v.to_bits()),
+            TackyConst::Float(v) => CseVal::FloatBits(v.to_bits()),
             TackyConst::Char(v) => CseVal::Char(*v),
             TackyConst::UChar(v) => CseVal::UChar(*v),
         },
@@ -1047,6 +1154,8 @@ fn is_commutative(op: TackyBinaryOp) -> bool {
             | TackyBinaryOp::NotEqual
             | TackyBinaryOp::AddDouble
             | TackyBinaryOp::MulDouble
+            | TackyBinaryOp::AddFloat
+            | TackyBinaryOp::MulFloat
             | TackyBinaryOp::BitwiseAnd
             | TackyBinaryOp::BitwiseOr
             | TackyBinaryOp::BitwiseXor
@@ -1098,6 +1207,24 @@ fn common_subexpression_elimination(instrs: Vec<TackyInstruction>) -> Vec<TackyI
             }
             TackyInstruction::DoubleToUInt { src, dst } => {
                 Some((CseExpr::DoubleToUInt(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::FloatToDouble { src, dst } => {
+                Some((CseExpr::FloatToDouble(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::DoubleToFloat { src, dst } => {
+                Some((CseExpr::DoubleToFloat(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::IntToFloat { src, dst } => {
+                Some((CseExpr::IntToFloat(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::FloatToInt { src, dst } => {
+                Some((CseExpr::FloatToInt(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::UIntToFloat { src, dst } => {
+                Some((CseExpr::UIntToFloat(tacky_val_to_cse(src)), dst))
+            }
+            TackyInstruction::FloatToUInt { src, dst } => {
+                Some((CseExpr::FloatToUInt(tacky_val_to_cse(src)), dst))
             }
             _ => None,
         };
@@ -1173,7 +1300,13 @@ fn invalidate_cse_var(available: &mut HashMap<CseExpr, String>, var_name: &str) 
             | CseExpr::IntToDouble(v)
             | CseExpr::DoubleToInt(v)
             | CseExpr::UIntToDouble(v)
-            | CseExpr::DoubleToUInt(v) => !cse_val_is_var(v, var_name),
+            | CseExpr::DoubleToUInt(v)
+            | CseExpr::FloatToDouble(v)
+            | CseExpr::DoubleToFloat(v)
+            | CseExpr::IntToFloat(v)
+            | CseExpr::FloatToInt(v)
+            | CseExpr::UIntToFloat(v)
+            | CseExpr::FloatToUInt(v) => !cse_val_is_var(v, var_name),
         }
     });
 }
@@ -1369,7 +1502,13 @@ fn collect_uses(instr: &TackyInstruction, used: &mut HashSet<String>) {
         | TackyInstruction::IntToDouble { src, .. }
         | TackyInstruction::DoubleToInt { src, .. }
         | TackyInstruction::UIntToDouble { src, .. }
-        | TackyInstruction::DoubleToUInt { src, .. } => add_val(src, used),
+        | TackyInstruction::DoubleToUInt { src, .. }
+        | TackyInstruction::FloatToDouble { src, .. }
+        | TackyInstruction::DoubleToFloat { src, .. }
+        | TackyInstruction::IntToFloat { src, .. }
+        | TackyInstruction::FloatToInt { src, .. }
+        | TackyInstruction::UIntToFloat { src, .. }
+        | TackyInstruction::FloatToUInt { src, .. } => add_val(src, used),
         TackyInstruction::GetAddress { src, .. } => add_val(src, used),
         TackyInstruction::Load { src_ptr, .. } => add_val(src_ptr, used),
         TackyInstruction::Store { src, dst_ptr } => {

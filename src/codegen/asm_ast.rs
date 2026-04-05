@@ -57,12 +57,16 @@
 pub enum AsmType {
     /// 8ビット（char）（Chapter 16）
     Byte,
+    /// 16ビット（short）
+    Word,
     /// 32ビット（int）
     Longword,
     /// 64ビット（long）
     Quadword,
     /// 64ビット浮動小数点（double）（Chapter 13）
     Double,
+    /// 32ビット浮動小数点（float）
+    Float,
 }
 
 /// 静的変数/定数の初期値（Chapter 13, 15, 16）。
@@ -71,7 +75,9 @@ pub enum AsmType {
 pub enum StaticInit {
     /// 整数初期値
     IntInit(i64),
-    /// 浮動小数点初期値
+    /// 単精度浮動小数点初期値
+    FloatInit(f32),
+    /// 倍精度浮動小数点初期値
     DoubleInit(f64),
     /// ゼロ初期化（指定バイト数分）（Chapter 15: 配列のゼロ初期化）
     ZeroInit(usize),
@@ -182,12 +188,26 @@ pub enum Instruction {
         dst: Operand,
     },
 
+    /// `movswl`/`movswq src, dst` — word → int/long 符号拡張
+    MovsxWord {
+        asm_type: AsmType,
+        src: Operand,
+        dst: Operand,
+    },
+
     /// `movl src, dst` — 32→64 ゼロ拡張（Chapter 12）
     /// x86-64 で32ビット mov は上位32ビットを自動ゼロクリアする。
     MovZeroExtend { src: Operand, dst: Operand },
 
     /// `movzbl`/`movzbq src, dst` — byte → int/long ゼロ拡張（Chapter 16）
     MovZeroExtendByte {
+        asm_type: AsmType,
+        src: Operand,
+        dst: Operand,
+    },
+
+    /// `movzwl`/`movzwq src, dst` — word → int/long ゼロ拡張
+    MovZeroExtendWord {
         asm_type: AsmType,
         src: Operand,
         dst: Operand,
@@ -237,6 +257,26 @@ pub enum Instruction {
         src: Operand,
         dst: Operand,
     },
+
+    /// `cvtsi2ss` — 整数→float 変換
+    Cvtsi2ss {
+        asm_type: AsmType,
+        src: Operand,
+        dst: Operand,
+    },
+
+    /// `cvttss2si` — float→整数 変換（切り捨て）
+    Cvttss2si {
+        asm_type: AsmType,
+        src: Operand,
+        dst: Operand,
+    },
+
+    /// `cvtss2sd` — float→double 変換
+    Cvtss2sd { src: Operand, dst: Operand },
+
+    /// `cvtsd2ss` — double→float 変換
+    Cvtsd2ss { src: Operand, dst: Operand },
 
     /// `leaq src, dst` — 実効アドレスのロード（Chapter 14）
     Lea { src: Operand, dst: Operand },
@@ -305,6 +345,10 @@ pub enum CondCode {
     B,
     /// `be` — 符号なし小なりイコール（Chapter 12）
     BE,
+    /// `p` — パリティ（unordered FP 比較で NaN 検出）
+    P,
+    /// `np` — ノーパリティ（ordered FP 比較）
+    NP,
 }
 
 /// オペランド（命令の引数）

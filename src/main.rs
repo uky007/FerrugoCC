@@ -209,8 +209,17 @@ struct Cli {
     #[arg(short = 'U', value_name = "MACRO")]
     undefs: Vec<String>,
 
-    /// Input C source file
-    source: PathBuf,
+    /// Compile only (produce .o files, do not link)
+    #[arg(short = 'c')]
+    compile_only: bool,
+
+    /// Output file name
+    #[arg(short = 'o', value_name = "FILE")]
+    output: Option<PathBuf>,
+
+    /// Input source files (.c) and object files (.o)
+    #[arg(required = true)]
+    sources: Vec<PathBuf>,
 }
 
 fn main() {
@@ -326,13 +335,15 @@ fn main() {
         None
     };
 
-    if let Err(e) = driver::run(
-        &cli.source,
+    if let Err(e) = driver::run_multi(
+        &cli.sources,
         stage,
         obf_config,
         driver::PreprocessMode::External,
         &cli.defines,
         &cli.undefs,
+        cli.compile_only,
+        cli.output.as_deref(),
     ) {
         eprintln!("ferrugocc: {e}");
         process::exit(1);

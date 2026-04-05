@@ -1,6 +1,6 @@
 # FerrugoCC — Coverage & Status
 
-> **Version**: v0.3.0 baseline (2026-03-22), updated with post-v0.3.0 improvements (struct return >16B, builtin lowering, implicit array size)
+> **Version**: v0.3.0 baseline (2026-03-22), updated with post-v0.3.0 improvements (struct return >16B, builtin lowering, implicit array size, float independent type, multi-file compilation)
 
 ## C Language Coverage
 
@@ -10,7 +10,9 @@
 | `int`, `unsigned int` | 32-bit |
 | `long`, `unsigned long` | 64-bit (LP64) |
 | `char`, `unsigned char` | 8-bit |
-| `double` | IEEE 754 double-precision |
+| `short`, `unsigned short` | 16-bit (2 bytes) |
+| `float` | IEEE 754 single-precision (4 bytes) |
+| `double` | IEEE 754 double-precision (8 bytes) |
 | `void` | incomplete type, pointer target |
 | `_Bool` | mapped to `int` |
 | Pointers | all levels of indirection |
@@ -24,9 +26,7 @@
 ### Approximate / Limited Types
 | Type | Treatment |
 |------|-----------|
-| `float` | treated as `double` |
 | `long double` | treated as `double` |
-| `short` | treated as `int` |
 | `__uint128_t` | treated as `long` |
 
 ### Not Supported
@@ -44,7 +44,7 @@
 | Ternary `? :` | ✓ |
 | Comma operator | ✓ |
 | sizeof (type and expression) | ✓ |
-| Casts (all integer/pointer types) | ✓ |
+| Casts (integer/pointer/float/double) | ✓ |
 | Compound assignment (`+=`, `-=`, etc.) | ✓ |
 | Prefix/postfix increment/decrement | ✓ |
 | Bitwise operators (`& \| ^ ~ << >>`) | ✓ |
@@ -53,6 +53,13 @@
 | Designated struct initializers (`.field = val`) | ✓ |
 | Local struct array compound init | ✓ |
 | String literal array init (`char s[] = "..."`) | ✓ |
+
+### Compilation Model
+- Multi-file compilation: `ferrugocc file1.c file2.c` → independent compile → link
+- Compile-only: `-c` flag produces `.o` files
+- Output naming: `-o` flag
+- Mixed inputs: `.c` and `.o` files on the same command line
+- OPSEC `preserve_globals`: global symbols preserved for cross-file linking
 
 ### Preprocessing
 - External preprocessor: `gcc -E -P`
@@ -99,12 +106,16 @@
 | sbase-uniq | 5 | ✓ | ✓ | Line dedup, memcmp, realloc |
 
 ### Meaning-Preservation Tests
-22 categories verifying `normal.stdout == obfuscated.stdout`:
+31 categories verifying `normal.stdout == obfuscated.stdout`:
 arithmetic, strings, loops/arrays, struct/pointer, function pointers,
 switch/case, recursion, globals, variadic, bitwise, logical/ternary,
 pointer arithmetic, enum, long arithmetic, nested structs, do-while/break,
 initializers, linked list, builtin abs, builtin bits,
-large struct return (direct), large struct return (indirect).
+large struct return (direct), large struct return (indirect),
+float arithmetic, float static, float conversions, float ABI,
+float printf, float compound (arrays, structs, ternary, pointers),
+user-defined variadic, user-defined variadic (loop),
+short arithmetic.
 
 ## Obfuscation Passes
 
@@ -129,7 +140,11 @@ large struct return (direct), large struct return (indirect).
 
 ## Known Limitations
 
-1. **`float` precision**: Treated as `double` — no single-precision IEEE 754. This does not affect any current corpus (none use `float`-specific precision).
+No language-feature limitations remain. `float` is fully supported as an independent IEEE 754 single-precision type since post-v0.3.0.
+
+### Open Issues
+
+_(None. User-defined variadic obfuscation bug was resolved by lowering VaArg at the TACKY IR level instead of the codegen level.)_
 
 ## Platform Support
 

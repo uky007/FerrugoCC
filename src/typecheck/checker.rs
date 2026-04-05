@@ -60,7 +60,7 @@ use std::collections::HashMap;
 use crate::error::{CompileError, Result};
 use crate::parse::ast::{
     BinaryOp, BlockItem, Declaration, Expr, ForInit, FunctionDecl, Program, Statement,
-    TopLevelDecl, Type, UnaryOp, struct_member_offset_ex,
+    TopLevelDecl, Type, UnaryOp, has_fam, struct_member_offset_ex,
 };
 
 /// シンボルの型情報。
@@ -275,14 +275,17 @@ fn typecheck_local_declaration(
         // Chapter 18: 複合初期化子の検査
         if let Expr::CompoundInit(inits) = init {
             if let Type::Struct { ref members, .. } = decl.var_type {
-                if inits.len() != members.len() {
+                // FAM (flexible array member) は初期化子に含めない
+                let expected = if has_fam(members) { members.len() - 1 } else { members.len() };
+                if inits.len() != expected {
                     return Err(CompileError::TypeError(format!(
                         "wrong number of initializers for struct (expected {}, got {})",
-                        members.len(),
+                        expected,
                         inits.len()
                     )));
                 }
-                for (init_expr, member) in inits.iter_mut().zip(members.iter()) {
+                let init_members = if has_fam(members) { &members[..members.len() - 1] } else { members };
+                for (init_expr, member) in inits.iter_mut().zip(init_members.iter()) {
                     let init_type = typecheck_expr(init_expr, symbols)?;
                     if init_type != member.member_type {
                         let old = std::mem::replace(init_expr, Expr::Constant(0));
@@ -535,10 +538,10 @@ fn typecheck_statement(
         Statement::Break | Statement::Continue => Ok(()),
         Statement::Switch { expr, body } => {
             let expr_type = typecheck_expr(expr, symbols)?;
-            // switch 式は整数型のみ（void/struct/double/pointer は不可）
+            // switch 式は整数型のみ（void/struct/float/double/pointer は不可）
             if expr_type.is_void()
                 || expr_type.is_struct()
-                || expr_type.is_double()
+                || expr_type.is_floating()
                 || expr_type.is_pointer()
             {
                 return Err(CompileError::TypeError(
@@ -583,6 +586,7 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         Expr::ConstantULong(_) => Ok(Type::ULong),
 
         Expr::ConstantDouble(_) => Ok(Type::Double),
+        Expr::ConstantFloat(_) => Ok(Type::Float),
 
         Expr::Cast {
             target_type,
@@ -601,15 +605,15 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                     "cannot cast void expression to non-void type".to_string(),
                 ));
             }
-            // ポインタ ↔ double のキャストは禁止
-            if target_type.is_pointer() && actual_source == Type::Double {
+            // ポインタ ↔ float/double のキャストは禁止
+            if target_type.is_pointer() && actual_source.is_floating() {
                 return Err(CompileError::TypeError(
-                    "cannot cast 'double' to pointer type".to_string(),
+                    "cannot cast floating-point to pointer type".to_string(),
                 ));
             }
-            if target_type.is_double() && actual_source.is_pointer() {
+            if target_type.is_floating() && actual_source.is_pointer() {
                 return Err(CompileError::TypeError(
-                    "cannot cast pointer type to 'double'".to_string(),
+                    "cannot cast pointer type to floating-point".to_string(),
                 ));
             }
             Ok(target_type.clone())
@@ -777,9 +781,10 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                                 .to_string(),
                         ));
                     }
-                    if inner_type == Type::Double {
+                    if inner_type.is_floating() {
                         return Err(CompileError::TypeError(
-                            "bitwise complement '~' cannot be applied to double".to_string(),
+                            "bitwise complement '~' cannot be applied to floating-point"
+                                .to_string(),
                         ));
                     }
                     if inner_type.is_pointer() {
@@ -1038,9 +1043,9 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                         )));
                     }
                     let common = common_type(&left_type, &right_type);
-                    if matches!(op, BinaryOp::Remainder) && common == Type::Double {
+                    if matches!(op, BinaryOp::Remainder) && common.is_floating() {
                         return Err(CompileError::TypeError(
-                            "remainder '%' cannot be applied to double".to_string(),
+                            "remainder '%' cannot be applied to floating-point".to_string(),
                         ));
                     }
                     convert_operand(left, &left_type, &common);
@@ -1061,9 +1066,9 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                             op
                         )));
                     }
-                    if left_type == Type::Double || right_type == Type::Double {
+                    if left_type.is_floating() || right_type.is_floating() {
                         return Err(CompileError::TypeError(
-                            "bitwise operator cannot be applied to double".to_string(),
+                            "bitwise operator cannot be applied to floating-point".to_string(),
                         ));
                     }
                     let common = common_type(&left_type, &right_type);
@@ -1085,9 +1090,9 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
                             "shift operator cannot be applied to pointer types".to_string(),
                         ));
                     }
-                    if left_type == Type::Double || right_type == Type::Double {
+                    if left_type.is_floating() || right_type.is_floating() {
                         return Err(CompileError::TypeError(
-                            "shift operator cannot be applied to double".to_string(),
+                            "shift operator cannot be applied to floating-point".to_string(),
                         ));
                     }
                     // 各オペランドを独立に整数昇格
@@ -1346,11 +1351,36 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         }
 
         Expr::SizeOfExpr(inner) => {
-            // Var の場合は配列 decay 前の型（配列サイズを保持）をシンボルテーブルから取得
+            // sizeof の引数は配列 decay 前の型を取得する必要がある
             let actual_type = if let Expr::Var(name) = inner.as_ref() {
+                // Var: シンボルテーブルから decay 前の型を取得
                 match symbols.get(name) {
                     Some(SymbolType::Variable(t)) => t.clone(),
                     _ => typecheck_expr(inner, symbols)?,
+                }
+            } else if matches!(inner.as_ref(), Expr::Dot(..)) {
+                // Dot: struct メンバの decay 前の型を取得（sizeof(s.arr) で配列サイズ保持）
+                let Expr::Dot(struct_expr, member_name) = inner.as_mut() else {
+                    unreachable!()
+                };
+                let inner_type = typecheck_expr(struct_expr, symbols)?;
+                match &inner_type {
+                    Type::Struct {
+                        members, is_union, ..
+                    } => match struct_member_offset_ex(members, member_name, *is_union) {
+                        Some((_, member_type)) => member_type,
+                        None => {
+                            return Err(CompileError::TypeError(format!(
+                                "member access on non-existent member '{}'",
+                                member_name
+                            )))
+                        }
+                    },
+                    _ => {
+                        return Err(CompileError::TypeError(
+                            "member access on non-struct type".to_string(),
+                        ))
+                    }
                 }
             } else {
                 typecheck_expr(inner, symbols)?
@@ -1390,6 +1420,68 @@ fn typecheck_expr(expr: &mut Expr, symbols: &HashMap<String, SymbolType>) -> Res
         Expr::CompoundInit(_) => Err(CompileError::TypeError(
             "compound initializer not allowed in expression context".to_string(),
         )),
+
+        // Compound literal: (type){ init }
+        Expr::CompoundLiteral { target_type, init } => {
+            // Type-check the init expression (it's a CompoundInit)
+            // For structs: check each member
+            // For arrays: check each element
+            // For scalars: check the single value
+            if let Expr::CompoundInit(inits) = init.as_mut() {
+                if let Type::Struct { members, .. } = target_type {
+                    // struct compound literal: check each member
+                    for (i, init_expr) in inits.iter_mut().enumerate() {
+                        if i < members.len() {
+                            let member_type = &members[i].member_type;
+                            let init_type = typecheck_expr(init_expr, symbols)?;
+                            if init_type != *member_type {
+                                let old =
+                                    std::mem::replace(init_expr, Expr::Constant(0));
+                                *init_expr = Expr::Cast {
+                                    target_type: member_type.clone(),
+                                    source_type: init_type,
+                                    expr: Box::new(old),
+                                };
+                            }
+                        }
+                    }
+                } else if let Type::Array(elem_type, _) = target_type {
+                    // array compound literal: check each element
+                    for init_expr in inits.iter_mut() {
+                        let init_type = typecheck_expr(init_expr, symbols)?;
+                        if init_type != **elem_type {
+                            let old =
+                                std::mem::replace(init_expr, Expr::Constant(0));
+                            *init_expr = Expr::Cast {
+                                target_type: *elem_type.clone(),
+                                source_type: init_type,
+                                expr: Box::new(old),
+                            };
+                        }
+                    }
+                } else {
+                    // scalar compound literal: (int){42}, (float){1}, etc.
+                    if let Some(init_expr) = inits.first_mut() {
+                        let init_type = typecheck_expr(init_expr, symbols)?;
+                        if init_type != *target_type {
+                            let old =
+                                std::mem::replace(init_expr, Expr::Constant(0));
+                            *init_expr = Expr::Cast {
+                                target_type: target_type.clone(),
+                                source_type: init_type,
+                                expr: Box::new(old),
+                            };
+                        }
+                    }
+                }
+            }
+            // Array compound literals decay to pointer in expression context
+            if let Type::Array(elem, _) = target_type {
+                Ok(Type::Pointer(elem.clone()))
+            } else {
+                Ok(target_type.clone())
+            }
+        }
 
         Expr::VaStart(ap) => {
             let ap_type = typecheck_expr(ap, symbols)?;
@@ -1445,10 +1537,32 @@ fn resolve_constant(expr: &mut Expr) {
                 *expr = Expr::ConstantULong(val);
             }
         }
-        Expr::ConstantDouble(_) => {
-            // Double 定数はそのまま
+        Expr::ConstantDouble(_) | Expr::ConstantFloat(_) => {
+            // 浮動小数点定数はそのまま
         }
         _ => {}
+    }
+}
+
+/// C デフォルト引数昇格（C11 6.5.2.2p6）。
+/// variadic の可変長部分および prototype-less 呼び出しの全引数に適用する。
+/// - char / unsigned char / short / unsigned short → int
+/// - float → double
+fn apply_default_argument_promotion(arg: &mut Expr, arg_type: &Type) {
+    let promoted = if arg_type.is_character() || arg_type.is_short() {
+        Some(Type::Int)
+    } else if arg_type.is_float() {
+        Some(Type::Double)
+    } else {
+        None
+    };
+    if let Some(target) = promoted {
+        let old_arg = std::mem::replace(arg, Expr::Constant(0));
+        *arg = Expr::Cast {
+            target_type: target,
+            source_type: arg_type.clone(),
+            expr: Box::new(old_arg),
+        };
     }
 }
 
@@ -1472,18 +1586,10 @@ fn typecheck_call_args(
     let param_types = match &sig.param_types {
         Some(pt) => pt,
         None => {
-            // 引数未指定 — 型チェックのみ行い、引数数・型の整合性はスキップ
+            // 引数未指定 — 型チェックのみ行い、デフォルト引数昇格を適用
             for arg in args.iter_mut() {
                 let arg_type = typecheck_expr(arg, symbols)?;
-                // デフォルト引数昇格: char → int
-                if arg_type.is_character() {
-                    let old_arg = std::mem::replace(arg, Expr::Constant(0));
-                    *arg = Expr::Cast {
-                        target_type: Type::Int,
-                        source_type: arg_type,
-                        expr: Box::new(old_arg),
-                    };
-                }
+                apply_default_argument_promotion(arg, &arg_type);
             }
             return Ok(());
         }
@@ -1536,18 +1642,11 @@ fn typecheck_call_args(
         }
     }
 
-    // 可変長引数部分: デフォルト引数昇格（char → int）
+    // 可変長引数部分: デフォルト引数昇格（char/short → int, float → double）
     if sig.is_variadic {
         for arg in args.iter_mut().skip(param_types.len()) {
             let arg_type = typecheck_expr(arg, symbols)?;
-            if arg_type.is_character() {
-                let old_arg = std::mem::replace(arg, Expr::Constant(0));
-                *arg = Expr::Cast {
-                    target_type: Type::Int,
-                    source_type: arg_type,
-                    expr: Box::new(old_arg),
-                };
-            }
+            apply_default_argument_promotion(arg, &arg_type);
         }
     }
 
@@ -1624,16 +1723,19 @@ fn integer_promote(t: &Type) -> Type {
 }
 
 fn common_type(a: &Type, b: &Type) -> Type {
-    // Integer promotion: Char/UChar → Int（Chapter 16）
-    let a = if a.is_character() { &Type::Int } else { a };
-    let b = if b.is_character() { &Type::Int } else { b };
+    // Integer promotion: Char/UChar/Short/UShort → Int
+    let a = if a.is_character() || a.is_short() { &Type::Int } else { a };
+    let b = if b.is_character() || b.is_short() { &Type::Int } else { b };
 
     if a == b {
         return a.clone();
     }
-    // Double is the highest rank (Chapter 13)
+    // Floating-point promotion: double > float > integer types
     if *a == Type::Double || *b == Type::Double {
         return Type::Double;
+    }
+    if *a == Type::Float || *b == Type::Float {
+        return Type::Float;
     }
     // If either is ULong, result is ULong
     if *a == Type::ULong || *b == Type::ULong {

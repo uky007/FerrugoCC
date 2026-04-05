@@ -77,6 +77,13 @@ pub fn emit(program: &AsmProgram) -> Result<String> {
     for constant in &program.static_constants {
         emit_static_constant(&mut out, constant)?;
     }
+    // FerrugoCC watermark section (SHF_ALLOC: survives strip)
+    writeln!(out, "    .section .ferrugo_sig,\"a\",@note")
+        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    writeln!(out, "    .byte 0x46,0x45,0x52,0x52,0x55,0x47,0x4f")
+        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    writeln!(out, "    .byte 0x01,0x00")
+        .map_err(|e| CompileError::EmitError(e.to_string()))?;
     // スタック非実行セクション（セキュリティ慣習）
     writeln!(out, "    .section .note.GNU-stack,\"\",@progbits")
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
@@ -111,9 +118,11 @@ fn static_init_size(init: &StaticInit, asm_type: &AsmType) -> usize {
     match init {
         StaticInit::IntInit(_) => match asm_type {
             AsmType::Byte => 1,
+            AsmType::Word => 2,
             AsmType::Longword => 4,
             _ => 8,
         },
+        StaticInit::FloatInit(_) => 4,
         StaticInit::DoubleInit(_) => 8,
         StaticInit::ZeroInit(n) => *n,
         StaticInit::StringInit(_, n) => *n,
@@ -154,7 +163,8 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
                     .sum();
                 let elem_align = match var.asm_type {
                     AsmType::Byte => 1,
-                    AsmType::Longword => 4,
+                    AsmType::Word => 2,
+                    AsmType::Longword | AsmType::Float => 4,
                     AsmType::Quadword | AsmType::Double => 8,
                 };
                 (std::cmp::max(elem_align, 16), total_size)
@@ -162,7 +172,8 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
         }
         _ => match var.asm_type {
             AsmType::Byte => (1, 1),
-            AsmType::Longword => (4, 4),
+            AsmType::Word => (2, 2),
+            AsmType::Longword | AsmType::Float => (4, 4),
             AsmType::Quadword | AsmType::Double => (8, 8),
         },
     };
@@ -173,7 +184,8 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
 
     let is_zero = match &var.init {
         StaticInit::IntInit(v) => *v == 0,
-        // Double は -0.0 と +0.0 を区別するため常に .data に配置
+        // 浮動小数点は -0.0 と +0.0 を区別するため常に .data に配置
+        StaticInit::FloatInit(_) => false,
         StaticInit::DoubleInit(_) => false,
         // 配列のゼロ初期化は .bss に配置（Chapter 15）
         StaticInit::ZeroInit(_) => true,
@@ -195,10 +207,15 @@ fn emit_static_var(out: &mut String, var: &AsmStaticVar) -> Result<()> {
             StaticInit::IntInit(v) => {
                 let directive = match var.asm_type {
                     AsmType::Byte => "byte",
+                    AsmType::Word => "word",
                     AsmType::Longword => "long",
                     _ => "quad",
                 };
                 writeln!(out, "    .{directive} {v}")
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
+            StaticInit::FloatInit(v) => {
+                writeln!(out, "    .long {}", v.to_bits())
                     .map_err(|e| CompileError::EmitError(e.to_string()))?;
             }
             StaticInit::DoubleInit(v) => {
@@ -241,10 +258,15 @@ fn emit_array_init_data(out: &mut String, elems: &[StaticInit], asm_type: &AsmTy
             StaticInit::IntInit(v) => {
                 let directive = match asm_type {
                     AsmType::Byte => "byte",
+                    AsmType::Word => "word",
                     AsmType::Longword => "long",
                     _ => "quad",
                 };
                 writeln!(out, "    .{directive} {v}")
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
+            StaticInit::FloatInit(v) => {
+                writeln!(out, "    .long {}", v.to_bits())
                     .map_err(|e| CompileError::EmitError(e.to_string()))?;
             }
             StaticInit::DoubleInit(v) => {
@@ -291,6 +313,15 @@ fn emit_static_constant(out: &mut String, constant: &AsmStaticConstant) -> Resul
         StaticInit::IntInit(v) => {
             writeln!(out, "    .quad {v}").map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
+        StaticInit::FloatInit(v) => {
+            writeln!(out, "    .long {}", v.to_bits())
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            // xorps reads 128 bits; pad to 16 bytes when 16-byte aligned (sign mask)
+            if constant.alignment >= 16 {
+                writeln!(out, "    .zero 12")
+                    .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            }
+        }
         StaticInit::DoubleInit(v) => {
             writeln!(out, "    .quad {}", v.to_bits())
                 .map_err(|e| CompileError::EmitError(e.to_string()))?;
@@ -321,6 +352,10 @@ fn emit_static_constant(out: &mut String, constant: &AsmStaticConstant) -> Resul
                         writeln!(out, "    .quad {v}")
                             .map_err(|e| CompileError::EmitError(e.to_string()))?;
                     }
+                    StaticInit::FloatInit(v) => {
+                        writeln!(out, "    .long {}", v.to_bits())
+                            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+                    }
                     StaticInit::DoubleInit(v) => {
                         writeln!(out, "    .quad {}", v.to_bits())
                             .map_err(|e| CompileError::EmitError(e.to_string()))?;
@@ -345,6 +380,14 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
                 writeln!(
                     out,
                     "    movsd {}, {}",
+                    format_operand_typed(src, asm_type),
+                    format_operand_typed(dst, asm_type)
+                )
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            } else if *asm_type == AsmType::Float {
+                writeln!(
+                    out,
+                    "    movss {}, {}",
                     format_operand_typed(src, asm_type),
                     format_operand_typed(dst, asm_type)
                 )
@@ -381,10 +424,17 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
         // Chapter 2/13: 比較命令
         Instruction::Cmp { asm_type, src, dst } => {
             if *asm_type == AsmType::Double {
-                // comisd for double comparison
                 writeln!(
                     out,
                     "    comisd {}, {}",
+                    format_operand_typed(src, asm_type),
+                    format_operand_typed(dst, asm_type)
+                )
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            } else if *asm_type == AsmType::Float {
+                writeln!(
+                    out,
+                    "    comiss {}, {}",
                     format_operand_typed(src, asm_type),
                     format_operand_typed(dst, asm_type)
                 )
@@ -427,6 +477,27 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
                     | AsmBinaryOp::Sal
                     | AsmBinaryOp::Sar
                     | AsmBinaryOp::Shr => unreachable!("bitwise/shift ops not for Double type"),
+                };
+                writeln!(
+                    out,
+                    "    {mnemonic} {}, {}",
+                    format_operand_typed(src, asm_type),
+                    format_operand_typed(dst, asm_type)
+                )
+                .map_err(|e| CompileError::EmitError(e.to_string()))?;
+            } else if *asm_type == AsmType::Float {
+                let mnemonic = match op {
+                    AsmBinaryOp::Add => "addss",
+                    AsmBinaryOp::Sub => "subss",
+                    AsmBinaryOp::Mult => "mulss",
+                    AsmBinaryOp::DivDouble => "divss",
+                    AsmBinaryOp::Xor => "xorps",
+                    AsmBinaryOp::And
+                    | AsmBinaryOp::Or
+                    | AsmBinaryOp::BitXor
+                    | AsmBinaryOp::Sal
+                    | AsmBinaryOp::Sar
+                    | AsmBinaryOp::Shr => unreachable!("bitwise/shift ops not for Float type"),
                 };
                 writeln!(
                     out,
@@ -492,7 +563,7 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
             let mnemonic = match asm_type {
                 AsmType::Longword => "cdq",
                 AsmType::Quadword => "cqo",
-                AsmType::Byte | AsmType::Double => {
+                AsmType::Byte | AsmType::Word | AsmType::Double | AsmType::Float => {
                     unreachable!("SignExtend not applicable to {:?}", asm_type)
                 }
             };
@@ -546,6 +617,28 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
                 out,
                 "    movzb{suffix} {}, {}",
                 format_operand_byte(src),
+                format_operand_typed(dst, asm_type)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        // word → int/long 符号拡張（movswl/movswq）
+        Instruction::MovsxWord { asm_type, src, dst } => {
+            let suffix = type_suffix(asm_type);
+            writeln!(
+                out,
+                "    movsw{suffix} {}, {}",
+                format_operand_word(src),
+                format_operand_typed(dst, asm_type)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        // word → int/long ゼロ拡張（movzwl/movzwq）
+        Instruction::MovZeroExtendWord { asm_type, src, dst } => {
+            let suffix = type_suffix(asm_type);
+            writeln!(
+                out,
+                "    movzw{suffix} {}, {}",
+                format_operand_word(src),
                 format_operand_typed(dst, asm_type)
             )
             .map_err(|e| CompileError::EmitError(e.to_string()))?;
@@ -636,6 +729,48 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
             )
             .map_err(|e| CompileError::EmitError(e.to_string()))?;
         }
+        // 整数→float 変換
+        Instruction::Cvtsi2ss { asm_type, src, dst } => {
+            let suffix = type_suffix(asm_type);
+            writeln!(
+                out,
+                "    cvtsi2ss{suffix} {}, {}",
+                format_operand_typed(src, asm_type),
+                format_operand_xmm(dst)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        // float→整数 変換（切り捨て）
+        Instruction::Cvttss2si { asm_type, src, dst } => {
+            let suffix = type_suffix(asm_type);
+            writeln!(
+                out,
+                "    cvttss2si{suffix} {}, {}",
+                format_operand_xmm(src),
+                format_operand_typed(dst, asm_type)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        // float→double 変換
+        Instruction::Cvtss2sd { src, dst } => {
+            writeln!(
+                out,
+                "    cvtss2sd {}, {}",
+                format_operand_xmm(src),
+                format_operand_xmm(dst)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
+        // double→float 変換
+        Instruction::Cvtsd2ss { src, dst } => {
+            writeln!(
+                out,
+                "    cvtsd2ss {}, {}",
+                format_operand_xmm(src),
+                format_operand_xmm(dst)
+            )
+            .map_err(|e| CompileError::EmitError(e.to_string()))?;
+        }
         // Chapter 14: LEA（実効アドレスロード）
         Instruction::Lea { src, dst } => {
             writeln!(
@@ -677,9 +812,11 @@ fn emit_instruction(out: &mut String, instr: &Instruction) -> Result<()> {
 fn type_suffix(asm_type: &AsmType) -> &'static str {
     match asm_type {
         AsmType::Byte => "b",
+        AsmType::Word => "w",
         AsmType::Longword => "l",
         AsmType::Quadword => "q",
         AsmType::Double => "sd",
+        AsmType::Float => "ss",
     }
 }
 
@@ -687,9 +824,11 @@ fn type_suffix(asm_type: &AsmType) -> &'static str {
 fn format_operand_typed(operand: &Operand, asm_type: &AsmType) -> String {
     match asm_type {
         AsmType::Byte => format_operand_byte(operand),
+        AsmType::Word => format_operand_word(operand),
         AsmType::Longword => format_operand(operand),
         AsmType::Quadword => format_operand_quad(operand),
         AsmType::Double => format_operand_xmm(operand),
+        AsmType::Float => format_operand_xmm(operand),
     }
 }
 
@@ -714,6 +853,21 @@ fn format_operand_byte(operand: &Operand) -> String {
     match operand {
         Operand::Imm(value) => format!("${value}"),
         Operand::Register(reg) => format_register_byte(reg).to_string(),
+        Operand::Pseudo(name) => panic!("BUG: Pseudo '{}' survived to emission", name),
+        Operand::Stack(offset) => format!("{offset}(%rbp)"),
+        Operand::Data(name) => format!("{name}(%rip)"),
+        Operand::Memory(reg) => format!("({})", format_register_quad(reg)),
+        Operand::MemoryOffset(reg, offset) => format!("{offset}({})", format_register_quad(reg)),
+    }
+}
+
+/// オペランドを AT&T 構文の文字列に変換する（16ビット版）。
+///
+/// `Reg::AX` → `%ax`（EAX の下位16ビット）
+fn format_operand_word(operand: &Operand) -> String {
+    match operand {
+        Operand::Imm(value) => format!("${value}"),
+        Operand::Register(reg) => format_register_word(reg).to_string(),
         Operand::Pseudo(name) => panic!("BUG: Pseudo '{}' survived to emission", name),
         Operand::Stack(offset) => format!("{offset}(%rbp)"),
         Operand::Data(name) => format!("{name}(%rip)"),
@@ -888,6 +1042,44 @@ fn format_register_byte(reg: &Reg) -> &'static str {
     }
 }
 
+/// レジスタ名を16ビット表記で返す。
+fn format_register_word(reg: &Reg) -> &'static str {
+    match reg {
+        Reg::AX => "%ax",
+        Reg::BX => "%bx",
+        Reg::CX => "%cx",
+        Reg::DX => "%dx",
+        Reg::DI => "%di",
+        Reg::SI => "%si",
+        Reg::R8 => "%r8w",
+        Reg::R9 => "%r9w",
+        Reg::R10 => "%r10w",
+        Reg::R11 => "%r11w",
+        Reg::R12 => "%r12w",
+        Reg::R13 => "%r13w",
+        Reg::R14 => "%r14w",
+        Reg::R15 => "%r15w",
+        Reg::SP => "%sp",
+        Reg::BP => "%bp",
+        Reg::XMM0
+        | Reg::XMM1
+        | Reg::XMM2
+        | Reg::XMM3
+        | Reg::XMM4
+        | Reg::XMM5
+        | Reg::XMM6
+        | Reg::XMM7
+        | Reg::XMM8
+        | Reg::XMM9
+        | Reg::XMM10
+        | Reg::XMM11
+        | Reg::XMM12
+        | Reg::XMM13
+        | Reg::XMM14
+        | Reg::XMM15 => format_register_xmm(reg),
+    }
+}
+
 /// XMM レジスタかどうかを判定する。
 fn is_xmm_register(reg: &Reg) -> bool {
     matches!(
@@ -924,6 +1116,8 @@ fn format_condition(cc: &CondCode) -> &'static str {
         CondCode::AE => "ae",
         CondCode::B => "b",
         CondCode::BE => "be",
+        CondCode::P => "p",
+        CondCode::NP => "np",
     }
 }
 
@@ -990,7 +1184,7 @@ mod tests {
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
-        let expected = "    .globl main\nmain:\n    push %rbp\n    movq %rsp, %rbp\n    movl $2, %eax\n    pop %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
+        let expected = "    .globl main\nmain:\n    push %rbp\n    movq %rsp, %rbp\n    movl $2, %eax\n    pop %rbp\n    ret\n    .section .ferrugo_sig,\"a\",@note\n    .byte 0x46,0x45,0x52,0x52,0x55,0x47,0x4f\n    .byte 0x01,0x00\n    .section .note.GNU-stack,\"\",@progbits\n";
         assert_eq!(asm, expected);
     }
 
@@ -1378,7 +1572,7 @@ mod tests {
             Instruction::Ret,
         ]);
         let asm = emit(&program).unwrap();
-        let expected = "    .globl main\nmain:\n    push %rbp\n    movq %rsp, %rbp\n    subq $16, %rsp\n    movl $5, %eax\n    movl %eax, -4(%rbp)\n    movl -4(%rbp), %eax\n    addq $16, %rsp\n    pop %rbp\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n";
+        let expected = "    .globl main\nmain:\n    push %rbp\n    movq %rsp, %rbp\n    subq $16, %rsp\n    movl $5, %eax\n    movl %eax, -4(%rbp)\n    movl -4(%rbp), %eax\n    addq $16, %rsp\n    pop %rbp\n    ret\n    .section .ferrugo_sig,\"a\",@note\n    .byte 0x46,0x45,0x52,0x52,0x55,0x47,0x4f\n    .byte 0x01,0x00\n    .section .note.GNU-stack,\"\",@progbits\n";
         assert_eq!(asm, expected);
     }
 

@@ -1,0 +1,73 @@
+name: Evaluation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ dev/future-features, main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  evaluate:
+    name: Run Evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: eval-${{ github.sha }}
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc binutils
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Run tests first
+        run: cargo test
+
+      - name: Run evaluation pipeline
+        run: bash scripts/eval/run_all.sh results/ci
+        continue-on-error: true
+
+      - name: Runtime benchmark (kilo_unit, 100 iterations, L0-L3 only)
+        run: bash scripts/eval/bench_runtime.sh 100
+        continue-on-error: true
+        timeout-minutes: 5
+
+      - name: Install angr
+        run: pip install angr
+        continue-on-error: true
+
+      - name: angr symbolic execution evaluation
+        run: python3 scripts/eval/angr_eval.py results/ci benchmark/expected.txt 30
+        continue-on-error: true
+        timeout-minutes: 15
+
+      - name: Show results summary
+        run: |
+          echo "=== Correctness ==="
+          cat results/ci/correctness.csv 2>/dev/null || echo "(not generated)"
+          echo ""
+          echo "=== Size (first 10) ==="
+          head -11 results/ci/size.csv 2>/dev/null || echo "(not generated)"
+          echo ""
+          echo "=== Compile Time ==="
+          cat results/ci/compile_time.csv 2>/dev/null || echo "(not generated)"
+          echo ""
+          echo "=== Runtime Performance (first 10) ==="
+          head -11 results/ci/performance.csv 2>/dev/null || echo "(not generated)"
+          echo ""
+          echo "=== Decompiler Summary ==="
+          cat results/ci/decompile_summary.md 2>/dev/null || echo "(not generated)"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-results
+          path: results/ci/
+          retention-days: 90

@@ -192,7 +192,12 @@ pub fn obfuscate(
 
     // Pass 16b: OPSEC シンボル難読化（全パスの最後）
     if config.opsec {
-        opsec_sanitize(&mut program, &mut ctx, config.opsec_strip);
+        opsec_sanitize(
+            &mut program,
+            &mut ctx,
+            config.opsec_strip,
+            config.preserve_globals,
+        );
     }
 
     Ok(program)
@@ -1799,6 +1804,30 @@ fn rename_instruction(
             src: rv(src),
             dst: rv(dst),
         },
+        TackyInstruction::FloatToDouble { src, dst } => TackyInstruction::FloatToDouble {
+            src: rv(src),
+            dst: rv(dst),
+        },
+        TackyInstruction::DoubleToFloat { src, dst } => TackyInstruction::DoubleToFloat {
+            src: rv(src),
+            dst: rv(dst),
+        },
+        TackyInstruction::IntToFloat { src, dst } => TackyInstruction::IntToFloat {
+            src: rv(src),
+            dst: rv(dst),
+        },
+        TackyInstruction::FloatToInt { src, dst } => TackyInstruction::FloatToInt {
+            src: rv(src),
+            dst: rv(dst),
+        },
+        TackyInstruction::UIntToFloat { src, dst } => TackyInstruction::UIntToFloat {
+            src: rv(src),
+            dst: rv(dst),
+        },
+        TackyInstruction::FloatToUInt { src, dst } => TackyInstruction::FloatToUInt {
+            src: rv(src),
+            dst: rv(dst),
+        },
         TackyInstruction::GetAddress { src, dst } => TackyInstruction::GetAddress {
             src: rv(src),
             dst: rv(dst),
@@ -1907,10 +1936,10 @@ fn outline_functions(program: &mut TackyProgram, ctx: &mut ObfCtx, min_block_siz
                             .unwrap_or(Type::Int);
                         let has_bad_type = matches!(
                             output_type,
-                            Type::Double | Type::Struct { .. } | Type::Array(_, _)
+                            Type::Float | Type::Double | Type::Struct { .. } | Type::Array(_, _)
                         ) || inputs.iter().any(|name| {
                             let ty = func.var_types.get(name).unwrap_or(&Type::Int);
-                            matches!(ty, Type::Double | Type::Struct { .. } | Type::Array(_, _))
+                            matches!(ty, Type::Float | Type::Double | Type::Struct { .. } | Type::Array(_, _))
                         });
 
                         if !has_bad_type {
@@ -2117,7 +2146,13 @@ fn instruction_all_operands(instr: &TackyInstruction) -> Vec<&TackyVal> {
         | TackyInstruction::IntToDouble { src, dst }
         | TackyInstruction::DoubleToInt { src, dst }
         | TackyInstruction::UIntToDouble { src, dst }
-        | TackyInstruction::DoubleToUInt { src, dst } => vec![src, dst],
+        | TackyInstruction::DoubleToUInt { src, dst }
+        | TackyInstruction::FloatToDouble { src, dst }
+        | TackyInstruction::DoubleToFloat { src, dst }
+        | TackyInstruction::IntToFloat { src, dst }
+        | TackyInstruction::FloatToInt { src, dst }
+        | TackyInstruction::UIntToFloat { src, dst }
+        | TackyInstruction::FloatToUInt { src, dst } => vec![src, dst],
         TackyInstruction::GetAddress { src, dst } => vec![src, dst],
         TackyInstruction::Load { src_ptr, dst } => vec![src_ptr, dst],
         TackyInstruction::Store { src, dst_ptr } => vec![src, dst_ptr],
@@ -2470,8 +2505,8 @@ fn encode_constant(
             var_types,
             |x| TackyConst::UChar(x as u8),
         )),
-        // Double は精度問題があるためスキップ
-        TackyConst::Double(_) => None,
+        // Float/Double は精度問題があるためスキップ
+        TackyConst::Float(_) | TackyConst::Double(_) => None,
     }
 }
 
@@ -3328,7 +3363,7 @@ fn is_vm_eligible(func: &TackyFunction) -> bool {
     if func.body.len() < 2 {
         return false;
     }
-    if func.var_types.values().any(|t| matches!(t, Type::Double)) {
+    if func.var_types.values().any(|t| matches!(t, Type::Float | Type::Double)) {
         return false;
     }
     for instr in &func.body {
@@ -3337,6 +3372,12 @@ fn is_vm_eligible(func: &TackyFunction) -> bool {
             | TackyInstruction::DoubleToInt { .. }
             | TackyInstruction::UIntToDouble { .. }
             | TackyInstruction::DoubleToUInt { .. }
+            | TackyInstruction::FloatToDouble { .. }
+            | TackyInstruction::DoubleToFloat { .. }
+            | TackyInstruction::IntToFloat { .. }
+            | TackyInstruction::FloatToInt { .. }
+            | TackyInstruction::UIntToFloat { .. }
+            | TackyInstruction::FloatToUInt { .. }
             | TackyInstruction::CopyToOffset { .. }
             | TackyInstruction::CopyFromOffset { .. }
             | TackyInstruction::CopyStruct { .. } => return false,
@@ -3616,6 +3657,15 @@ fn control_flow_flattening(
 
     // 単一ブロック関数はスキップ
     if blocks.len() <= 1 {
+        return instrs;
+    }
+
+    // variadic 関数呼び出しを含む関数は CFF をスキップ
+    // (CFF の dispatch ループが variadic ABI のレジスタ設定と干渉する)
+    let has_variadic_call = instrs.iter().any(|i| {
+        matches!(i, TackyInstruction::FunCall { is_variadic: true, .. })
+    });
+    if has_variadic_call {
         return instrs;
     }
 
@@ -4085,15 +4135,21 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 /// - `main`（エントリポイント）
 /// - 外部関数（定義がなく宣言のみ: `printf`, `strcmp` 等）
 /// - ラベル名（`.L` プレフィックス）
-fn opsec_sanitize(program: &mut TackyProgram, ctx: &mut ObfCtx, strip: bool) {
+fn opsec_sanitize(
+    program: &mut TackyProgram,
+    ctx: &mut ObfCtx,
+    strip: bool,
+    preserve_globals: bool,
+) {
     let mut rename_map: HashMap<String, String> = HashMap::new();
 
     // 定義済み関数の名前セットを構築（外部関数の判定に使用）
     let defined_funcs: HashSet<String> = program.functions.iter().map(|f| f.name.clone()).collect();
 
     // 関数名のリネームマップ構築
+    // preserve_globals=true: multi-file でリンク可視性が必要なため global 関数を保持
     for func in &program.functions {
-        if func.name == "main" {
+        if func.name == "main" || (preserve_globals && func.global) {
             continue;
         }
         let new_name = format!("_f{}", ctx.opsec_counter);
@@ -4103,11 +4159,12 @@ fn opsec_sanitize(program: &mut TackyProgram, ctx: &mut ObfCtx, strip: bool) {
 
     // グローバル変数名のリネームマップ構築
     for sv in &program.static_vars {
-        if !rename_map.contains_key(&sv.name) {
-            let new_name = format!("_v{}", ctx.opsec_counter);
-            ctx.opsec_counter += 1;
-            rename_map.insert(sv.name.clone(), new_name);
+        if (preserve_globals && sv.global) || rename_map.contains_key(&sv.name) {
+            continue;
         }
+        let new_name = format!("_v{}", ctx.opsec_counter);
+        ctx.opsec_counter += 1;
+        rename_map.insert(sv.name.clone(), new_name);
     }
 
     // 静的定数名のリネームマップ構築
@@ -4160,13 +4217,18 @@ fn opsec_sanitize(program: &mut TackyProgram, ctx: &mut ObfCtx, strip: bool) {
     }
 
     // .globl 抑制: main 以外の全シンボルを internal linkage にする
+    // preserve_globals 時は元から global だったシンボルを保持（multi-file リンク用）
     if strip {
         for func in &mut program.functions {
-            if func.name != "main" {
-                func.global = false;
+            if func.name == "main" || (preserve_globals && func.global) {
+                continue;
             }
+            func.global = false;
         }
         for sv in &mut program.static_vars {
+            if preserve_globals && sv.global {
+                continue;
+            }
             sv.global = false;
         }
     }
@@ -4255,7 +4317,13 @@ fn opsec_rename_body(
             | TackyInstruction::IntToDouble { src, dst }
             | TackyInstruction::DoubleToInt { src, dst }
             | TackyInstruction::UIntToDouble { src, dst }
-            | TackyInstruction::DoubleToUInt { src, dst } => {
+            | TackyInstruction::DoubleToUInt { src, dst }
+            | TackyInstruction::FloatToDouble { src, dst }
+            | TackyInstruction::DoubleToFloat { src, dst }
+            | TackyInstruction::IntToFloat { src, dst }
+            | TackyInstruction::FloatToInt { src, dst }
+            | TackyInstruction::UIntToFloat { src, dst }
+            | TackyInstruction::FloatToUInt { src, dst } => {
                 opsec_rename_val(src, rename_map);
                 opsec_rename_val(dst, rename_map);
             }

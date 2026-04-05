@@ -404,6 +404,41 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
             }
 
             if is_float {
+                // f/F suffix → float リテラル
+                let is_float_suffix = pos < bytes.len()
+                    && (bytes[pos] == b'f' || bytes[pos] == b'F');
+                if is_float_suffix {
+                    let text = &source[start..pos];
+                    pos += 1;
+                    column += 1;
+                    // 後続文字チェック
+                    if pos < bytes.len()
+                        && (bytes[pos].is_ascii_alphanumeric()
+                            || bytes[pos] == b'_'
+                            || bytes[pos] == b'.')
+                    {
+                        return Err(CompileError::LexError(format!(
+                            "invalid token at line {line}, column {start_col}: \
+                             invalid suffix on floating-point literal"
+                        )));
+                    }
+                    let value: f64 = text.parse().map_err(|e| {
+                        CompileError::LexError(format!(
+                            "invalid floating-point literal '{text}' at line {line}, column {start_col}: {e}"
+                        ))
+                    })?;
+                    tokens.push(Token {
+                        kind: TokenKind::FloatLiteral(value as f32),
+                        span: Span {
+                            offset: start,
+                            len: pos - start,
+                            line,
+                            column: start_col,
+                        },
+                    });
+                    continue;
+                }
+
                 // 後続文字チェック（英字, _, . は不正）
                 if pos < bytes.len()
                     && (bytes[pos].is_ascii_alphabetic()
@@ -728,6 +763,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
                 "unsigned" => TokenKind::KwUnsigned,
                 "signed" => TokenKind::KwSigned,
                 "double" => TokenKind::KwDouble,
+                "float" => TokenKind::KwFloat,
                 "sizeof" => TokenKind::KwSizeof,
                 "char" => TokenKind::KwChar,
                 "struct" => TokenKind::KwStruct,

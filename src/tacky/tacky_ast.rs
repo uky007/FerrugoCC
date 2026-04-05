@@ -94,6 +94,18 @@ pub enum TackyInstruction {
     UIntToDouble { src: TackyVal, dst: TackyVal },
     /// `dst = double_to_uint(src)`
     DoubleToUInt { src: TackyVal, dst: TackyVal },
+    /// `dst = float_to_double(src)` (cvtss2sd)
+    FloatToDouble { src: TackyVal, dst: TackyVal },
+    /// `dst = double_to_float(src)` (cvtsd2ss)
+    DoubleToFloat { src: TackyVal, dst: TackyVal },
+    /// `dst = int_to_float(src)` (cvtsi2ss)
+    IntToFloat { src: TackyVal, dst: TackyVal },
+    /// `dst = float_to_int(src)` (cvttss2si)
+    FloatToInt { src: TackyVal, dst: TackyVal },
+    /// `dst = uint_to_float(src)`
+    UIntToFloat { src: TackyVal, dst: TackyVal },
+    /// `dst = float_to_uint(src)`
+    FloatToUInt { src: TackyVal, dst: TackyVal },
     /// `dst = &src`
     GetAddress { src: TackyVal, dst: TackyVal },
     /// `dst = *src_ptr`
@@ -164,6 +176,7 @@ pub enum TackyConst {
     Long(i64),
     UInt(u32),
     ULong(u64),
+    Float(f32),
     Double(f64),
     Char(i8),
     UChar(u8),
@@ -207,6 +220,11 @@ pub enum TackyBinaryOp {
     SubDouble,
     MulDouble,
     DivDouble,
+    // Float 演算
+    AddFloat,
+    SubFloat,
+    MulFloat,
+    DivFloat,
 }
 
 /// 静的変数
@@ -223,6 +241,7 @@ pub struct TackyStaticVar {
 #[allow(clippy::enum_variant_names)]
 pub enum TackyStaticInit {
     IntInit(i64),
+    FloatInit(f32),
     DoubleInit(f64),
     ZeroInit(usize),
     StringInit(String, usize),

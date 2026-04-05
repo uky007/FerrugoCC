@@ -188,7 +188,7 @@ fn classify_pseudos(
         for_each_operand(instr, |op| {
             if let Operand::Pseudo(name) = op {
                 let ty = var_types.get(name);
-                if ty.is_some_and(|t| t.is_double()) {
+                if ty.is_some_and(|t| t.is_floating()) {
                     xmm.insert(name.clone());
                 } else {
                     gp.insert(name.clone());
@@ -270,6 +270,14 @@ fn instruction_uses(instr: &Instruction) -> Vec<GraphNode> {
             add_operand_nodes_for_use(src, &mut uses);
             add_memory_base_to_uses(dst, &mut uses);
         }
+        Instruction::MovsxWord { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
+        }
+        Instruction::MovZeroExtendWord { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
+        }
         Instruction::Truncate { src, dst, .. } => {
             add_operand_nodes_for_use(src, &mut uses);
             add_memory_base_to_uses(dst, &mut uses);
@@ -292,6 +300,22 @@ fn instruction_uses(instr: &Instruction) -> Vec<GraphNode> {
             add_memory_base_to_uses(dst, &mut uses);
         }
         Instruction::Cvttsd2si { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
+        }
+        Instruction::Cvtsi2ss { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
+        }
+        Instruction::Cvttss2si { src, dst, .. } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
+        }
+        Instruction::Cvtss2sd { src, dst } => {
+            add_operand_nodes_for_use(src, &mut uses);
+            add_memory_base_to_uses(dst, &mut uses);
+        }
+        Instruction::Cvtsd2ss { src, dst } => {
             add_operand_nodes_for_use(src, &mut uses);
             add_memory_base_to_uses(dst, &mut uses);
         }
@@ -352,6 +376,12 @@ fn instruction_defs(instr: &Instruction) -> Vec<GraphNode> {
         Instruction::MovZeroExtendByte { dst, .. } => {
             add_operand_nodes_for_def(dst, &mut defs);
         }
+        Instruction::MovsxWord { dst, .. } => {
+            add_operand_nodes_for_def(dst, &mut defs);
+        }
+        Instruction::MovZeroExtendWord { dst, .. } => {
+            add_operand_nodes_for_def(dst, &mut defs);
+        }
         Instruction::Truncate { dst, .. } => {
             add_operand_nodes_for_def(dst, &mut defs);
         }
@@ -375,6 +405,18 @@ fn instruction_defs(instr: &Instruction) -> Vec<GraphNode> {
             add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::Cvttsd2si { dst, .. } => {
+            add_operand_nodes_for_def(dst, &mut defs);
+        }
+        Instruction::Cvtsi2ss { dst, .. } => {
+            add_operand_nodes_for_def(dst, &mut defs);
+        }
+        Instruction::Cvttss2si { dst, .. } => {
+            add_operand_nodes_for_def(dst, &mut defs);
+        }
+        Instruction::Cvtss2sd { dst, .. } => {
+            add_operand_nodes_for_def(dst, &mut defs);
+        }
+        Instruction::Cvtsd2ss { dst, .. } => {
             add_operand_nodes_for_def(dst, &mut defs);
         }
         Instruction::Lea { dst, .. } => {
@@ -611,8 +653,10 @@ fn build_interference_graph(
             Instruction::Mov { .. }
                 | Instruction::Movsx { .. }
                 | Instruction::MovsxByte { .. }
+                | Instruction::MovsxWord { .. }
                 | Instruction::MovZeroExtend { .. }
                 | Instruction::MovZeroExtendByte { .. }
+                | Instruction::MovZeroExtendWord { .. }
                 | Instruction::Truncate { .. }
         );
 
@@ -1074,6 +1118,16 @@ fn replace_in_instruction(
             src: replace_operand(src, assignments),
             dst: replace_operand(dst, assignments),
         },
+        Instruction::MovsxWord { asm_type, src, dst } => Instruction::MovsxWord {
+            asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::MovZeroExtendWord { asm_type, src, dst } => Instruction::MovZeroExtendWord {
+            asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
         Instruction::Truncate { src, dst } => Instruction::Truncate {
             src: replace_operand(src, assignments),
             dst: replace_operand(dst, assignments),
@@ -1087,6 +1141,24 @@ fn replace_in_instruction(
         },
         Instruction::Cvttsd2si { asm_type, src, dst } => Instruction::Cvttsd2si {
             asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::Cvtsi2ss { asm_type, src, dst } => Instruction::Cvtsi2ss {
+            asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::Cvttss2si { asm_type, src, dst } => Instruction::Cvttss2si {
+            asm_type,
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::Cvtss2sd { src, dst } => Instruction::Cvtss2sd {
+            src: replace_operand(src, assignments),
+            dst: replace_operand(dst, assignments),
+        },
+        Instruction::Cvtsd2ss { src, dst } => Instruction::Cvtsd2ss {
             src: replace_operand(src, assignments),
             dst: replace_operand(dst, assignments),
         },
@@ -1144,7 +1216,7 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             ref src,
             ref dst,
         } if is_memory_operand(src) && is_memory_operand(dst) => {
-            if asm_type == AsmType::Double {
+            if asm_type == AsmType::Double || asm_type == AsmType::Float {
                 out.push(Instruction::Mov {
                     asm_type,
                     src: src.clone(),
@@ -1200,7 +1272,7 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             op,
             ref src,
             ref dst,
-        } if asm_type != AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) => {
+        } if asm_type != AsmType::Double && asm_type != AsmType::Float && is_memory_operand(src) && is_memory_operand(dst) => {
             // imul cannot have memory dst, so load dst into R11
             if matches!(op, AsmBinaryOp::Mult) {
                 out.push(Instruction::Mov {
@@ -1261,9 +1333,9 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             op,
             ref src,
             ref dst,
-        } if asm_type == AsmType::Double && is_memory_operand(dst) => {
+        } if (asm_type == AsmType::Double || asm_type == AsmType::Float) && is_memory_operand(dst) => {
             out.push(Instruction::Mov {
-                asm_type: AsmType::Double,
+                asm_type,
                 src: dst.clone(),
                 dst: Operand::Register(Reg::XMM15),
             });
@@ -1274,7 +1346,7 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
                 dst: Operand::Register(Reg::XMM15),
             });
             out.push(Instruction::Mov {
-                asm_type: AsmType::Double,
+                asm_type,
                 src: Operand::Register(Reg::XMM15),
                 dst: dst.clone(),
             });
@@ -1286,7 +1358,7 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             op: AsmBinaryOp::Mult,
             ref src,
             ref dst,
-        } if asm_type != AsmType::Double && is_memory_operand(dst) => {
+        } if asm_type != AsmType::Double && asm_type != AsmType::Float && is_memory_operand(dst) => {
             out.push(Instruction::Mov {
                 asm_type,
                 src: dst.clone(),
@@ -1310,7 +1382,7 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             asm_type,
             ref src,
             ref dst,
-        } if asm_type != AsmType::Double && is_memory_operand(src) && is_memory_operand(dst) => {
+        } if asm_type != AsmType::Double && asm_type != AsmType::Float && is_memory_operand(src) && is_memory_operand(dst) => {
             out.push(Instruction::Mov {
                 asm_type,
                 src: dst.clone(),
@@ -1495,6 +1567,68 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             });
         }
 
+        // MovsxWord: immediate → just a regular mov
+        Instruction::MovsxWord {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_imm(src) => {
+            out.push(Instruction::Mov {
+                asm_type,
+                src: src.clone(),
+                dst: dst.clone(),
+            });
+        }
+
+        // MovsxWord: dst is memory → via R11 (movswl/movswq requires register destination)
+        Instruction::MovsxWord {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_memory_operand(dst) => {
+            out.push(Instruction::MovsxWord {
+                asm_type,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R11),
+            });
+            out.push(Instruction::Mov {
+                asm_type,
+                src: Operand::Register(Reg::R11),
+                dst: dst.clone(),
+            });
+        }
+
+        // MovZeroExtendWord: immediate → just a regular mov
+        Instruction::MovZeroExtendWord {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_imm(src) => {
+            out.push(Instruction::Mov {
+                asm_type,
+                src: src.clone(),
+                dst: dst.clone(),
+            });
+        }
+
+        // MovZeroExtendWord: dst is memory → via R11 (movzwl/movzwq requires register destination)
+        Instruction::MovZeroExtendWord {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_memory_operand(dst) => {
+            out.push(Instruction::MovZeroExtendWord {
+                asm_type,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R11),
+            });
+            out.push(Instruction::Mov {
+                asm_type,
+                src: Operand::Register(Reg::R11),
+                dst: dst.clone(),
+            });
+        }
+
         // Truncate: memory,memory → via R10
         Instruction::Truncate { ref src, ref dst }
             if is_memory_operand(src) && is_memory_operand(dst) =>
@@ -1590,6 +1724,86 @@ fn fixup_instruction(instr: Instruction, out: &mut Vec<Instruction>) {
             out.push(Instruction::Mov {
                 asm_type,
                 src: Operand::Register(Reg::R11),
+                dst: dst.clone(),
+            });
+        }
+
+        // Cvtsi2ss: same fixup as Cvtsi2sd but for float
+        Instruction::Cvtsi2ss {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_imm(src) || is_memory_operand(dst) => {
+            let fixed_src = if is_imm(src) {
+                out.push(Instruction::Mov {
+                    asm_type,
+                    src: src.clone(),
+                    dst: Operand::Register(Reg::R10),
+                });
+                Operand::Register(Reg::R10)
+            } else {
+                src.clone()
+            };
+            if is_memory_operand(dst) {
+                out.push(Instruction::Cvtsi2ss {
+                    asm_type,
+                    src: fixed_src,
+                    dst: Operand::Register(Reg::XMM15),
+                });
+                out.push(Instruction::Mov {
+                    asm_type: AsmType::Float,
+                    src: Operand::Register(Reg::XMM15),
+                    dst: dst.clone(),
+                });
+            } else {
+                out.push(Instruction::Cvtsi2ss {
+                    asm_type,
+                    src: fixed_src,
+                    dst: dst.clone(),
+                });
+            }
+        }
+
+        // Cvttss2si: memory dst → via R11
+        Instruction::Cvttss2si {
+            asm_type,
+            ref src,
+            ref dst,
+        } if is_memory_operand(dst) => {
+            out.push(Instruction::Cvttss2si {
+                asm_type,
+                src: src.clone(),
+                dst: Operand::Register(Reg::R11),
+            });
+            out.push(Instruction::Mov {
+                asm_type,
+                src: Operand::Register(Reg::R11),
+                dst: dst.clone(),
+            });
+        }
+
+        // Cvtss2sd: XMM src → XMM dst. Fix memory dst → via XMM15
+        Instruction::Cvtss2sd { ref src, ref dst } if is_memory_operand(dst) => {
+            out.push(Instruction::Cvtss2sd {
+                src: src.clone(),
+                dst: Operand::Register(Reg::XMM15),
+            });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Double,
+                src: Operand::Register(Reg::XMM15),
+                dst: dst.clone(),
+            });
+        }
+
+        // Cvtsd2ss: XMM src → XMM dst. Fix memory dst → via XMM15
+        Instruction::Cvtsd2ss { ref src, ref dst } if is_memory_operand(dst) => {
+            out.push(Instruction::Cvtsd2ss {
+                src: src.clone(),
+                dst: Operand::Register(Reg::XMM15),
+            });
+            out.push(Instruction::Mov {
+                asm_type: AsmType::Float,
+                src: Operand::Register(Reg::XMM15),
                 dst: dst.clone(),
             });
         }
@@ -1717,7 +1931,7 @@ fn insert_prologue_epilogue(
 /// 正オフセット（スタック渡し引数）はそのまま維持する。
 fn shift_stack_op(op: Operand, shift: i32) -> Operand {
     match op {
-        Operand::Stack(offset) if offset < 0 => Operand::Stack(offset + shift),
+        Operand::Stack(offset) if offset <= 0 => Operand::Stack(offset + shift),
         other => other,
     }
 }
@@ -1784,6 +1998,16 @@ fn shift_stack_offsets(instr: Instruction, shift: i32) -> Instruction {
             src: shift_stack_op(src, shift),
             dst: shift_stack_op(dst, shift),
         },
+        Instruction::MovsxWord { asm_type, src, dst } => Instruction::MovsxWord {
+            asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::MovZeroExtendWord { asm_type, src, dst } => Instruction::MovZeroExtendWord {
+            asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
         Instruction::Truncate { src, dst } => Instruction::Truncate {
             src: shift_stack_op(src, shift),
             dst: shift_stack_op(dst, shift),
@@ -1797,6 +2021,24 @@ fn shift_stack_offsets(instr: Instruction, shift: i32) -> Instruction {
         },
         Instruction::Cvttsd2si { asm_type, src, dst } => Instruction::Cvttsd2si {
             asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::Cvtsi2ss { asm_type, src, dst } => Instruction::Cvtsi2ss {
+            asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::Cvttss2si { asm_type, src, dst } => Instruction::Cvttss2si {
+            asm_type,
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::Cvtss2sd { src, dst } => Instruction::Cvtss2sd {
+            src: shift_stack_op(src, shift),
+            dst: shift_stack_op(dst, shift),
+        },
+        Instruction::Cvtsd2ss { src, dst } => Instruction::Cvtsd2ss {
             src: shift_stack_op(src, shift),
             dst: shift_stack_op(dst, shift),
         },
@@ -1883,6 +2125,14 @@ fn for_each_operand<F: FnMut(&Operand)>(instr: &Instruction, mut f: F) {
             f(src);
             f(dst);
         }
+        Instruction::MovsxWord { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::MovZeroExtendWord { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
         Instruction::Truncate { src, dst } => {
             f(src);
             f(dst);
@@ -1895,6 +2145,22 @@ fn for_each_operand<F: FnMut(&Operand)>(instr: &Instruction, mut f: F) {
             f(dst);
         }
         Instruction::Cvttsd2si { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::Cvtsi2ss { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::Cvttss2si { src, dst, .. } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::Cvtss2sd { src, dst } => {
+            f(src);
+            f(dst);
+        }
+        Instruction::Cvtsd2ss { src, dst } => {
             f(src);
             f(dst);
         }

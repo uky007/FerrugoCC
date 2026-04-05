@@ -37,8 +37,10 @@ fn type_to_asm(t: &Type) -> AsmType {
     match t {
         Type::Void => unreachable!("void has no assembly representation"),
         Type::Char | Type::UChar => AsmType::Byte,
+        Type::Short | Type::UShort => AsmType::Word,
         Type::Int | Type::UInt => AsmType::Longword,
         Type::Long | Type::ULong => AsmType::Quadword,
+        Type::Float => AsmType::Float,
         Type::Double => AsmType::Double,
         Type::Pointer(_) => AsmType::Quadword,
         Type::Array(_, _) => AsmType::Quadword,
@@ -52,7 +54,8 @@ fn type_to_asm(t: &Type) -> AsmType {
 fn asm_type_size(t: AsmType) -> i32 {
     match t {
         AsmType::Byte => 1,
-        AsmType::Longword => 4,
+        AsmType::Word => 2,
+        AsmType::Longword | AsmType::Float => 4,
         AsmType::Quadword | AsmType::Double => 8,
     }
 }
@@ -95,11 +98,12 @@ pub fn generate(
         }
     }
 
-    // double 定数プール: TACKY の static_constants から構築
-    let mut double_constants: HashMap<u64, (String, usize)> = HashMap::new();
+    // double/float 定数プール: TACKY の static_constants から構築
+    // value = (label, alignment, is_float)
+    let mut double_constants: HashMap<u64, (String, usize, bool)> = HashMap::new();
     for sc in &program.static_constants {
         if let TackyStaticInit::DoubleInit(v) = sc.init {
-            double_constants.insert(v.to_bits(), (sc.name.clone(), sc.alignment));
+            double_constants.insert(v.to_bits(), (sc.name.clone(), sc.alignment, false));
         }
     }
 
@@ -171,11 +175,17 @@ pub fn generate(
     // ソートして決定的な順序で出力
     let mut sorted_doubles: Vec<_> = double_constants.iter().collect();
     sorted_doubles.sort_by_key(|(bits, _)| *bits);
-    for (bits, (name, alignment)) in sorted_doubles {
+    for (bits, (name, alignment, is_float)) in sorted_doubles {
+        let init = if *is_float {
+            // Float constant (key has 0x1_0000_0000 marker bit)
+            StaticInit::FloatInit(f32::from_bits((*bits & 0xFFFF_FFFF) as u32))
+        } else {
+            StaticInit::DoubleInit(f64::from_bits(*bits))
+        };
         static_constants.push(AsmStaticConstant {
             name: name.clone(),
             alignment: *alignment,
-            init: StaticInit::DoubleInit(f64::from_bits(*bits)),
+            init,
         });
     }
 
@@ -185,6 +195,7 @@ pub fn generate(
 fn convert_static_init(init: &TackyStaticInit) -> StaticInit {
     match init {
         TackyStaticInit::IntInit(v) => StaticInit::IntInit(*v),
+        TackyStaticInit::FloatInit(v) => StaticInit::FloatInit(*v),
         TackyStaticInit::DoubleInit(v) => StaticInit::DoubleInit(*v),
         TackyStaticInit::ZeroInit(n) => StaticInit::ZeroInit(*n),
         TackyStaticInit::StringInit(s, n) => StaticInit::StringInit(s.clone(), *n),
@@ -215,7 +226,7 @@ fn classify_parameters(params: &[(Type, String)]) -> ParamClassification {
     let mut locations = Vec::new();
 
     for (param_type, _) in params {
-        if param_type.is_double() {
+        if param_type.is_floating() {
             if xmm_idx < 8 {
                 locations.push((param_type.clone(), ParamLocation::XmmReg(xmm_idx)));
                 xmm_idx += 1;
@@ -278,7 +289,7 @@ fn collect_forced_stack_vars(
 fn generate_function(
     func: &TackyFunction,
     static_vars: &HashMap<String, String>,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
 ) -> Result<CodegenFunctionResult> {
     let mut instructions = Vec::new();
 
@@ -407,18 +418,18 @@ fn generate_function(
                 if func.is_variadic {
                     let reg_save_offset = *stack_vars.get("__va_reg_save").unwrap();
                     instructions.push(Instruction::Mov {
-                        asm_type: AsmType::Double,
+                        asm_type,
                         src: Operand::Stack(reg_save_offset + 48 + (*idx * 16) as i32),
                         dst: Operand::Register(Reg::XMM15),
                     });
                     instructions.push(Instruction::Mov {
-                        asm_type: AsmType::Double,
+                        asm_type,
                         src: Operand::Register(Reg::XMM15),
                         dst: dst_op,
                     });
                 } else {
                     instructions.push(Instruction::Mov {
-                        asm_type: AsmType::Double,
+                        asm_type,
                         src: Operand::Register(XMM_ARG_REGISTERS[*idx]),
                         dst: dst_op,
                     });
@@ -426,14 +437,14 @@ fn generate_function(
             }
             ParamLocation::Stack(stack_offset) => {
                 // Stack-passed parameters: need a scratch register to copy
-                if param_type.is_double() {
+                if param_type.is_floating() {
                     instructions.push(Instruction::Mov {
-                        asm_type: AsmType::Double,
+                        asm_type,
                         src: Operand::Stack(*stack_offset),
                         dst: Operand::Register(Reg::XMM0),
                     });
                     instructions.push(Instruction::Mov {
-                        asm_type: AsmType::Double,
+                        asm_type,
                         src: Operand::Register(Reg::XMM0),
                         dst: dst_op,
                     });
@@ -507,6 +518,9 @@ fn val_to_operand(
             TackyConst::ULong(v) => Ok(Operand::Imm(*v as i64)),
             TackyConst::Char(v) => Ok(Operand::Imm(*v as i64)),
             TackyConst::UChar(v) => Ok(Operand::Imm(*v as i64)),
+            TackyConst::Float(_) => Err(CompileError::CodegenError(
+                "float constant should be loaded from memory".to_string(),
+            )),
             TackyConst::Double(_) => Err(CompileError::CodegenError(
                 "double constant should be loaded from memory".to_string(),
             )),
@@ -523,6 +537,7 @@ fn val_type(val: &TackyVal, var_types: &HashMap<String, Type>) -> Type {
             TackyConst::Long(_) => Type::Long,
             TackyConst::UInt(_) => Type::UInt,
             TackyConst::ULong(_) => Type::ULong,
+            TackyConst::Float(_) => Type::Float,
             TackyConst::Double(_) => Type::Double,
             TackyConst::Char(_) => Type::Char,
             TackyConst::UChar(_) => Type::UChar,
@@ -531,30 +546,43 @@ fn val_type(val: &TackyVal, var_types: &HashMap<String, Type>) -> Type {
     }
 }
 
-/// double 定数をオペランドにロードする
+/// 浮動小数点定数をオペランドにロードする（double / float 共用）
 fn load_double_val(
     val: &TackyVal,
     static_vars: &HashMap<String, String>,
     stack_vars: &HashMap<String, i32>,
     _instrs: &mut Vec<Instruction>,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
     const_label_counter: &mut usize,
 ) -> Operand {
     match val {
         TackyVal::Constant(TackyConst::Double(v)) => {
             let bits = v.to_bits();
-            let label = if let Some((l, _)) = double_constants.get(&bits) {
+            let label = if let Some((l, _, _)) = double_constants.get(&bits) {
                 l.clone()
             } else {
                 let l = format!(".Lconst_{}", *const_label_counter);
                 *const_label_counter += 1;
-                double_constants.insert(bits, (l.clone(), 8));
+                double_constants.insert(bits, (l.clone(), 8, false));
+                l
+            };
+            Operand::Data(label)
+        }
+        TackyVal::Constant(TackyConst::Float(v)) => {
+            // float は 4 バイト定数。bit パターンを u64 に拡張してキーとして使う
+            let bits = v.to_bits() as u64 | 0x1_0000_0000; // 上位ビットで double と区別
+            let label = if let Some((l, _, _)) = double_constants.get(&bits) {
+                l.clone()
+            } else {
+                let l = format!(".Lconst_{}", *const_label_counter);
+                *const_label_counter += 1;
+                double_constants.insert(bits, (l.clone(), 4, true));
                 l
             };
             Operand::Data(label)
         }
         TackyVal::Var(name) => resolve_var_operand(name, static_vars, stack_vars),
-        _ => unreachable!("expected double val"),
+        _ => unreachable!("expected floating-point val"),
     }
 }
 
@@ -565,9 +593,9 @@ fn generate_instruction(
     static_vars: &HashMap<String, String>,
     stack_vars: &HashMap<String, i32>,
     instrs: &mut Vec<Instruction>,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
     var_types: &HashMap<String, Type>,
-    va_label_counter: &mut usize,
+    _va_label_counter: &mut usize,
     func_return_type: &Type,
 ) -> Result<()> {
     let mut const_counter: usize = double_constants.len();
@@ -575,7 +603,7 @@ fn generate_instruction(
     match instr {
         TackyInstruction::Return(val) => {
             let ty = val_type(val, var_types);
-            if ty.is_double() {
+            if ty.is_floating() {
                 let src = load_double_val(
                     val,
                     static_vars,
@@ -584,8 +612,9 @@ fn generate_instruction(
                     double_constants,
                     &mut const_counter,
                 );
+                let fp_asm = if ty.is_float() { AsmType::Float } else { AsmType::Double };
                 instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
+                    asm_type: fp_asm,
                     src,
                     dst: Operand::Register(Reg::XMM0),
                 });
@@ -642,7 +671,7 @@ fn generate_instruction(
 
         TackyInstruction::Copy { src, dst } => {
             let dst_type = val_type(dst, var_types);
-            if dst_type.is_double() {
+            if dst_type.is_floating() {
                 let src_op = load_double_val(
                     src,
                     static_vars,
@@ -652,9 +681,10 @@ fn generate_instruction(
                     &mut const_counter,
                 );
                 let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+                let fp_asm = if dst_type.is_float() { AsmType::Float } else { AsmType::Double };
                 // Chapter 20: direct mov (fixup will handle if both are memory)
                 instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
+                    asm_type: fp_asm,
                     src: src_op,
                     dst: dst_op,
                 });
@@ -676,7 +706,7 @@ fn generate_instruction(
 
             match op {
                 TackyUnaryOp::Negate => {
-                    if dst_type.is_double() {
+                    if dst_type.is_floating() {
                         let src_op = load_double_val(
                             src,
                             static_vars,
@@ -686,26 +716,32 @@ fn generate_instruction(
                             &mut const_counter,
                         );
                         let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+                        let fp_asm = if dst_type.is_float() { AsmType::Float } else { AsmType::Double };
                         instrs.push(Instruction::Mov {
-                            asm_type: AsmType::Double,
+                            asm_type: fp_asm,
                             src: src_op,
                             dst: Operand::Register(Reg::XMM0),
                         });
-                        let neg_zero_bits = 0x8000000000000000u64;
+                        let (neg_zero_bits, neg_align) = if dst_type.is_float() {
+                            (0x1_8000_0000u64, 16) // marker bit + sign mask, 16-byte aligned for xorps
+                        } else {
+                            (0x8000000000000000u64, 16)
+                        };
                         let neg_label = get_or_add_double_constant(
                             neg_zero_bits,
-                            16,
+                            neg_align,
+                            dst_type.is_float(),
                             double_constants,
                             &mut const_counter,
                         );
                         instrs.push(Instruction::Binary {
-                            asm_type: AsmType::Double,
+                            asm_type: fp_asm,
                             op: AsmBinaryOp::Xor,
                             src: Operand::Data(neg_label),
                             dst: Operand::Register(Reg::XMM0),
                         });
                         instrs.push(Instruction::Mov {
-                            asm_type: AsmType::Double,
+                            asm_type: fp_asm,
                             src: Operand::Register(Reg::XMM0),
                             dst: dst_op,
                         });
@@ -744,7 +780,7 @@ fn generate_instruction(
                 }
                 TackyUnaryOp::Not => {
                     let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
-                    if src_type.is_double() {
+                    if src_type.is_floating() {
                         let src_op = load_double_val(
                             src,
                             static_vars,
@@ -753,19 +789,20 @@ fn generate_instruction(
                             double_constants,
                             &mut const_counter,
                         );
+                        let fp_asm = if src_type.is_float() { AsmType::Float } else { AsmType::Double };
                         instrs.push(Instruction::Mov {
-                            asm_type: AsmType::Double,
+                            asm_type: fp_asm,
                             src: src_op,
                             dst: Operand::Register(Reg::XMM0),
                         });
                         instrs.push(Instruction::Binary {
-                            asm_type: AsmType::Double,
+                            asm_type: fp_asm,
                             op: AsmBinaryOp::Xor,
                             src: Operand::Register(Reg::XMM15),
                             dst: Operand::Register(Reg::XMM15),
                         });
                         instrs.push(Instruction::Cmp {
-                            asm_type: AsmType::Double,
+                            asm_type: fp_asm,
                             src: Operand::Register(Reg::XMM15),
                             dst: Operand::Register(Reg::XMM0),
                         });
@@ -881,6 +918,14 @@ fn generate_instruction(
                     src: src_op,
                     dst: dst_op,
                 });
+            } else if src_size == 2 {
+                let dst_type = val_type(dst, var_types);
+                let dst_asm = safe_asm_type(&dst_type);
+                instrs.push(Instruction::MovsxWord {
+                    asm_type: dst_asm,
+                    src: src_op,
+                    dst: dst_op,
+                });
             } else {
                 instrs.push(Instruction::Movsx {
                     src: src_op,
@@ -903,6 +948,14 @@ fn generate_instruction(
                     src: src_op,
                     dst: dst_op,
                 });
+            } else if src_size == 2 {
+                let dst_type = val_type(dst, var_types);
+                let dst_asm = safe_asm_type(&dst_type);
+                instrs.push(Instruction::MovZeroExtendWord {
+                    asm_type: dst_asm,
+                    src: src_op,
+                    dst: dst_op,
+                });
             } else {
                 instrs.push(Instruction::MovZeroExtend {
                     src: src_op,
@@ -912,24 +965,62 @@ fn generate_instruction(
         }
 
         TackyInstruction::Truncate { src, dst } => {
+            let dst_type = val_type(dst, var_types);
             let src_op = val_to_operand(src, static_vars, stack_vars)?;
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
-            instrs.push(Instruction::Truncate {
-                src: src_op,
-                dst: dst_op,
-            });
+            let dst_asm = safe_asm_type(&dst_type);
+            // 16-bit/8-bit への truncate は正しいサイズの Mov を使用
+            // (Truncate は movl 固定で 32-bit 書き込みのため、short/char dst では隣接メモリを破壊する)
+            if matches!(dst_asm, AsmType::Word | AsmType::Byte) {
+                instrs.push(Instruction::Mov {
+                    asm_type: dst_asm,
+                    src: src_op,
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Truncate {
+                    src: src_op,
+                    dst: dst_op,
+                });
+            }
         }
 
         TackyInstruction::IntToDouble { src, dst } => {
             let src_type = val_type(src, var_types);
             let src_op = val_to_operand(src, static_vars, stack_vars)?;
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            let asm_t = safe_asm_type(&src_type);
 
-            instrs.push(Instruction::Cvtsi2sd {
-                asm_type: safe_asm_type(&src_type),
-                src: src_op,
-                dst: dst_op,
-            });
+            // x86-64 の cvtsi2sd は 32-bit/64-bit のみ。16-bit/8-bit は 32-bit に sign-extend してから変換
+            if asm_t == AsmType::Word {
+                instrs.push(Instruction::MovsxWord {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Cvtsi2sd {
+                    asm_type: AsmType::Longword,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else if asm_t == AsmType::Byte {
+                instrs.push(Instruction::MovsxByte {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Cvtsi2sd {
+                    asm_type: AsmType::Longword,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Cvtsi2sd {
+                    asm_type: asm_t,
+                    src: src_op,
+                    dst: dst_op,
+                });
+            }
         }
 
         TackyInstruction::DoubleToInt { src, dst } => {
@@ -943,12 +1034,27 @@ fn generate_instruction(
                 &mut const_counter,
             );
             let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            let asm_t = safe_asm_type(&dst_type);
 
-            instrs.push(Instruction::Cvttsd2si {
-                asm_type: safe_asm_type(&dst_type),
-                src: src_op,
-                dst: dst_op,
-            });
+            // x86-64 の cvttsd2si は 32-bit/64-bit のみ。16-bit/8-bit は 32-bit 経由で truncate
+            if matches!(asm_t, AsmType::Word | AsmType::Byte) {
+                instrs.push(Instruction::Cvttsd2si {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Mov {
+                    asm_type: asm_t,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Cvttsd2si {
+                    asm_type: asm_t,
+                    src: src_op,
+                    dst: dst_op,
+                });
+            }
         }
 
         TackyInstruction::UIntToDouble { src, dst } => {
@@ -1039,6 +1145,7 @@ fn generate_instruction(
             let bound_label = get_or_add_double_constant(
                 9223372036854775808.0f64.to_bits(),
                 8,
+                false,
                 double_constants,
                 &mut const_counter,
             );
@@ -1048,6 +1155,263 @@ fn generate_instruction(
                 src: src_op,
                 dst: Operand::Register(Reg::XMM0),
             });
+            instrs.push(Instruction::Cmp {
+                asm_type: AsmType::Double,
+                src: Operand::Data(bound_label.clone()),
+                dst: Operand::Register(Reg::XMM0),
+            });
+            instrs.push(Instruction::JmpCC(CondCode::AE, out_of_range_label.clone()));
+            instrs.push(Instruction::Cvttsd2si {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::XMM0),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Jmp(end_label.clone()));
+            instrs.push(Instruction::Label(out_of_range_label));
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Double,
+                src: Operand::Register(Reg::XMM0),
+                dst: Operand::Register(Reg::XMM14),
+            });
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Double,
+                op: AsmBinaryOp::Sub,
+                src: Operand::Data(bound_label),
+                dst: Operand::Register(Reg::XMM14),
+            });
+            instrs.push(Instruction::Cvttsd2si {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::XMM14),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Imm(i64::MIN),
+                dst: Operand::Register(Reg::CX),
+            });
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Quadword,
+                op: AsmBinaryOp::Add,
+                src: Operand::Register(Reg::CX),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Label(end_label));
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::AX),
+                dst: dst_op,
+            });
+        }
+
+        // Float conversion instructions — for now, delegate to double equivalents
+        TackyInstruction::FloatToDouble { src, dst } => {
+            let src_op = load_double_val(
+                src,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+            );
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            instrs.push(Instruction::Cvtss2sd {
+                src: src_op,
+                dst: dst_op,
+            });
+        }
+
+        TackyInstruction::DoubleToFloat { src, dst } => {
+            let src_op = load_double_val(
+                src,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+            );
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            instrs.push(Instruction::Cvtsd2ss {
+                src: src_op,
+                dst: dst_op,
+            });
+        }
+
+        TackyInstruction::IntToFloat { src, dst } => {
+            let src_type = val_type(src, var_types);
+            let src_op = val_to_operand(src, static_vars, stack_vars)?;
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            let asm_t = safe_asm_type(&src_type);
+
+            // x86-64 の cvtsi2ss は 32-bit/64-bit のみ。16-bit/8-bit は 32-bit に sign-extend してから変換
+            if asm_t == AsmType::Word {
+                instrs.push(Instruction::MovsxWord {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Cvtsi2ss {
+                    asm_type: AsmType::Longword,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else if asm_t == AsmType::Byte {
+                instrs.push(Instruction::MovsxByte {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Cvtsi2ss {
+                    asm_type: AsmType::Longword,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Cvtsi2ss {
+                    asm_type: asm_t,
+                    src: src_op,
+                    dst: dst_op,
+                });
+            }
+        }
+
+        TackyInstruction::FloatToInt { src, dst } => {
+            let dst_type = val_type(dst, var_types);
+            let src_op = load_double_val(
+                src,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+            );
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+            let asm_t = safe_asm_type(&dst_type);
+
+            // x86-64 の cvttss2si は 32-bit/64-bit のみ。16-bit/8-bit は 32-bit 経由で truncate
+            if matches!(asm_t, AsmType::Word | AsmType::Byte) {
+                instrs.push(Instruction::Cvttss2si {
+                    asm_type: AsmType::Longword,
+                    src: src_op,
+                    dst: Operand::Register(Reg::AX),
+                });
+                instrs.push(Instruction::Mov {
+                    asm_type: asm_t,
+                    src: Operand::Register(Reg::AX),
+                    dst: dst_op,
+                });
+            } else {
+                instrs.push(Instruction::Cvttss2si {
+                    asm_type: asm_t,
+                    src: src_op,
+                    dst: dst_op,
+                });
+            }
+        }
+
+        TackyInstruction::UIntToFloat { src, dst } => {
+            // unsigned long → float: 既存の unsigned→double 変換 + cvtsd2ss で narrowing
+            let src_op = val_to_operand(src, static_vars, stack_vars)?;
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+
+            let large_label = format!(".Lul2f_large{}", const_counter);
+            let end_label = format!(".Lul2f_end{}", const_counter);
+            #[allow(unused_assignments)]
+            {
+                const_counter += 1;
+            }
+
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: src_op,
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Cmp {
+                asm_type: AsmType::Quadword,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::JmpCC(CondCode::L, large_label.clone()));
+            instrs.push(Instruction::Cvtsi2sd {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Register(Reg::XMM0),
+            });
+            instrs.push(Instruction::Jmp(end_label.clone()));
+            instrs.push(Instruction::Label(large_label));
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Imm(0),
+                dst: Operand::Register(Reg::DX),
+            });
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Quadword,
+                src: Operand::Imm(2),
+                dst: Operand::Register(Reg::R8),
+            });
+            instrs.push(Instruction::Div {
+                asm_type: AsmType::Quadword,
+                operand: Operand::Register(Reg::R8),
+            });
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Quadword,
+                op: AsmBinaryOp::Add,
+                src: Operand::Register(Reg::DX),
+                dst: Operand::Register(Reg::AX),
+            });
+            instrs.push(Instruction::Cvtsi2sd {
+                asm_type: AsmType::Quadword,
+                src: Operand::Register(Reg::AX),
+                dst: Operand::Register(Reg::XMM0),
+            });
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Double,
+                op: AsmBinaryOp::Add,
+                src: Operand::Register(Reg::XMM0),
+                dst: Operand::Register(Reg::XMM0),
+            });
+            instrs.push(Instruction::Label(end_label));
+            // double → float に narrowing してから store
+            instrs.push(Instruction::Cvtsd2ss {
+                src: Operand::Register(Reg::XMM0),
+                dst: Operand::Register(Reg::XMM0),
+            });
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Float,
+                src: Operand::Register(Reg::XMM0),
+                dst: dst_op,
+            });
+        }
+
+        TackyInstruction::FloatToUInt { src, dst } => {
+            // float → unsigned long: float を double に拡張してから double→unsigned パスを使用
+            let src_op = load_double_val(
+                src,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                &mut const_counter,
+            );
+            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
+
+            let out_of_range_label = format!(".Lf2ul_oor{}", const_counter);
+            let end_label = format!(".Lf2ul_end{}", const_counter);
+            const_counter += 1;
+
+            let bound_label = get_or_add_double_constant(
+                9223372036854775808.0f64.to_bits(),
+                8,
+                false,
+                double_constants,
+                &mut const_counter,
+            );
+
+            // float → double 拡張
+            instrs.push(Instruction::Cvtss2sd {
+                src: src_op,
+                dst: Operand::Register(Reg::XMM0),
+            });
+            // 以降は double → unsigned long と同じロジック
             instrs.push(Instruction::Cmp {
                 asm_type: AsmType::Double,
                 src: Operand::Data(bound_label.clone()),
@@ -1127,9 +1491,10 @@ fn generate_instruction(
                 dst: Operand::Register(Reg::AX),
             });
 
-            if dst_type.is_double() {
+            if dst_type.is_floating() {
+                let fp_asm = if dst_type.is_float() { AsmType::Float } else { AsmType::Double };
                 instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
+                    asm_type: fp_asm,
                     src: Operand::Memory(Reg::AX),
                     dst: dst_op,
                 });
@@ -1152,7 +1517,7 @@ fn generate_instruction(
                 dst: Operand::Register(Reg::CX),
             });
 
-            if src_type.is_double() {
+            if src_type.is_floating() {
                 let src_op = load_double_val(
                     src,
                     static_vars,
@@ -1161,13 +1526,14 @@ fn generate_instruction(
                     double_constants,
                     &mut const_counter,
                 );
+                let fp_asm = if src_type.is_float() { AsmType::Float } else { AsmType::Double };
                 instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
+                    asm_type: fp_asm,
                     src: src_op,
                     dst: Operand::Register(Reg::XMM0),
                 });
                 instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
+                    asm_type: fp_asm,
                     src: Operand::Register(Reg::XMM0),
                     dst: Operand::Memory(Reg::CX),
                 });
@@ -1232,7 +1598,7 @@ fn generate_instruction(
                 dst: Operand::Register(Reg::CX),
             });
 
-            if src_type.is_double() {
+            if src_type.is_floating() {
                 let src_op = load_double_val(
                     src,
                     static_vars,
@@ -1241,13 +1607,14 @@ fn generate_instruction(
                     double_constants,
                     &mut const_counter,
                 );
+                let fp_asm = if src_type.is_float() { AsmType::Float } else { AsmType::Double };
                 instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
+                    asm_type: fp_asm,
                     src: src_op,
                     dst: Operand::Register(Reg::XMM0),
                 });
                 instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
+                    asm_type: fp_asm,
                     src: Operand::Register(Reg::XMM0),
                     dst: Operand::MemoryOffset(Reg::CX, *offset as i32),
                 });
@@ -1277,9 +1644,10 @@ fn generate_instruction(
                 dst: Operand::Register(Reg::AX),
             });
 
-            if dst_type.is_double() {
+            if dst_type.is_floating() {
+                let fp_asm = if dst_type.is_float() { AsmType::Float } else { AsmType::Double };
                 instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
+                    asm_type: fp_asm,
                     src: Operand::MemoryOffset(Reg::AX, *offset as i32),
                     dst: dst_op,
                 });
@@ -1432,134 +1800,8 @@ fn generate_instruction(
             });
         }
 
-        TackyInstruction::VaArg { ap, dst, arg_type } => {
-            let ap_name = match ap {
-                TackyVal::Var(n) => n.as_str(),
-                _ => unreachable!(),
-            };
-            let ap_offset = *stack_vars.get(ap_name).expect("va_list must be on stack");
-            let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
-
-            let is_fp = arg_type.is_double();
-            let (offset_field, limit, step): (i32, i64, i64) = if is_fp {
-                (4, 176, 16) // fp_offset field
-            } else {
-                (0, 48, 8) // gp_offset field
-            };
-
-            let reg_label = format!(".Lva_reg_{}", *va_label_counter);
-            let end_label = format!(".Lva_end_{}", *va_label_counter);
-            *va_label_counter += 1;
-
-            let asm_type = safe_asm_type(arg_type);
-
-            // Load current offset
-            instrs.push(Instruction::Mov {
-                asm_type: AsmType::Longword,
-                src: Operand::Stack(ap_offset + offset_field),
-                dst: Operand::Register(Reg::R10),
-            });
-            // Compare with limit
-            instrs.push(Instruction::Cmp {
-                asm_type: AsmType::Longword,
-                src: Operand::Imm(limit),
-                dst: Operand::Register(Reg::R10),
-            });
-            instrs.push(Instruction::JmpCC(CondCode::L, reg_label.clone()));
-
-            // === overflow path ===
-            // Load overflow_arg_area
-            instrs.push(Instruction::Mov {
-                asm_type: AsmType::Quadword,
-                src: Operand::Stack(ap_offset + 8),
-                dst: Operand::Register(Reg::R10),
-            });
-            // Load value from overflow area
-            if is_fp {
-                instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
-                    src: Operand::Memory(Reg::R10),
-                    dst: Operand::Register(Reg::XMM15),
-                });
-                instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
-                    src: Operand::Register(Reg::XMM15),
-                    dst: dst_op.clone(),
-                });
-            } else {
-                instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Quadword,
-                    src: Operand::Memory(Reg::R10),
-                    dst: Operand::Register(Reg::R11),
-                });
-                instrs.push(Instruction::Mov {
-                    asm_type,
-                    src: Operand::Register(Reg::R11),
-                    dst: dst_op.clone(),
-                });
-            }
-            // Advance overflow_arg_area by 8
-            instrs.push(Instruction::Binary {
-                asm_type: AsmType::Quadword,
-                op: AsmBinaryOp::Add,
-                src: Operand::Imm(8),
-                dst: Operand::Stack(ap_offset + 8),
-            });
-            instrs.push(Instruction::Jmp(end_label.clone()));
-
-            // === register path ===
-            instrs.push(Instruction::Label(reg_label));
-            // Load reg_save_area base address
-            instrs.push(Instruction::Mov {
-                asm_type: AsmType::Quadword,
-                src: Operand::Stack(ap_offset + 16),
-                dst: Operand::Register(Reg::R11),
-            });
-            // R10 still has the offset (sign-extended from 32-bit to 64-bit)
-            instrs.push(Instruction::Movsx {
-                src: Operand::Register(Reg::R10),
-                dst: Operand::Register(Reg::R10),
-            });
-            // R11 = reg_save_area + offset
-            instrs.push(Instruction::Binary {
-                asm_type: AsmType::Quadword,
-                op: AsmBinaryOp::Add,
-                src: Operand::Register(Reg::R10),
-                dst: Operand::Register(Reg::R11),
-            });
-            // Load value
-            if is_fp {
-                instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
-                    src: Operand::Memory(Reg::R11),
-                    dst: Operand::Register(Reg::XMM15),
-                });
-                instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
-                    src: Operand::Register(Reg::XMM15),
-                    dst: dst_op,
-                });
-            } else {
-                instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Quadword,
-                    src: Operand::Memory(Reg::R11),
-                    dst: Operand::Register(Reg::R11),
-                });
-                instrs.push(Instruction::Mov {
-                    asm_type,
-                    src: Operand::Register(Reg::R11),
-                    dst: dst_op,
-                });
-            }
-            // Advance the offset field
-            instrs.push(Instruction::Binary {
-                asm_type: AsmType::Longword,
-                op: AsmBinaryOp::Add,
-                src: Operand::Imm(step),
-                dst: Operand::Stack(ap_offset + offset_field),
-            });
-
-            instrs.push(Instruction::Label(end_label));
+        TackyInstruction::VaArg { .. } => {
+            unreachable!("VaArg should be lowered at TACKY level in tacky_gen.rs")
         }
 
         TackyInstruction::VaEnd => {
@@ -1573,10 +1815,11 @@ fn generate_instruction(
 fn get_or_add_double_constant(
     bits: u64,
     alignment: usize,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    is_float: bool,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
     const_counter: &mut usize,
 ) -> String {
-    if let Some((label, existing_align)) = double_constants.get_mut(&bits) {
+    if let Some((label, existing_align, _)) = double_constants.get_mut(&bits) {
         if alignment > *existing_align {
             *existing_align = alignment;
         }
@@ -1584,7 +1827,7 @@ fn get_or_add_double_constant(
     } else {
         let label = format!(".Lconst_{}", *const_counter);
         *const_counter += 1;
-        double_constants.insert(bits, (label.clone(), alignment));
+        double_constants.insert(bits, (label.clone(), alignment, is_float));
         label
     }
 }
@@ -1598,7 +1841,7 @@ fn generate_binary_instruction(
     static_vars: &HashMap<String, String>,
     stack_vars: &HashMap<String, i32>,
     instrs: &mut Vec<Instruction>,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
     const_counter: &mut usize,
     var_types: &HashMap<String, Type>,
 ) -> Result<()> {
@@ -1634,7 +1877,6 @@ fn generate_binary_instruction(
                 TackyBinaryOp::DivDouble => AsmBinaryOp::DivDouble,
                 _ => unreachable!(),
             };
-            // Chapter 20: Mov left→dst; Binary right,dst
             instrs.push(Instruction::Mov {
                 asm_type: AsmType::Double,
                 src: left_op,
@@ -1648,16 +1890,61 @@ fn generate_binary_instruction(
             });
         }
 
+        TackyBinaryOp::AddFloat
+        | TackyBinaryOp::SubFloat
+        | TackyBinaryOp::MulFloat
+        | TackyBinaryOp::DivFloat => {
+            let left_op = load_double_val(
+                left,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                const_counter,
+            );
+            let right_op = load_double_val(
+                right,
+                static_vars,
+                stack_vars,
+                instrs,
+                double_constants,
+                const_counter,
+            );
+            let asm_op = match op {
+                TackyBinaryOp::AddFloat => AsmBinaryOp::Add,
+                TackyBinaryOp::SubFloat => AsmBinaryOp::Sub,
+                TackyBinaryOp::MulFloat => AsmBinaryOp::Mult,
+                TackyBinaryOp::DivFloat => AsmBinaryOp::DivDouble,
+                _ => unreachable!(),
+            };
+            instrs.push(Instruction::Mov {
+                asm_type: AsmType::Float,
+                src: left_op,
+                dst: dst_op.clone(),
+            });
+            instrs.push(Instruction::Binary {
+                asm_type: AsmType::Float,
+                op: asm_op,
+                src: right_op,
+                dst: dst_op,
+            });
+        }
+
         TackyBinaryOp::Equal
         | TackyBinaryOp::NotEqual
         | TackyBinaryOp::LessThan
         | TackyBinaryOp::LessOrEqual
         | TackyBinaryOp::GreaterThan
         | TackyBinaryOp::GreaterOrEqual => {
-            let is_double = left_type.is_double();
+            let is_fp = left_type.is_floating();
             let is_unsigned = left_type.is_unsigned() || left_type.is_pointer();
 
-            if is_double {
+            if is_fp {
+                let fp_asm_type = if left_type.is_float() {
+                    AsmType::Float
+                } else {
+                    AsmType::Double
+                };
                 let left_op = load_double_val(
                     left,
                     static_vars,
@@ -1674,19 +1961,27 @@ fn generate_binary_instruction(
                     double_constants,
                     const_counter,
                 );
-                // comisd needs register operands for both, keep using XMM regs
+                // NaN 対応: < と <= ではオペランドを入れ替えて A/AE を使う
+                // comiss/comisd の unordered (NaN) は CF=1,ZF=1,PF=1
+                // A (CF=0,ZF=0) と AE (CF=0) は NaN で false → C セマンティクスに一致
+                let swap = matches!(op, TackyBinaryOp::LessThan | TackyBinaryOp::LessOrEqual);
+                let (cmp_left, cmp_right) = if swap {
+                    (right_op, left_op)
+                } else {
+                    (left_op, right_op)
+                };
                 instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
-                    src: left_op,
+                    asm_type: fp_asm_type,
+                    src: cmp_left,
                     dst: Operand::Register(Reg::XMM14),
                 });
                 instrs.push(Instruction::Mov {
-                    asm_type: AsmType::Double,
-                    src: right_op,
+                    asm_type: fp_asm_type,
+                    src: cmp_right,
                     dst: Operand::Register(Reg::XMM0),
                 });
                 instrs.push(Instruction::Cmp {
-                    asm_type: AsmType::Double,
+                    asm_type: fp_asm_type,
                     src: Operand::Register(Reg::XMM0),
                     dst: Operand::Register(Reg::XMM14),
                 });
@@ -1708,7 +2003,18 @@ fn generate_binary_instruction(
                 dst: dst_op.clone(),
             });
 
-            let cc = if is_double || is_unsigned {
+            let cc = if is_fp {
+                // FP: < と <= はオペランド入れ替え済み → A/AE を使用
+                match op {
+                    TackyBinaryOp::LessThan => CondCode::A,     // swapped
+                    TackyBinaryOp::LessOrEqual => CondCode::AE, // swapped
+                    TackyBinaryOp::GreaterThan => CondCode::A,
+                    TackyBinaryOp::GreaterOrEqual => CondCode::AE,
+                    TackyBinaryOp::Equal => CondCode::E,
+                    TackyBinaryOp::NotEqual => CondCode::NE,
+                    _ => unreachable!(),
+                }
+            } else if is_unsigned {
                 match op {
                     TackyBinaryOp::LessThan => CondCode::B,
                     TackyBinaryOp::LessOrEqual => CondCode::BE,
@@ -1732,8 +2038,41 @@ fn generate_binary_instruction(
 
             instrs.push(Instruction::SetCC {
                 condition: cc,
-                operand: dst_op,
+                operand: dst_op.clone(),
             });
+
+            // FP の == と != は NaN (unordered) を追加チェック
+            if is_fp {
+                match op {
+                    TackyBinaryOp::Equal => {
+                        // sete dst; setnp %al; and %al, dst → NaN で false
+                        instrs.push(Instruction::SetCC {
+                            condition: CondCode::NP,
+                            operand: Operand::Register(Reg::AX),
+                        });
+                        instrs.push(Instruction::Binary {
+                            asm_type: AsmType::Byte,
+                            op: AsmBinaryOp::And,
+                            src: Operand::Register(Reg::AX),
+                            dst: dst_op,
+                        });
+                    }
+                    TackyBinaryOp::NotEqual => {
+                        // setne dst; setp %al; or %al, dst → NaN で true
+                        instrs.push(Instruction::SetCC {
+                            condition: CondCode::P,
+                            operand: Operand::Register(Reg::AX),
+                        });
+                        instrs.push(Instruction::Binary {
+                            asm_type: AsmType::Byte,
+                            op: AsmBinaryOp::Or,
+                            src: Operand::Register(Reg::AX),
+                            dst: dst_op,
+                        });
+                    }
+                    _ => {}
+                }
+            }
         }
 
         TackyBinaryOp::Add | TackyBinaryOp::Subtract | TackyBinaryOp::Multiply => {
@@ -1872,7 +2211,7 @@ fn generate_function_call(
     static_vars: &HashMap<String, String>,
     stack_vars: &HashMap<String, i32>,
     instrs: &mut Vec<Instruction>,
-    double_constants: &mut HashMap<u64, (String, usize)>,
+    double_constants: &mut HashMap<u64, (String, usize, bool)>,
     const_counter: &mut usize,
     var_types: &HashMap<String, Type>,
 ) -> Result<()> {
@@ -1903,7 +2242,7 @@ fn generate_function_call(
 
     // Push stack args in reverse order
     for &i in stack_arg_indices.iter().rev() {
-        if arg_types[i].is_double() {
+        if arg_types[i].is_floating() {
             let src = load_double_val(
                 &args[i],
                 static_vars,
@@ -1912,8 +2251,9 @@ fn generate_function_call(
                 double_constants,
                 const_counter,
             );
+            let fp_asm = if arg_types[i].is_float() { AsmType::Float } else { AsmType::Double };
             instrs.push(Instruction::Mov {
-                asm_type: AsmType::Double,
+                asm_type: fp_asm,
                 src,
                 dst: Operand::Register(Reg::XMM0),
             });
@@ -1970,14 +2310,15 @@ fn generate_function_call(
             double_constants,
             const_counter,
         );
+        let fp_asm = if arg_types[arg_idx].is_float() { AsmType::Float } else { AsmType::Double };
         instrs.push(Instruction::Mov {
-            asm_type: AsmType::Double,
+            asm_type: fp_asm,
             src,
             dst: Operand::Register(Reg::XMM0),
         });
         if reg_idx != 0 {
             instrs.push(Instruction::Mov {
-                asm_type: AsmType::Double,
+                asm_type: fp_asm,
                 src: Operand::Register(Reg::XMM0),
                 dst: Operand::Register(XMM_ARG_REGISTERS[reg_idx]),
             });
@@ -1992,8 +2333,9 @@ fn generate_function_call(
                 double_constants,
                 const_counter,
             );
+            let fp_asm = if arg_types[arg_idx].is_float() { AsmType::Float } else { AsmType::Double };
             instrs.push(Instruction::Mov {
-                asm_type: AsmType::Double,
+                asm_type: fp_asm,
                 src,
                 dst: Operand::Register(Reg::XMM0),
             });
@@ -2042,9 +2384,10 @@ fn generate_function_call(
     // Store result
     if !dst_type.is_void() {
         let dst_op = val_to_operand(dst, static_vars, stack_vars)?;
-        if dst_type.is_double() {
+        if dst_type.is_floating() {
+            let fp_asm = if dst_type.is_float() { AsmType::Float } else { AsmType::Double };
             instrs.push(Instruction::Mov {
-                asm_type: AsmType::Double,
+                asm_type: fp_asm,
                 src: Operand::Register(Reg::XMM0),
                 dst: dst_op,
             });

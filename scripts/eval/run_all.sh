@@ -118,11 +118,20 @@ bash "$SCRIPT_DIR/collect_correctness.sh" "$RESULTS_DIR" "$EXPECTED"
 echo "=== Measuring binary size ==="
 bash "$SCRIPT_DIR/measure_size.sh" "$RESULTS_DIR"
 
-echo "=== Measuring performance ==="
-bash "$SCRIPT_DIR/measure_perf.sh" "$RESULTS_DIR"
+echo "=== Measuring compilation time ==="
+bash "$SCRIPT_DIR/measure_compile_time.sh" "$RESULTS_DIR" || echo "WARNING: compile time measurement failed (non-fatal)"
+
+echo "=== Measuring runtime performance (optional) ==="
+bash "$SCRIPT_DIR/measure_perf.sh" "$RESULTS_DIR" || echo "WARNING: runtime performance measurement failed (non-fatal)"
 
 echo "=== Collecting reverse-engineering metrics ==="
 bash "$SCRIPT_DIR/collect_reverse_metrics.sh" "$RESULTS_DIR"
+
+echo "=== Decompiler evaluation (objdump) ==="
+bash "$SCRIPT_DIR/decompile_eval.sh" "$RESULTS_DIR"
+
+echo "=== Ghidra decompiler evaluation (optional) ==="
+bash "$SCRIPT_DIR/ghidra_analyze.sh" "$RESULTS_DIR"
 
 # --- Step 6: Generate plots ---
 echo "=== Generating plots ==="
@@ -137,7 +146,10 @@ echo "=== Evaluation complete ==="
 echo "Results: $RESULTS_DIR"
 echo "  meta.json"
 echo "  correctness.csv"
-echo "  size.csv"
+echo "  size.csv (total, .text, stripped)"
+echo "  compile_time.csv"
 echo "  performance.csv"
 echo "  reverse_metrics.csv"
+echo "  decompile_eval.csv"
+echo "  decompile_summary.md"
 ls "$RESULTS_DIR"/fig_*.png 2>/dev/null && echo "  (plots generated)" || echo "  (no plots)"
