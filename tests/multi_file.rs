@@ -21,7 +21,11 @@ fn fixup_asm_for_macos(asm: &str) -> String {
     let mut result = Vec::new();
     for line in asm.lines() {
         let trimmed = line.trim();
-        if trimmed.contains(".note.GNU-stack") || trimmed.contains(".ferrugo_sig") || trimmed.starts_with(".byte 0x46,0x45") || trimmed.starts_with(".byte 0x01,0x00") {
+        if trimmed.contains(".note.GNU-stack")
+            || trimmed.contains(".ferrugo_sig")
+            || trimmed.starts_with(".byte 0x46,0x45")
+            || trimmed.starts_with(".byte 0x01,0x00")
+        {
             continue;
         }
         if trimmed.starts_with(".section .rodata") {
@@ -112,7 +116,6 @@ fn compile_multi_and_run(files: &[(&str, &str)], obfuscate: bool) -> (i32, Strin
             "compilation failed (obf={obfuscate}):\n{}",
             String::from_utf8_lossy(&output.stderr),
         );
-
     }
 
     // macOS fixup for all .s files

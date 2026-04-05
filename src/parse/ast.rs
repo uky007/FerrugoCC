@@ -588,10 +588,7 @@ pub enum Expr {
     /// 複合初期化子（Chapter 18）。`{ expr, expr, ... }`
     CompoundInit(Vec<Expr>),
     /// Compound literal — `(type){ init_list }`
-    CompoundLiteral {
-        target_type: Type,
-        init: Box<Expr>,
-    },
+    CompoundLiteral { target_type: Type, init: Box<Expr> },
     /// `va_start(ap)` — va_list の初期化
     VaStart(Box<Expr>),
     /// `va_arg(ap, type)` — va_list から次の引数を取得

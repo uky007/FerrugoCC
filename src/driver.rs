@@ -237,9 +237,14 @@ pub fn run_multi(
     // 各 .c ファイルをコンパイル
     let mut asm_paths: Vec<PathBuf> = Vec::new();
     for c_file in &c_files {
-        if let Some(asm_path) =
-            compile_one(c_file, stage, &obf_config, preprocess, pp_defines, pp_undefs)?
-        {
+        if let Some(asm_path) = compile_one(
+            c_file,
+            stage,
+            &obf_config,
+            preprocess,
+            pp_defines,
+            pp_undefs,
+        )? {
             asm_paths.push(asm_path);
         }
     }

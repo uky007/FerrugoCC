@@ -1939,7 +1939,13 @@ fn outline_functions(program: &mut TackyProgram, ctx: &mut ObfCtx, min_block_siz
                             Type::Float | Type::Double | Type::Struct { .. } | Type::Array(_, _)
                         ) || inputs.iter().any(|name| {
                             let ty = func.var_types.get(name).unwrap_or(&Type::Int);
-                            matches!(ty, Type::Float | Type::Double | Type::Struct { .. } | Type::Array(_, _))
+                            matches!(
+                                ty,
+                                Type::Float
+                                    | Type::Double
+                                    | Type::Struct { .. }
+                                    | Type::Array(_, _)
+                            )
                         });
 
                         if !has_bad_type {
@@ -3363,7 +3369,11 @@ fn is_vm_eligible(func: &TackyFunction) -> bool {
     if func.body.len() < 2 {
         return false;
     }
-    if func.var_types.values().any(|t| matches!(t, Type::Float | Type::Double)) {
+    if func
+        .var_types
+        .values()
+        .any(|t| matches!(t, Type::Float | Type::Double))
+    {
         return false;
     }
     for instr in &func.body {
@@ -3663,7 +3673,13 @@ fn control_flow_flattening(
     // variadic 関数呼び出しを含む関数は CFF をスキップ
     // (CFF の dispatch ループが variadic ABI のレジスタ設定と干渉する)
     let has_variadic_call = instrs.iter().any(|i| {
-        matches!(i, TackyInstruction::FunCall { is_variadic: true, .. })
+        matches!(
+            i,
+            TackyInstruction::FunCall {
+                is_variadic: true,
+                ..
+            }
+        )
     });
     if has_variadic_call {
         return instrs;

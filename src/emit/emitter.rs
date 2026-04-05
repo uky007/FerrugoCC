@@ -82,8 +82,7 @@ pub fn emit(program: &AsmProgram) -> Result<String> {
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
     writeln!(out, "    .byte 0x46,0x45,0x52,0x52,0x55,0x47,0x4f")
         .map_err(|e| CompileError::EmitError(e.to_string()))?;
-    writeln!(out, "    .byte 0x01,0x00")
-        .map_err(|e| CompileError::EmitError(e.to_string()))?;
+    writeln!(out, "    .byte 0x01,0x00").map_err(|e| CompileError::EmitError(e.to_string()))?;
     // スタック非実行セクション（セキュリティ慣習）
     writeln!(out, "    .section .note.GNU-stack,\"\",@progbits")
         .map_err(|e| CompileError::EmitError(e.to_string()))?;

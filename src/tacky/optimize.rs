@@ -439,7 +439,9 @@ fn is_same_var(a: &TackyVal, b: &TackyVal) -> bool {
 
 fn is_double_var_val(val: &TackyVal, var_types: &HashMap<String, Type>) -> bool {
     match val {
-        TackyVal::Var(name) => matches!(var_types.get(name), Some(Type::Double) | Some(Type::Float)),
+        TackyVal::Var(name) => {
+            matches!(var_types.get(name), Some(Type::Double) | Some(Type::Float))
+        }
         _ => false,
     }
 }

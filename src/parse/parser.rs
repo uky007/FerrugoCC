@@ -407,7 +407,14 @@ impl<'a> Parser<'a> {
                     count += 1;
                 }
                 TokenKind::KwFloat => {
-                    if has_double || has_int || has_long || has_unsigned || has_signed || has_char || has_void {
+                    if has_double
+                        || has_int
+                        || has_long
+                        || has_unsigned
+                        || has_signed
+                        || has_char
+                        || has_void
+                    {
                         return Err(CompileError::ParseError(
                             "cannot combine 'float' with other type specifiers".to_string(),
                         ));
@@ -2244,9 +2251,7 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::CloseParen)?;
 
             // Compound literal: (type){ init_list }
-            if self.pos < self.tokens.len()
-                && self.peek()?.kind == TokenKind::OpenBrace
-            {
+            if self.pos < self.tokens.len() && self.peek()?.kind == TokenKind::OpenBrace {
                 let init = self.parse_compound_init()?;
                 // Infer array size from init count: (int[]){1,2,3} → Array(Int, 3)
                 let target_type = if let Type::Array(elem, 0) = &target_type {

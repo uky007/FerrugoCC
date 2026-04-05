@@ -96,7 +96,11 @@ fn fixup_asm_for_macos(asm: &str) -> String {
     }
     for line in asm.lines() {
         let trimmed = line.trim();
-        if trimmed.contains(".note.GNU-stack") || trimmed.contains(".ferrugo_sig") || trimmed.starts_with(".byte 0x46,0x45") || trimmed.starts_with(".byte 0x01,0x00") {
+        if trimmed.contains(".note.GNU-stack")
+            || trimmed.contains(".ferrugo_sig")
+            || trimmed.starts_with(".byte 0x46,0x45")
+            || trimmed.starts_with(".byte 0x01,0x00")
+        {
             continue;
         }
         if trimmed.starts_with(".section .rodata") {

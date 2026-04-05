@@ -405,8 +405,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>> {
 
             if is_float {
                 // f/F suffix → float リテラル
-                let is_float_suffix = pos < bytes.len()
-                    && (bytes[pos] == b'f' || bytes[pos] == b'F');
+                let is_float_suffix =
+                    pos < bytes.len() && (bytes[pos] == b'f' || bytes[pos] == b'F');
                 if is_float_suffix {
                     let text = &source[start..pos];
                     pos += 1;

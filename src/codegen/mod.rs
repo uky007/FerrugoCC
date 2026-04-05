@@ -588,7 +588,10 @@ fn is_safe_shuffle_point(current: &Instruction, next: Option<&Instruction>) -> b
         }
         // 条件5: 次が Call/CallIndirect なら挿入しない
         // (variadic 呼び出しの AL レジスタ設定を保護)
-        if matches!(next_instr, Instruction::Call(_) | Instruction::CallIndirect(_)) {
+        if matches!(
+            next_instr,
+            Instruction::Call(_) | Instruction::CallIndirect(_)
+        ) {
             return false;
         }
     }
